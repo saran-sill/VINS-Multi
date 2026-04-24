@@ -1,8 +1,8 @@
 /*******************************************************
  * Copyright (C) 2025, Aerial Robotics Group, Hong Kong University of Science and Technology
- * 
+ *
  * This file is part of VINS.
- * 
+ *
  * Licensed under the GNU General Public License v3.0;
  * you may not use this file except in compliance with the License.
  *******************************************************/
@@ -11,7 +11,8 @@
 #include "../utility/visualization.h"
 #include "feature_manager.h"
 
-namespace vins_multi{
+namespace vins_multi
+{
 
 #define CERES_NO_CUDA
 
@@ -52,6 +53,7 @@ void Estimator::clearState()
     frame_count_ = 0;
     solver_flag_ = INITIAL;
     initial_timestamp_ = 0;
+    latest_image_time_ = 0;
     image_frame_window_.clear();
 
     // if (tmp_pre_integration_ != nullptr)
@@ -78,14 +80,15 @@ void Estimator::setParameter()
     imu_module_ = IMU_MODULE;
 
     int feature_num_per_module = MAX_CNT / cam_module_size;
-    for(unsigned int i = 0; i < cam_module_size; i++){
+    for (unsigned int i = 0; i < cam_module_size; i++)
+    {
         img_trackers_.emplace_back(shared_ptr<imgTracker>{new imgTracker{CAM_MODULES[i], image_frame_window_.cam_wise_image_frame_ptr_[i], feature_num_per_module}});
     }
 
-    for(unsigned int i = 0; i < img_trackers_.size(); i++){
+    for (unsigned int i = 0; i < img_trackers_.size(); i++)
+    {
         img_trackers_[i]->set_f_manager_cam_info();
     }
-
 
     ProjectionTwoFrameOneCamFactor::sqrt_info = FOCAL_LENGTH / 1.5 * Matrix2d::Identity();
     ProjectionTwoFrameTwoCamFactor::sqrt_info = FOCAL_LENGTH / 1.5 * Matrix2d::Identity();
@@ -100,13 +103,16 @@ void Estimator::setParameter()
 
 #ifdef WITH_CUDA
 
-    if(USE_GPU){
+    if (USE_GPU)
+    {
         vector<std::thread> init_gpu_thread_vec;
-        for(auto img_tracker : img_trackers_){
+        for (auto img_tracker : img_trackers_)
+        {
             init_gpu_thread_vec.emplace_back(initTrackerGPU, img_tracker);
         }
 
-        for(auto& init_gpu_thread : init_gpu_thread_vec){
+        for (auto &init_gpu_thread : init_gpu_thread_vec)
+        {
             init_gpu_thread.join();
         }
     }
@@ -121,17 +127,20 @@ void Estimator::setParameter()
     mProcess_.unlock();
 }
 
-void Estimator::start_process_thread(){
-    for(unsigned int unique_id = 0; unique_id < img_trackers_.size(); unique_id++){
+void Estimator::start_process_thread()
+{
+    for (unsigned int unique_id = 0; unique_id < img_trackers_.size(); unique_id++)
+    {
         image_process_thread_vec_.emplace_back(&Estimator::processImageBuffer, this, unique_id);
     }
 }
 
 #ifdef WITH_CUDA
 
-void Estimator::initTrackerGPU(shared_ptr<imgTracker> img_tracker){
+void Estimator::initTrackerGPU(shared_ptr<imgTracker> img_tracker)
+{
     cv::Mat _img = cv::Mat::zeros(img_tracker->cam_info_.img_height_, img_tracker->cam_info_.img_width_, CV_8UC1);
-    _img.at<uchar>(img_tracker->cam_info_.img_height_/2, img_tracker->cam_info_.img_width_/2) = uchar(255);
+    _img.at<uchar>(img_tracker->cam_info_.img_height_ / 2, img_tracker->cam_info_.img_width_ / 2) = uchar(255);
     img_tracker->featureTracker_.trackImageGPU(-1.0, _img);
     img_tracker->featureTracker_.trackImageGPU(1.0, _img);
     img_tracker->featureTracker_.trackImageGPU(-1.0, _img);
@@ -139,24 +148,27 @@ void Estimator::initTrackerGPU(shared_ptr<imgTracker> img_tracker){
 
 #endif
 
-void Estimator::inputImageToBuffer(const unsigned int unique_id, double t, const cv::Mat &_img, const cv::Mat &_img1){
+void Estimator::inputImageToBuffer(const unsigned int unique_id, double t, const cv::Mat &_img, const cv::Mat &_img1)
+{
 
-    auto& img_tracker = img_trackers_[unique_id];
+    auto &img_tracker = img_trackers_[unique_id];
     img_tracker->image_buffer_mutex_.lock();
     img_tracker->image_buffer_.insertImage(t, _img, _img1);
     img_tracker->image_buffer_mutex_.unlock();
 }
 
-void Estimator::processImageBuffer(const unsigned int unique_id){
+void Estimator::processImageBuffer(const unsigned int unique_id)
+{
 
-    auto& img_tracker = img_trackers_[unique_id];
+    auto &img_tracker = img_trackers_[unique_id];
 
     const std::chrono::duration<double> max_delay_time(0.002); // in seconds
 
     std::chrono::time_point<std::chrono::system_clock> start_time;
     std::chrono::duration<double> process_buffer_time;
 
-    while(1){
+    while (1)
+    {
 
         start_time = std::chrono::system_clock::now();
 
@@ -164,7 +176,8 @@ void Estimator::processImageBuffer(const unsigned int unique_id){
         auto frame_ptr = img_tracker->image_buffer_.retrieveFrame();
         img_tracker->image_buffer_mutex_.unlock();
 
-        if(frame_ptr){
+        if (frame_ptr)
+        {
             inputImage(unique_id, frame_ptr->t_, frame_ptr->img_, frame_ptr->img1_);
 
             img_tracker->image_buffer_mutex_.lock();
@@ -181,11 +194,10 @@ void Estimator::processImageBuffer(const unsigned int unique_id){
         //     std::cout<<"process buffer "<<unique_id<<", time: "<<process_buffer_time.count() * 1000<<" ms\n";
         // }
 
-
-        if(process_buffer_time < max_delay_time){
+        if (process_buffer_time < max_delay_time)
+        {
             this_thread::sleep_for(max_delay_time - process_buffer_time);
         }
-
     }
 }
 
@@ -195,12 +207,14 @@ void Estimator::inputImage(const unsigned int unique_id, double t, const cv::Mat
     map<int, FeaturePerFrame> featurePts;
     TicToc featureTracker_Time;
 
-    if(USE_GPU){
+    if (USE_GPU)
+    {
 #ifdef WITH_CUDA
         featurePts = img_trackers_[unique_id]->featureTracker_.trackImageGPU(t, _img, _img1);
 #endif
     }
-    else{
+    else
+    {
         featurePts = img_trackers_[unique_id]->featureTracker_.trackImage(t, _img, _img1);
     }
 
@@ -210,7 +224,7 @@ void Estimator::inputImage(const unsigned int unique_id, double t, const cv::Mat
 
     if (SHOW_TRACK)
     {
-        const cv::Mat& imgTrack = img_trackers_[unique_id]->featureTracker_.getTrackImage();
+        const cv::Mat &imgTrack = img_trackers_[unique_id]->featureTracker_.getTrackImage();
         pubTrackImage(imgTrack, t, unique_id);
     }
 
@@ -218,13 +232,14 @@ void Estimator::inputImage(const unsigned int unique_id, double t, const cv::Mat
 
     // make sure no imu delay
     int wait_cnt = 0;
-    while(1)
+    while (1)
     {
-        if ((!USE_IMU  || IMUAvailable(real_img_time)))
+        if ((!USE_IMU || IMUAvailable(real_img_time)))
             break;
         else
         {
-            if(wait_cnt == 0){
+            if (wait_cnt == 0)
+            {
                 printf("wait for imu ... \n");
             }
             std::chrono::milliseconds dura(5);
@@ -235,46 +250,52 @@ void Estimator::inputImage(const unsigned int unique_id, double t, const cv::Mat
     }
 
     mBuf_.lock();
-    if(USE_IMU){
-        if(!initFirstPoseFlag_){
-            if(!IMUInitReady(real_img_time)){
+    if (USE_IMU)
+    {
+        if (!initFirstPoseFlag_)
+        {
+            if (!IMUInitReady(real_img_time))
+            {
                 mBuf_.unlock();
                 return;
             }
         }
-        else{
-            if(real_img_time <= initial_timestamp_){
+        else
+        {
+            if (real_img_time <= initial_timestamp_)
+            {
                 mBuf_.unlock();
                 return;
             }
         }
     }
 
-
-    if(!CheckKeepImageUpdatePriority(unique_id, real_img_time)){
+    if (!CheckKeepImageUpdatePriority(unique_id, real_img_time))
+    {
         mBuf_.unlock();
         return;
     }
 
     State img_state;
     img_state.type_ = State::IMAGE;
-    img_state.image_frame_ptr_.reset(new ImageFrame{t,img_trackers_[unique_id]->cam_info_.td_, unique_id,featurePts});
+    img_state.image_frame_ptr_.reset(new ImageFrame{t, img_trackers_[unique_id]->cam_info_.td_, unique_id, featurePts});
     // ROS_INFO("img_state initial point size: %d", img_state.image_frame_ptr_->points_.size());
     img_state.t_ = real_img_time;
 
-    auto img_frame_it =  image_frame_window_.insert(img_state.image_frame_ptr_);
+    auto img_frame_it = image_frame_window_.insert(img_state.image_frame_ptr_);
     deque<State>::iterator insert_it = insertState(img_state);
 
-    if(USE_IMU){
+    if (USE_IMU)
+    {
         setImageIMUData(insert_it);
 
-        if(!initFirstPoseFlag_){
+        if (!initFirstPoseFlag_)
+        {
             initFirstIMUPose(insert_it);
             initial_timestamp_ = real_img_time;
             repropagateIMU(insert_it, false);
-            //imu init finish
+            // imu init finish
         }
-
     }
     TicToc processTime;
     mProcess_.lock();
@@ -284,7 +305,6 @@ void Estimator::inputImage(const unsigned int unique_id, double t, const cv::Mat
     mBuf_.unlock();
     // printf("process time: %f\n", processTime.toc());
 }
-
 
 void Estimator::inputIMU(double t, const Vector6d &imu_data)
 {
@@ -301,7 +321,8 @@ void Estimator::inputIMU(double t, const Vector6d &imu_data)
     mBuf_.lock();
     auto insert_it = insertState(imu_state);
 
-    if(initFirstPoseFlag_){
+    if (initFirstPoseFlag_)
+    {
         lpf_idx_++;
         mPropagate_.lock();
         repropagateIMU(insert_it, true);
@@ -318,17 +339,21 @@ void Estimator::inputIMU(double t, const Vector6d &imu_data)
     mBuf_.unlock();
 }
 
-void Estimator::repropagateIMU(const deque<State>::iterator start_it, const bool low_pass){
+void Estimator::repropagateIMU(const deque<State>::iterator start_it, const bool low_pass)
+{
     auto last_it = start_it;
     last_it--;
-    for(auto it = start_it; it != state_hist_.end(); it++, last_it++){
+    for (auto it = start_it; it != state_hist_.end(); it++, last_it++)
+    {
         switch (it->type_)
         {
-        case State::IMU:{
-            if(low_pass){
-                propagateIMULowpass(*last_it, *it, min(1.0, 0.02*lpf_idx_));
+        case State::IMU: {
+            if (low_pass)
+            {
+                propagateIMULowpass(*last_it, *it, min(1.0, 0.02 * lpf_idx_));
             }
-            else{
+            else
+            {
                 propagateIMU(*last_it, *it);
             }
             break;
@@ -341,9 +366,12 @@ void Estimator::repropagateIMU(const deque<State>::iterator start_it, const bool
     }
 }
 
-void Estimator::setImageIMUData(const deque<State>::iterator img_it){
-    for(deque<State>::reverse_iterator rit(img_it); rit != state_hist_.rend(); rit++){
-        if(rit->type_ == State::IMU){
+void Estimator::setImageIMUData(const deque<State>::iterator img_it)
+{
+    for (deque<State>::reverse_iterator rit(img_it); rit != state_hist_.rend(); rit++)
+    {
+        if (rit->type_ == State::IMU)
+        {
             img_it->image_frame_ptr_->prev_acc_ = rit->imu_data_.topRows(3);
             img_it->image_frame_ptr_->prev_gyr_ = rit->imu_data_.bottomRows(3);
 
@@ -354,8 +382,10 @@ void Estimator::setImageIMUData(const deque<State>::iterator img_it){
         }
     }
 
-    for(auto it = img_it; it != state_hist_.end(); it++){
-        if(it->type_ == State::IMU){
+    for (auto it = img_it; it != state_hist_.end(); it++)
+    {
+        if (it->type_ == State::IMU)
+        {
 
             img_it->imu_data_ = it->imu_data_;
 
@@ -364,7 +394,8 @@ void Estimator::setImageIMUData(const deque<State>::iterator img_it){
     }
 }
 
-void Estimator::setImageState(const deque<State>::iterator img_it){
+void Estimator::setImageState(const deque<State>::iterator img_it)
+{
     img_it->image_frame_ptr_->R_ = img_it->Q_;
     img_it->image_frame_ptr_->T_ = img_it->P_;
     img_it->image_frame_ptr_->V_ = img_it->V_;
@@ -376,36 +407,43 @@ void Estimator::setImageState(const deque<State>::iterator img_it){
     img_it->V_lpf_ = img_it->V_;
 }
 
-void Estimator::setStateFromImage(){
-    for(auto it = state_hist_.begin(); it != state_hist_.end(); it++){
-        if(it->type_ == State::IMAGE){
+void Estimator::setStateFromImage()
+{
+    for (auto it = state_hist_.begin(); it != state_hist_.end(); it++)
+    {
+        if (it->type_ == State::IMAGE)
+        {
             it->t_ = it->image_frame_ptr_->t_ + it->image_frame_ptr_->td_;
             it->P_ = it->image_frame_ptr_->T_;
             it->Q_ = it->image_frame_ptr_->R_;
             it->V_ = it->image_frame_ptr_->V_;
             it->Ba_ = it->image_frame_ptr_->Ba_;
             it->Bg_ = it->image_frame_ptr_->Bg_;
-
         }
     }
 }
 
-deque<State>::iterator Estimator::insertState(const State& state){
-    
+deque<State>::iterator Estimator::insertState(const State &state)
+{
+
     deque<State>::iterator state_it;
 
-    if(state_hist_.size() == 0 || state.t_ >= state_hist_.back().t_){
+    if (state_hist_.size() == 0 || state.t_ >= state_hist_.back().t_)
+    {
         state_it = state_hist_.insert(state_hist_.end(), state);
-
     }
-    else if(state.t_ < state_hist_.front().t_){
+    else if (state.t_ < state_hist_.front().t_)
+    {
         state_it = state_hist_.insert(state_hist_.begin(), state);
     }
-    else{
-        //In the middle
+    else
+    {
+        // In the middle
 
-        for(auto rit = state_hist_.rbegin(); rit!= state_hist_.rend(); rit++){
-            if(state.t_ >= rit -> t_){
+        for (auto rit = state_hist_.rbegin(); rit != state_hist_.rend(); rit++)
+        {
+            if (state.t_ >= rit->t_)
+            {
 
                 state_it = state_hist_.insert(rit.base(), state);
                 break;
@@ -413,13 +451,16 @@ deque<State>::iterator Estimator::insertState(const State& state){
         }
     }
 
-    if(state.type_ == State::IMAGE){
+    if (state.type_ == State::IMAGE)
+    {
 
         state_it->image_frame_ptr_->state_idx_ = std::distance(state_hist_.begin(), state_it);
 
-        for(auto frame_it = image_frame_window_.all_image_frame_ptr_.begin(); frame_it != image_frame_window_.all_image_frame_ptr_.end(); frame_it++){
-            if(frame_it->second->t_ + frame_it->second->td_ >state.t_){
-                frame_it->second->state_idx_ ++;
+        for (auto frame_it = image_frame_window_.all_image_frame_ptr_.begin(); frame_it != image_frame_window_.all_image_frame_ptr_.end(); frame_it++)
+        {
+            if (frame_it->second->t_ + frame_it->second->td_ > state.t_)
+            {
+                frame_it->second->state_idx_++;
             }
         }
     }
@@ -427,40 +468,45 @@ deque<State>::iterator Estimator::insertState(const State& state){
     return state_it;
 }
 
-void Estimator::updateFeatureTrackerMaxCnt(){
+void Estimator::updateFeatureTrackerMaxCnt()
+{
 
-    if(solver_flag_ == NON_LINEAR){
-        for(int i = 0; i < img_trackers_.size(); i++){
+    if (solver_flag_ == NON_LINEAR)
+    {
+        for (int i = 0; i < img_trackers_.size(); i++)
+        {
 
-            if(img_trackers_[i]->last_frame_time_ < image_frame_window_.all_image_frame_ptr_.begin()->second->t_){
+            if (img_trackers_[i]->last_frame_time_ < image_frame_window_.all_image_frame_ptr_.begin()->second->t_)
+            {
                 img_trackers_[i]->featureTracker_.track_num = MIN_TRACK_NUM_PER_MODULE;
             }
-            
         }
     }
-    
 
     VectorXd track_num(img_trackers_.size());
-    for(unsigned int i = 0; i< img_trackers_.size(); i++){
+    for (unsigned int i = 0; i < img_trackers_.size(); i++)
+    {
         track_num(i) = img_trackers_[i]->featureTracker_.track_num;
         // track_num(i) = img_trackers_[i]->f_manager_.long_track_num_;
     }
 
     double track_num_sum = track_num.sum();
 
-    if(track_num_sum < 0.5)
+    if (track_num_sum < 0.5)
         return;
 
-    for(unsigned int i = 0; i< img_trackers_.size(); i++){
+    for (unsigned int i = 0; i < img_trackers_.size(); i++)
+    {
         img_trackers_[i]->featureTracker_.max_cnt = min(max(static_cast<int>(ceil(track_num(i) / track_num_sum * MAX_CNT)), MIN_TRACK_NUM_PER_MODULE), MAX_TRACK_NUM_PER_MODULE);
         ROS_DEBUG("cam %d max cnt: %d, track num: %lf", i, int(img_trackers_[i]->featureTracker_.max_cnt), track_num(i));
     }
 }
 
-bool Estimator::CheckKeepImageUpdatePriority(const int cam_unique_id, const double t){
+bool Estimator::CheckKeepImageUpdatePriority(const int cam_unique_id, const double t)
+{
 
     double this_priority = img_trackers_[cam_unique_id]->get_total_priority(t);
-    
+
     double this_time_priority = img_trackers_[cam_unique_id]->get_this_time_priority(t);
     double this_feature_priority = img_trackers_[cam_unique_id]->get_feature_priority();
     double this_total_priority = this_time_priority * this_feature_priority;
@@ -471,7 +517,8 @@ bool Estimator::CheckKeepImageUpdatePriority(const int cam_unique_id, const doub
 
     img_trackers_[cam_unique_id]->frame_time_hist_.emplace_back(t);
 
-    if(t - this_last_keep_frame_time < MIN_FRAME_INTERVAL_PER_MODULE){
+    if (t - this_last_keep_frame_time < MIN_FRAME_INTERVAL_PER_MODULE)
+    {
         ROS_DEBUG("frame too fast");
         return false;
     }
@@ -489,11 +536,13 @@ bool Estimator::CheckKeepImageUpdatePriority(const int cam_unique_id, const doub
 
     double min_last_t = t;
 
-    for(int i = 0; i < img_trackers_.size(); i++){
-        if(cam_unique_id == i)
+    for (int i = 0; i < img_trackers_.size(); i++)
+    {
+        if (cam_unique_id == i)
             continue;
 
-        if(!img_trackers_[i]->frame_time_hist_.empty()){
+        if (!img_trackers_[i]->frame_time_hist_.empty())
+        {
             min_last_t = min(min_last_t, img_trackers_[i]->frame_time_hist_.back());
         }
 
@@ -504,20 +553,22 @@ bool Estimator::CheckKeepImageUpdatePriority(const int cam_unique_id, const doub
 
         // if(feature_priority > this_feature_priority){
         // if(total_priority > this_total_priority){
-        if(time_priority > this_time_priority && feature_priority > this_feature_priority){
+        if (time_priority > this_time_priority && feature_priority > this_feature_priority)
+        {
             // ROS_INFO("cam %d low priority %lf", cam_unique_id, this_priority);
             return false;
         }
     }
 
-
-    for(int i = 0; i < img_trackers_.size(); i++){
+    for (int i = 0; i < img_trackers_.size(); i++)
+    {
 
         img_trackers_[i]->clean_frame_time_hist(min_last_t);
     }
 
     // first frame
-    if(image_frame_window_.all_image_frame_ptr_.empty()){
+    if (image_frame_window_.all_image_frame_ptr_.empty())
+    {
         img_trackers_[cam_unique_id]->reset_frame_time_priority();
         img_trackers_[cam_unique_id]->last_keep_frame_time_ = t;
         ROS_DEBUG("first frame");
@@ -527,13 +578,16 @@ bool Estimator::CheckKeepImageUpdatePriority(const int cam_unique_id, const doub
 
     // insert at back
     double last_frame_time = image_frame_window_.all_image_frame_ptr_.rbegin()->first;
-    if(t >= last_frame_time){
-        if(t - last_frame_time < MIN_FRAME_INTERVAL_FOR_OPT){
+    if (t >= last_frame_time)
+    {
+        if (t - last_frame_time < MIN_FRAME_INTERVAL_FOR_OPT)
+        {
             img_trackers_[cam_unique_id]->increase_frame_time_priority();
             ROS_DEBUG("inrease priority");
             return false;
         }
-        else{
+        else
+        {
             img_trackers_[cam_unique_id]->reset_frame_time_priority();
             img_trackers_[cam_unique_id]->last_keep_frame_time_ = t;
             ROS_DEBUG("insert at back");
@@ -543,23 +597,27 @@ bool Estimator::CheckKeepImageUpdatePriority(const int cam_unique_id, const doub
 
     // insert at front
     double first_frame_time = image_frame_window_.all_image_frame_ptr_.begin()->first;
-    if(t <= first_frame_time){
+    if (t <= first_frame_time)
+    {
         ROS_DEBUG("frame too old");
         return false;
     }
 
-
     // insert in the middle
-    for(auto rit = image_frame_window_.all_image_frame_ptr_.rbegin(); rit!= image_frame_window_.all_image_frame_ptr_ .rend(); rit++){
-        if(rit->first > t){
+    for (auto rit = image_frame_window_.all_image_frame_ptr_.rbegin(); rit != image_frame_window_.all_image_frame_ptr_.rend(); rit++)
+    {
+        if (rit->first > t)
+        {
             auto next_rit = next(rit);
-            if(rit->first - t < MIN_FRAME_INTERVAL_FOR_OPT || t - next_rit->first < MIN_FRAME_INTERVAL_FOR_OPT){
+            if (rit->first - t < MIN_FRAME_INTERVAL_FOR_OPT || t - next_rit->first < MIN_FRAME_INTERVAL_FOR_OPT)
+            {
                 img_trackers_[cam_unique_id]->increase_frame_time_priority();
                 ROS_DEBUG("inrease priority");
 
                 return false;
             }
-            else{
+            else
+            {
                 img_trackers_[cam_unique_id]->reset_frame_time_priority();
                 img_trackers_[cam_unique_id]->last_keep_frame_time_ = t;
                 ROS_DEBUG("inrease in the middle");
@@ -574,42 +632,47 @@ bool Estimator::CheckKeepImageUpdatePriority(const int cam_unique_id, const doub
     return true;
 }
 
-
 bool Estimator::IMUAvailable(double t)
-{   
-    if(!first_imu_){
+{
+    if (!first_imu_)
+    {
         return false;
     }
-    
+
     mBuf_.lock();
     double latest_imu_t = 0.0;
-    for(auto it = state_hist_.rbegin(); it!= state_hist_.rend(); it++){
-        if(it->type_ == State::IMU){
+    for (auto it = state_hist_.rbegin(); it != state_hist_.rend(); it++)
+    {
+        if (it->type_ == State::IMU)
+        {
             latest_imu_t = it->t_;
             break;
         }
     }
     bool available = latest_imu_t > t;
     // cout<<"available: "<<available<<endl;
-    //if(!available){
-        //ROS_WARN("imu t  : %lf", latest_imu_t);
-        //ROS_WARN("image t: %lf", t);
-        //cout<<"dt: "<< latest_imu_t - t<<endl;
+    // if(!available){
+    // ROS_WARN("imu t  : %lf", latest_imu_t);
+    // ROS_WARN("image t: %lf", t);
+    // cout<<"dt: "<< latest_imu_t - t<<endl;
     //}
     mBuf_.unlock();
 
     return available;
 }
 
-
-bool Estimator::IMUInitReady(double img_time){
-    for(auto it = state_hist_.begin(); it!=state_hist_.end(); it++)
+bool Estimator::IMUInitReady(double img_time)
+{
+    for (auto it = state_hist_.begin(); it != state_hist_.end(); it++)
     {
-        if(it->type_ == State::IMU){
-            if(img_time - it->t_ > 0.1){
+        if (it->type_ == State::IMU)
+        {
+            if (img_time - it->t_ > 0.1)
+            {
                 return true;
             }
-            else{
+            else
+            {
                 ROS_WARN("imu not enough");
                 return false;
             }
@@ -626,11 +689,12 @@ void Estimator::initFirstIMUPose(const deque<State>::iterator img_it)
 
     int imu_cnt = 0;
 
-    for(auto it = state_hist_.begin(); it!=img_it; it++)
+    for (auto it = state_hist_.begin(); it != img_it; it++)
     {
-        if(it->type_ == State::IMU){
+        if (it->type_ == State::IMU)
+        {
             averAcc = averAcc + it->imu_data_.topRows(3);
-            imu_cnt ++;
+            imu_cnt++;
         }
     }
 
@@ -655,10 +719,10 @@ void Estimator::initFirstIMUPose(const deque<State>::iterator img_it)
 
     img_it->image_frame_ptr_->pre_integration_.reset(new IntegrationBase{averAcc, img_it->imu_data_.bottomRows(3), Vector3d::Zero(), Vector3d::Zero(), imu_module_});
 
-    cout << "init R0 " << endl << R0 << endl;
+    cout << "init R0 " << endl
+         << R0 << endl;
 
     initFirstPoseFlag_ = true;
-
 }
 
 void Estimator::initFirstPose(Eigen::Vector3d p, Eigen::Matrix3d r)
@@ -667,26 +731,31 @@ void Estimator::initFirstPose(Eigen::Vector3d p, Eigen::Matrix3d r)
     initR_ = r;
 }
 
-
-void Estimator::constructPreintegration(const deque<State>::iterator insert_state_it, const map<double, shared_ptr<ImageFrame>>::iterator insert_frame_it){
-    if(insert_frame_it == image_frame_window_.all_image_frame_ptr_.end()){
+void Estimator::constructPreintegration(const deque<State>::iterator insert_state_it, const map<double, shared_ptr<ImageFrame>>::iterator insert_frame_it)
+{
+    if (insert_frame_it == image_frame_window_.all_image_frame_ptr_.end())
+    {
         // repeat t or try to insert to the front when not empty, no insertion
         return;
     }
 
-    if(insert_frame_it == image_frame_window_.all_image_frame_ptr_.begin()){
+    if (insert_frame_it == image_frame_window_.all_image_frame_ptr_.begin())
+    {
         // insert to the front, no preintegration before
         // should not happen after init
         return;
     }
-    else{
+    else
+    {
 
         // add preintegration from the last frame to the current frame
 
         auto last_frame_state_it = insert_state_it;
         // ROS_INFO("insert state time: %lf", last_frame_state_it->t_);
-        for(deque<State>::reverse_iterator rit(insert_state_it); rit != state_hist_.rend(); ++rit){
-            if(rit->type_ == State::IMAGE){
+        for (deque<State>::reverse_iterator rit(insert_state_it); rit != state_hist_.rend(); ++rit)
+        {
+            if (rit->type_ == State::IMAGE)
+            {
                 last_frame_state_it = next(rit).base();
                 break;
             }
@@ -694,14 +763,15 @@ void Estimator::constructPreintegration(const deque<State>::iterator insert_stat
 
         insert_frame_it->second->pre_integration_.reset(new IntegrationBase{last_frame_state_it->image_frame_ptr_->prev_acc_, last_frame_state_it->image_frame_ptr_->prev_gyr_, last_frame_state_it->Ba_, last_frame_state_it->Bg_, imu_module_});
 
-        for(auto it = next(last_frame_state_it); it != next(insert_state_it); ++it){
-            double dt = it->t_ - (it-1)->t_;
+        for (auto it = next(last_frame_state_it); it != next(insert_state_it); ++it)
+        {
+            double dt = it->t_ - (it - 1)->t_;
             insert_frame_it->second->pre_integration_->push_back(dt, it->imu_data_.topRows(3), it->imu_data_.bottomRows(3));
             // ROS_WARN("push back integration at time: %lf", it->t_);
         }
 
         // propagate to current frame
-        propagateIMU(*(insert_state_it-1), *insert_state_it);
+        propagateIMU(*(insert_state_it - 1), *insert_state_it);
         setImageState(insert_state_it);
 
         // find first imu after frame
@@ -712,18 +782,21 @@ void Estimator::constructPreintegration(const deque<State>::iterator insert_stat
         //     }
         // }
 
-
         // change preintegration from the current frame to the next frame
-        if(next(insert_frame_it) == image_frame_window_.all_image_frame_ptr_.end()){
+        if (next(insert_frame_it) == image_frame_window_.all_image_frame_ptr_.end())
+        {
             // insert at last, no need to change preintegration after
         }
-        else{
+        else
+        {
             shared_ptr<IntegrationBase> next_frame_integration(new IntegrationBase{insert_state_it->image_frame_ptr_->prev_acc_, insert_state_it->image_frame_ptr_->prev_gyr_, insert_state_it->Ba_, insert_state_it->Bg_, imu_module_});
-            for(auto it = insert_state_it + 1; it != state_hist_.end(); it++){
-                double dt = it->t_ - (it-1)->t_;
+            for (auto it = insert_state_it + 1; it != state_hist_.end(); it++)
+            {
+                double dt = it->t_ - (it - 1)->t_;
                 next_frame_integration->push_back(dt, it->imu_data_.topRows(3), it->imu_data_.bottomRows(3));
                 // ROS_ERROR("push back integration at time: %lf", it->t_);
-                if(it->type_ == State::IMAGE){
+                if (it->type_ == State::IMAGE)
+                {
                     // find first imu after frame
                     // for(auto it_find_imu = it; it_find_imu != state_hist_.end(); it_find_imu++){
                     //     if(it_find_imu->type_ == State::IMU){
@@ -738,58 +811,62 @@ void Estimator::constructPreintegration(const deque<State>::iterator insert_stat
             }
         }
     }
-
 }
 
-void Estimator::reconstructPreintegration(){
+void Estimator::reconstructPreintegration()
+{
 
     bool first_img = true;
     shared_ptr<IntegrationBase> next_frame_integration;
-    for(auto state_it = state_hist_.begin(); state_it != state_hist_.end(); state_it++){
-        Vector6d& imu_data = state_it->imu_data_;
+    for (auto state_it = state_hist_.begin(); state_it != state_hist_.end(); state_it++)
+    {
+        Vector6d &imu_data = state_it->imu_data_;
 
-        if(state_it->type_ == State::IMU){
+        if (state_it->type_ == State::IMU)
+        {
 
-            if(!first_img){
-                next_frame_integration->push_back(state_it->t_ - (state_it-1)->t_, imu_data.topRows(3), imu_data.bottomRows(3));
-                propagateIMU(*(state_it-1), *state_it);
+            if (!first_img)
+            {
+                next_frame_integration->push_back(state_it->t_ - (state_it - 1)->t_, imu_data.topRows(3), imu_data.bottomRows(3));
+                propagateIMU(*(state_it - 1), *state_it);
             }
         }
 
-        if(state_it->type_ == State::IMAGE){
+        if (state_it->type_ == State::IMAGE)
+        {
 
-            if(!first_img){
+            if (!first_img)
+            {
 
-                next_frame_integration->push_back(state_it->t_ - (state_it-1)->t_, imu_data.topRows(3), imu_data.bottomRows(3));
+                next_frame_integration->push_back(state_it->t_ - (state_it - 1)->t_, imu_data.topRows(3), imu_data.bottomRows(3));
                 state_it->image_frame_ptr_->pre_integration_ = next_frame_integration;
-
             }
 
             next_frame_integration.reset(new IntegrationBase{state_it->image_frame_ptr_->prev_acc_, state_it->image_frame_ptr_->prev_gyr_, state_it->Ba_, state_it->Bg_, imu_module_});
-
 
             first_img = false;
         }
     }
 }
 
-void Estimator::addPreintegrationToNextFrame(unsigned int remove_frame_state_idx){
+void Estimator::addPreintegrationToNextFrame(unsigned int remove_frame_state_idx)
+{
 
-    if(remove_frame_state_idx == 0)
+    if (remove_frame_state_idx == 0)
         return;
 
     auto start_state_it = state_hist_.begin() + remove_frame_state_idx;
-    auto& next_frame_integration = start_state_it->image_frame_ptr_->pre_integration_;
-    for(auto it = next(start_state_it); it != state_hist_.end(); it++){
-        double dt = it->t_ - (it-1)->t_;
+    auto &next_frame_integration = start_state_it->image_frame_ptr_->pre_integration_;
+    for (auto it = next(start_state_it); it != state_hist_.end(); it++)
+    {
+        double dt = it->t_ - (it - 1)->t_;
         next_frame_integration->push_back(dt, it->imu_data_.topRows(3), it->imu_data_.bottomRows(3));
-        if(it->type_ == State::IMAGE){
+        if (it->type_ == State::IMAGE)
+        {
             it->image_frame_ptr_->pre_integration_ = next_frame_integration;
             break;
         }
-
     }
-
 }
 
 void Estimator::processImage(const deque<State>::iterator img_state_it, const map<double, shared_ptr<ImageFrame>>::iterator img_frame_it)
@@ -798,31 +875,30 @@ void Estimator::processImage(const deque<State>::iterator img_state_it, const ma
     ROS_DEBUG("Adding feature points %lu", img_state_it->image_frame_ptr_->points_.size());
 
     int cam_unique_id = img_state_it->image_frame_ptr_->cam_module_unique_id_;
-     FeatureTracker* featureTracker_ptr = &img_trackers_[cam_unique_id]->featureTracker_;
-    FeatureManager* f_manager_ptr = &img_trackers_[cam_unique_id]->f_manager_;
+    FeatureTracker *featureTracker_ptr = &img_trackers_[cam_unique_id]->featureTracker_;
+    FeatureManager *f_manager_ptr = &img_trackers_[cam_unique_id]->f_manager_;
 
     TicToc t_add_feature;
-    if ( f_manager_ptr->addFeatureCheckParallax(img_state_it->image_frame_ptr_->points_, img_trackers_[cam_unique_id]->cam_info_.td_))
+    if (f_manager_ptr->addFeatureCheckParallax(img_state_it->image_frame_ptr_->points_, img_trackers_[cam_unique_id]->cam_info_.td_))
     {
         marginalization_flag_ = MARGIN_OLD;
         img_state_it->image_frame_ptr_->is_key_frame_ = true;
-        //printf("keyframe\n");
+        // printf("keyframe\n");
     }
     else
     {
         marginalization_flag_ = MARGIN_SECOND_NEW;
         img_state_it->image_frame_ptr_->is_key_frame_ = false;
-        //printf("non-keyframe\n");
+        // printf("non-keyframe\n");
     }
     ROS_DEBUG("addFeatureCheckParallax costs: %fms", t_add_feature.toc());
-
 
     ROS_DEBUG("%s", marginalization_flag_ ? "Non-keyframe" : "Keyframe");
     ROS_DEBUG("Solving %d", frame_count_);
     ROS_DEBUG("cam %d, number of feature: %d", cam_unique_id, f_manager_ptr->getFeatureCount());
 
-    if(img_frame_it != image_frame_window_.all_image_frame_ptr_.begin())
-        propagateIMU(*(img_state_it-1), *img_state_it);
+    if (img_frame_it != image_frame_window_.all_image_frame_ptr_.begin())
+        propagateIMU(*(img_state_it - 1), *img_state_it);
     setImageState(img_state_it);
     constructPreintegration(img_state_it, img_frame_it);
 
@@ -876,14 +952,14 @@ void Estimator::processImage(const deque<State>::iterator img_state_it, const ma
         // }
 
         // stereo + IMU initilization
-        if(img_trackers_[cam_unique_id]->cam_info_.stereo_ && USE_IMU)
+        if (img_trackers_[cam_unique_id]->cam_info_.stereo_ && USE_IMU)
         {
             f_manager_ptr->initFramePoseByPnP(image_frame_window_.cam_wise_image_frame_ptr_[cam_unique_id], img_trackers_[cam_unique_id]->cam_info_.tic_[0], img_trackers_[cam_unique_id]->cam_info_.ric_[0]);
             f_manager_ptr->triangulate(image_frame_window_.cam_wise_image_frame_ptr_[cam_unique_id],
-                                        img_trackers_[cam_unique_id]->cam_info_.tic_[0],
-                                        img_trackers_[cam_unique_id]->cam_info_.ric_[0],
-                                        img_trackers_[cam_unique_id]->cam_info_.tic_[1],
-                                        img_trackers_[cam_unique_id]->cam_info_.ric_[1]);
+                                       img_trackers_[cam_unique_id]->cam_info_.tic_[0],
+                                       img_trackers_[cam_unique_id]->cam_info_.ric_[0],
+                                       img_trackers_[cam_unique_id]->cam_info_.tic_[1],
+                                       img_trackers_[cam_unique_id]->cam_info_.ric_[1]);
             if (frame_count_ == WINDOW_SIZE - 1)
             {
                 // map<double, ImageFrame>::iterator frame_it;
@@ -901,17 +977,19 @@ void Estimator::processImage(const deque<State>::iterator img_state_it, const ma
                 reconstructPreintegration();
                 solveGyroscopeBias(image_frame_window_.all_image_frame_ptr_);
 
-                Vector3d& last_Bg = state_hist_.front().Bg_;
+                Vector3d &last_Bg = state_hist_.front().Bg_;
 
                 Vector3d zero_vec = Vector3d::Zero();
-                for (auto& state : state_hist_)
+                for (auto &state : state_hist_)
                 {
-                    if(state.type_ == State::IMAGE){
+                    if (state.type_ == State::IMAGE)
+                    {
                         state.image_frame_ptr_->pre_integration_->repropagate(zero_vec, state.image_frame_ptr_->Bg_);
                         state.Bg_ = state.image_frame_ptr_->Bg_;
                         last_Bg = state.Bg_;
                     }
-                    else{
+                    else
+                    {
                         state.Bg_ = last_Bg;
                     }
                 }
@@ -940,8 +1018,9 @@ void Estimator::processImage(const deque<State>::iterator img_state_it, const ma
                 updateLatestStates(cam_unique_id);
                 solver_flag_ = NON_LINEAR;
                 ROS_INFO("Initialization by stereo finish!");
-                std::cout<<"tic1: "<<img_trackers_[cam_unique_id]->cam_info_.tic_[1].transpose()<<std::endl;
-                std::cout<<"ric1: \n"<<img_trackers_[cam_unique_id]->cam_info_.ric_[1].toRotationMatrix()<<std::endl;
+                std::cout << "tic1: " << img_trackers_[cam_unique_id]->cam_info_.tic_[1].transpose() << std::endl;
+                std::cout << "ric1: \n"
+                          << img_trackers_[cam_unique_id]->cam_info_.ric_[1].toRotationMatrix() << std::endl;
             }
         }
 
@@ -962,16 +1041,44 @@ void Estimator::processImage(const deque<State>::iterator img_state_it, const ma
         //     }
         // }
 
-        // depth + IMU initilization
-          if(img_trackers_[cam_unique_id]->cam_info_.depth_ && USE_IMU){
+        // stereo only initialization (my reconstruction)
+        // if (img_trackers_[cam_unique_id]->cam_info_.stereo_ && !USE_IMU)
+        // {
+        //     f_manager_ptr->initFramePoseByPnP(
+        //         image_frame_window_.cam_wise_image_frame_ptr_[cam_unique_id],
+        //         img_trackers_[cam_unique_id]->cam_info_.tic_[0],
+        //         img_trackers_[cam_unique_id]->cam_info_.ric_[0]);
 
-            if(frame_count_ > 0){
-                if(f_manager_ptr->initFramePoseByICP(image_frame_window_.cam_wise_image_frame_ptr_[cam_unique_id], img_trackers_[cam_unique_id]->cam_info_.tic_[0], img_trackers_[cam_unique_id]->cam_info_.ric_[0])){
+        //     f_manager_ptr->triangulate(
+        //         image_frame_window_.cam_wise_image_frame_ptr_[cam_unique_id],
+        //         img_trackers_[cam_unique_id]->cam_info_.tic_[0],
+        //         img_trackers_[cam_unique_id]->cam_info_.ric_[0],
+        //         img_trackers_[cam_unique_id]->cam_info_.tic_[1],
+        //         img_trackers_[cam_unique_id]->cam_info_.ric_[1]);
+
+        //     if (frame_count_ == WINDOW_SIZE - 1)
+        //     {
+        //         processWindow(cam_unique_id);
+        //         updateLatestStates(cam_unique_id);
+        //         solver_flag_ = NON_LINEAR;
+        //         ROS_INFO("Initialization by stereo-only finish!");
+        //     }
+        // }
+
+        // depth + IMU initilization
+        if (img_trackers_[cam_unique_id]->cam_info_.depth_ && USE_IMU)
+        {
+
+            if (frame_count_ > 0)
+            {
+                if (f_manager_ptr->initFramePoseByICP(image_frame_window_.cam_wise_image_frame_ptr_[cam_unique_id], img_trackers_[cam_unique_id]->cam_info_.tic_[0], img_trackers_[cam_unique_id]->cam_info_.ric_[0]))
+                {
                     // if(f_manager_ptr->checkParallax(image_frame_window_.cam_wise_image_frame_ptr_[cam_unique_id])){
                     //     f_manager_ptr->triangulate(image_frame_window_.cam_wise_image_frame_ptr_[cam_unique_id], img_trackers_[cam_unique_id]->cam_info_.tic_[0], img_trackers_[cam_unique_id]->cam_info_.ric_[0]);
                     // }
                 }
-                else{
+                else
+                {
                     ROS_ERROR("init by icp failed!");
                     auto second_last_frame_ptr = *next(image_frame_window_.cam_wise_image_frame_ptr_[cam_unique_id].rbegin());
                     image_frame_window_.cam_wise_image_frame_ptr_[cam_unique_id].back()->R_ = second_last_frame_ptr->R_;
@@ -997,17 +1104,19 @@ void Estimator::processImage(const deque<State>::iterator img_state_it, const ma
                     reconstructPreintegration();
                     solveGyroscopeBias(image_frame_window_.all_image_frame_ptr_);
 
-                    Vector3d& last_Bg = state_hist_.front().Bg_;
+                    Vector3d &last_Bg = state_hist_.front().Bg_;
 
                     Vector3d zero_vec = Vector3d::Zero();
-                    for (auto& state : state_hist_)
+                    for (auto &state : state_hist_)
                     {
-                        if(state.type_ == State::IMAGE){
+                        if (state.type_ == State::IMAGE)
+                        {
                             state.image_frame_ptr_->pre_integration_->repropagate(zero_vec, state.image_frame_ptr_->Bg_);
                             state.Bg_ = state.image_frame_ptr_->Bg_;
                             last_Bg = state.Bg_;
                         }
-                        else{
+                        else
+                        {
                             state.Bg_ = last_Bg;
                         }
                     }
@@ -1040,11 +1149,10 @@ void Estimator::processImage(const deque<State>::iterator img_state_it, const ma
             }
         }
 
-        if(frame_count_ < WINDOW_SIZE)
+        if (frame_count_ < WINDOW_SIZE)
         {
             frame_count_++;
         }
-
     }
     else
     {
@@ -1055,14 +1163,16 @@ void Estimator::processImage(const deque<State>::iterator img_state_it, const ma
         // if(!USE_IMU)
         //     f_manager_ptr->initFramePoseByPnP(frame_count_, Ps, Rs, tic, ric);
         // f_manager_ptr->triangulate(frame_count_, Ps_, Rs_, tic_, ric_);
-        if(img_trackers_[cam_unique_id]->cam_info_.stereo_){
+        if (img_trackers_[cam_unique_id]->cam_info_.stereo_)
+        {
             f_manager_ptr->triangulate(image_frame_window_.cam_wise_image_frame_ptr_[cam_unique_id],
-                                        img_trackers_[cam_unique_id]->cam_info_.tic_[0],
-                                        img_trackers_[cam_unique_id]->cam_info_.ric_[0],
-                                        img_trackers_[cam_unique_id]->cam_info_.tic_[1],
-                                        img_trackers_[cam_unique_id]->cam_info_.ric_[1]);
+                                       img_trackers_[cam_unique_id]->cam_info_.tic_[0],
+                                       img_trackers_[cam_unique_id]->cam_info_.ric_[0],
+                                       img_trackers_[cam_unique_id]->cam_info_.tic_[1],
+                                       img_trackers_[cam_unique_id]->cam_info_.ric_[1]);
         }
-        else {
+        else
+        {
             f_manager_ptr->triangulate(image_frame_window_.cam_wise_image_frame_ptr_[cam_unique_id], img_trackers_[cam_unique_id]->cam_info_.tic_[0], img_trackers_[cam_unique_id]->cam_info_.ric_[0]);
         }
         processWindow(cam_unique_id);
@@ -1087,7 +1197,8 @@ void Estimator::processImage(const deque<State>::iterator img_state_it, const ma
         // prepare output of VINS
         key_poses_.clear();
 
-        for(auto frame_it : image_frame_window_.all_image_frame_ptr_){
+        for (auto frame_it : image_frame_window_.all_image_frame_ptr_)
+        {
             key_poses_.push_back(frame_it.second->T_);
         }
 
@@ -1095,11 +1206,13 @@ void Estimator::processImage(const deque<State>::iterator img_state_it, const ma
     }
 }
 
-inline bool Estimator::needMarginalization(){
+inline bool Estimator::needMarginalization()
+{
     return image_frame_window_.all_image_frame_ptr_.size() >= WINDOW_SIZE;
 }
 
-void Estimator::processWindow(const int img_cam_unique_id){
+void Estimator::processWindow(const int img_cam_unique_id)
+{
 
     TicToc tt;
 
@@ -1107,7 +1220,8 @@ void Estimator::processWindow(const int img_cam_unique_id){
     double current_time = current_frame->t_ + current_frame->td_;
     bool need_opt = current_time - last_opt_time_ > MIN_OPT_INTERVAL;
 
-    if(need_opt){
+    if (need_opt)
+    {
         // tt.tic();
         optimization();
         // printf("opt time: %lf ms\n", tt.toc());
@@ -1121,33 +1235,36 @@ void Estimator::processWindow(const int img_cam_unique_id){
     //     slideWindow(img_cam_unique_id);
     // reconstructPreintegration();
 
-
     // tt.tic();
     // constructMarginalizationInfo();
     // ROS_ERROR("marginalization info time: %lf ms", tt.toc());
 
-    if(marginalization_flag_ == MARGIN_OLD){
+    if (marginalization_flag_ == MARGIN_OLD)
+    {
         frame_to_margin_ = image_frame_window_.all_image_frame_ptr_.begin()->second;
     }
-    else if(marginalization_flag_ == MARGIN_SECOND_NEW){
-        frame_to_margin_ = image_frame_window_.cam_wise_image_frame_ptr_[img_cam_unique_id][image_frame_window_.cam_wise_image_frame_ptr_[img_cam_unique_id].size()-2];
+    else if (marginalization_flag_ == MARGIN_SECOND_NEW)
+    {
+        frame_to_margin_ = image_frame_window_.cam_wise_image_frame_ptr_[img_cam_unique_id][image_frame_window_.cam_wise_image_frame_ptr_[img_cam_unique_id].size() - 2];
     }
 
-
-    if(need_opt){
+    if (need_opt)
+    {
         tt.tic();
-        FeatureManager* f_manager_ptr = &img_trackers_[img_cam_unique_id]->f_manager_;
+        FeatureManager *f_manager_ptr = &img_trackers_[img_cam_unique_id]->f_manager_;
         f_manager_ptr->outliersRejection();
         f_manager_ptr->removeFailures();
         ROS_DEBUG("outlier time: %lf ms", tt.toc());
 
-        if(ESTIMATE_TD){
+        if (ESTIMATE_TD)
+        {
             reorderWindow();
             reconstructPreintegration();
         }
     }
 
-    if(needMarginalization()){
+    if (needMarginalization())
+    {
         // tt.tic();
         constructMarginalizationFator();
         // printf("marginalization factor time: %lf ms\n", tt.toc());
@@ -1155,20 +1272,18 @@ void Estimator::processWindow(const int img_cam_unique_id){
 
         slideWindow(frame_to_margin_);
         // printf("slide window time: %lf ms\n", tt.toc());
-
     }
-
 }
 
 void Estimator::vector2double()
 {
-    auto& frame0ptr = image_frame_window_.all_image_frame_ptr_.begin()->second; 
+    auto &frame0ptr = image_frame_window_.all_image_frame_ptr_.begin()->second;
     origin_R0 = Utility::R2ypr(frame0ptr->R_.toRotationMatrix());
     origin_P0 = frame0ptr->T_;
 
     for (int i = 0; i < img_trackers_.size(); i++)
     {
-        auto& f_manager = img_trackers_[i]->f_manager_;
+        auto &f_manager = img_trackers_[i]->f_manager_;
         f_manager.setInvDepth();
     }
 }
@@ -1176,7 +1291,7 @@ void Estimator::vector2double()
 void Estimator::double2vector()
 {
 
-    auto& frame0ptr = image_frame_window_.all_image_frame_ptr_.begin()->second; 
+    auto &frame0ptr = image_frame_window_.all_image_frame_ptr_.begin()->second;
     // Vector3d origin_R0 = Utility::R2ypr(frame0ptr->R_.toRotationMatrix());
     // Vector3d origin_P0 = frame0ptr->T_;
 
@@ -1187,30 +1302,34 @@ void Estimator::double2vector()
         failure_occur_ = false;
     }
 
-    if(USE_IMU)
+    if (USE_IMU)
     {
         auto para_pose = frame0ptr->para_Pose_;
 
         Vector3d origin_R00 = Utility::R2ypr(Quaterniond(para_pose[6],
-                                                          para_pose[3],
-                                                          para_pose[4],
-                                                          para_pose[5]).toRotationMatrix());
+                                                         para_pose[3],
+                                                         para_pose[4],
+                                                         para_pose[5])
+                                                 .toRotationMatrix());
         double y_diff = origin_R0.x() - origin_R00.x();
-        //TODO
+        // TODO
         Matrix3d rot_diff = Utility::ypr2R(Vector3d(y_diff, 0, 0));
         if (abs(abs(origin_R0.y()) - 90) < 1.0 || abs(abs(origin_R00.y()) - 90) < 1.0)
         {
             ROS_DEBUG("euler singular point!");
             rot_diff = frame0ptr->R_ * Quaterniond(para_pose[6],
-                                           para_pose[3],
-                                           para_pose[4],
-                                           para_pose[5]).toRotationMatrix().transpose();
+                                                   para_pose[3],
+                                                   para_pose[4],
+                                                   para_pose[5])
+                                           .toRotationMatrix()
+                                           .transpose();
         }
 
         Vector3d opt_P0 = frame0ptr->T_;
 
         int frame_i = 0;
-        for(auto it = image_frame_window_.all_image_frame_ptr_.begin(); it != image_frame_window_.all_image_frame_ptr_.end(); it++, frame_i++){
+        for (auto it = image_frame_window_.all_image_frame_ptr_.begin(); it != image_frame_window_.all_image_frame_ptr_.end(); it++, frame_i++)
+        {
             auto frame_ptr = it->second;
 
             // auto para_pose_i = frame_ptr->para_Pose_;
@@ -1223,23 +1342,18 @@ void Estimator::double2vector()
 
             frame_ptr->T_ = rot_diff * (frame_ptr->T_ - opt_P0) + origin_P0;
 
-
             frame_ptr->V_ = rot_diff * frame_ptr->V_;
-
         }
-
     }
 
     for (int i = 0; i < img_trackers_.size(); i++)
     {
-        auto& f_manager = img_trackers_[i]->f_manager_;
+        auto &f_manager = img_trackers_[i]->f_manager_;
         f_manager.setDepth();
     }
 
     setStateFromImage();
-
 }
-
 
 // bool Estimator::failureDetection()
 // {
@@ -1275,7 +1389,7 @@ void Estimator::double2vector()
 //     if (abs(tmp_P.z() - last_P.z()) > 1)
 //     {
 //         //ROS_INFO(" big z translation");
-//         //return true; 
+//         //return true;
 //     }
 //     Matrix3d tmp_R = Rs[WINDOW_SIZE];
 //     Matrix3d delta_R = tmp_R.transpose() * last_R;
@@ -1297,29 +1411,31 @@ void Estimator::optimization()
 
     problem_ptr_ = new ceres::Problem();
     ceres::LossFunction *loss_function;
-    //loss_function = NULL;
+    // loss_function = NULL;
     loss_function = new ceres::HuberLoss(1.0);
-    //loss_function = new ceres::CauchyLoss(1.0 / FOCAL_LENGTH);
-    //ceres::LossFunction* loss_function = new ceres::HuberLoss(1.0);
+    // loss_function = new ceres::CauchyLoss(1.0 / FOCAL_LENGTH);
+    // ceres::LossFunction* loss_function = new ceres::HuberLoss(1.0);
 
-    for(auto frame_it = image_frame_window_.all_image_frame_ptr_.begin(); frame_it != image_frame_window_.all_image_frame_ptr_.end(); frame_it++){
+    for (auto frame_it = image_frame_window_.all_image_frame_ptr_.begin(); frame_it != image_frame_window_.all_image_frame_ptr_.end(); frame_it++)
+    {
         ceres::LocalParameterization *local_parameterization = new PoseLocalParameterization();
         problem_ptr_->AddParameterBlock(frame_it->second->para_Pose_, SIZE_POSE, local_parameterization);
-        if(USE_IMU)
+        if (USE_IMU)
             problem_ptr_->AddParameterBlock(frame_it->second->para_SpeedBias_, SIZE_SPEEDBIAS);
-
     }
     // if(!USE_IMU || !last_prior_ptr_)
-    if(!USE_IMU || !last_marginalization_info_)
+    if (!USE_IMU || !last_marginalization_info_)
         problem_ptr_->SetParameterBlockConstant(image_frame_window_.all_image_frame_ptr_.begin()->second->para_Pose_);
     // else
     //     problem_ptr_->SetParameterBlockConstant(image_frame_window_.all_image_frame_ptr_.begin()->second->para_Pose_);
 
     bool v_enough = true;
-    for(auto& frame_it : image_frame_window_.all_image_frame_ptr_){
+    for (auto &frame_it : image_frame_window_.all_image_frame_ptr_)
+    {
         // auto& v = image_frame_window_.all_image_frame_ptr_.begin()->second->V_;
-        auto& v = frame_it.second->V_;
-        if(v.norm() < 0.2){
+        auto &v = frame_it.second->V_;
+        if (v.norm() < 0.2)
+        {
             v_enough = false;
             break;
         }
@@ -1329,11 +1445,12 @@ void Estimator::optimization()
     {
         ceres::LocalParameterization *local_parameterization = new PoseLocalParameterization();
 
-        auto& para_Ex_Pose = img_trackers_[cam_unique_id]->cam_info_.para_Ex_Pose_;
-        auto& para_Td = img_trackers_[cam_unique_id]->cam_info_.td_;
+        auto &para_Ex_Pose = img_trackers_[cam_unique_id]->cam_info_.para_Ex_Pose_;
+        auto &para_Td = img_trackers_[cam_unique_id]->cam_info_.td_;
 
         problem_ptr_->AddParameterBlock(para_Ex_Pose[0], SIZE_POSE, local_parameterization);
-        if(img_trackers_[cam_unique_id]->cam_info_.stereo_){
+        if (img_trackers_[cam_unique_id]->cam_info_.stereo_)
+        {
             problem_ptr_->AddParameterBlock(para_Ex_Pose[1], SIZE_POSE, local_parameterization);
         }
 
@@ -1352,7 +1469,6 @@ void Estimator::optimization()
 
         problem_ptr_->AddParameterBlock(&para_Td, 1);
 
-
         // if (!ESTIMATE_TD || !v_enough){
         //     problem_ptr_->SetParameterBlockConstant(&para_Td);
         // }
@@ -1366,7 +1482,7 @@ void Estimator::optimization()
         // construct new marginlization_factor
         MarginalizationFactor *marginalization_factor = new MarginalizationFactor(last_marginalization_info_);
         problem_ptr_->AddResidualBlock(marginalization_factor, NULL,
-                                 last_marginalization_parameter_blocks_);
+                                       last_marginalization_parameter_blocks_);
     }
 
     // prior factor
@@ -1376,29 +1492,29 @@ void Estimator::optimization()
     //     // marginalizer_->addPrior(last_prior_ptr_);
     // }
 
-
-    if(USE_IMU)
+    if (USE_IMU)
     {
-        for(auto frame_it = image_frame_window_.all_image_frame_ptr_.begin(); next(frame_it) != image_frame_window_.all_image_frame_ptr_.end(); frame_it++){
+        for (auto frame_it = image_frame_window_.all_image_frame_ptr_.begin(); next(frame_it) != image_frame_window_.all_image_frame_ptr_.end(); frame_it++)
+        {
             auto next_frame_it = next(frame_it);
             auto pre_integration = next_frame_it->second->pre_integration_;
             if (pre_integration->sum_dt > 10.0)
                 continue;
-            IMUFactor* imu_factor = new IMUFactor(pre_integration);
+            IMUFactor *imu_factor = new IMUFactor(pre_integration);
             auto frame_ptr = frame_it->second;
             auto next_frame_ptr = next_frame_it->second;
             problem_ptr_->AddResidualBlock(imu_factor, NULL, frame_ptr->para_Pose_, frame_ptr->para_SpeedBias_, next_frame_ptr->para_Pose_, next_frame_ptr->para_SpeedBias_);
         }
-
     }
 
     int f_m_cnt = 0;
-    for (unsigned int cam_unique_id = 0; cam_unique_id < img_trackers_.size(); cam_unique_id++){
-        imgTracker& image_tracker = *img_trackers_[cam_unique_id];
+    for (unsigned int cam_unique_id = 0; cam_unique_id < img_trackers_.size(); cam_unique_id++)
+    {
+        imgTracker &image_tracker = *img_trackers_[cam_unique_id];
         FeatureManager &f_manager_ref = image_tracker.f_manager_;
-        camera_module_info& cam_info = image_tracker.cam_info_;
-        auto& para_Ex_Pose = img_trackers_[cam_unique_id]->cam_info_.para_Ex_Pose_;
-        auto& para_Td = img_trackers_[cam_unique_id]->cam_info_.td_;
+        camera_module_info &cam_info = image_tracker.cam_info_;
+        auto &para_Ex_Pose = img_trackers_[cam_unique_id]->cam_info_.para_Ex_Pose_;
+        auto &para_Td = img_trackers_[cam_unique_id]->cam_info_.td_;
 
         const int img_rows = img_trackers_[cam_unique_id]->cam_info_.img_height_;
         const double tr = img_trackers_[cam_unique_id]->cam_info_.tr_;
@@ -1411,16 +1527,14 @@ void Estimator::optimization()
         int stereo_2f2c_factor_cnt = 0;
         int stereo_2f1c_factor_cnt = 0;
 
-
         for (auto &it_per_id : f_manager_ref.feature_)
         {
             if (it_per_id.second.solve_flag != FeaturePerId::LONGTRACK || it_per_id.second.feature_per_frame.size() < 2)
                 continue;
 
-            auto& para_Feature = it_per_id.second.inv_depth;
+            auto &para_Feature = it_per_id.second.inv_depth;
             it_per_id.second.solve_flag = FeaturePerId::ESTIMATED;
             long_track_feature_num++;
-
 
             int imu_i = it_per_id.second.start_frame, imu_j = imu_i - 1;
 
@@ -1437,58 +1551,63 @@ void Estimator::optimization()
                 {
                     Vector3d pts_j = it_per_frame.point;
                     double depth_j = it_per_frame.depth;
-                    if( image_tracker.cam_info_.depth_ && it_per_frame.is_depth){
+                    if (image_tracker.cam_info_.depth_ && it_per_frame.is_depth)
+                    {
                         ProjectionTwoFrameOneCamDepthFactor *f_dep = new ProjectionTwoFrameOneCamDepthFactor(pts_i, pts_j, it_per_id.second.feature_per_frame.front().velocity, it_per_frame.velocity,
-                                                                    it_per_id.second.feature_per_frame.front().cur_td, it_per_frame.cur_td, depth_j, it_per_id.second.feature_per_frame.front().uv.y(), it_per_frame.uv.y(), img_rows, tr);
+                                                                                                             it_per_id.second.feature_per_frame.front().cur_td, it_per_frame.cur_td, depth_j, it_per_id.second.feature_per_frame.front().uv.y(), it_per_frame.uv.y(), img_rows, tr);
                         problem_ptr_->AddResidualBlock(f_dep, loss_function, frame_i_ptr->para_Pose_, frame_j_ptr->para_Pose_, para_Ex_Pose[0], &para_Feature, &para_Td);
                         depth_reproj_factor_cnt++;
                     }
-                    else{
+                    else
+                    {
                         ProjectionTwoFrameOneCamFactor *f_td = new ProjectionTwoFrameOneCamFactor(pts_i, pts_j, it_per_id.second.feature_per_frame.front().velocity, it_per_frame.velocity,
-                                                                    it_per_id.second.feature_per_frame.front().cur_td, it_per_frame.cur_td, it_per_id.second.feature_per_frame.front().uv.y(), it_per_frame.uv.y(), img_rows, tr);
+                                                                                                  it_per_id.second.feature_per_frame.front().cur_td, it_per_frame.cur_td, it_per_id.second.feature_per_frame.front().uv.y(), it_per_frame.uv.y(), img_rows, tr);
                         problem_ptr_->AddResidualBlock(f_td, loss_function, frame_i_ptr->para_Pose_, frame_j_ptr->para_Pose_, para_Ex_Pose[0], &para_Feature, &para_Td);
                         reproj_factor_cnt++;
                     }
-
                 }
-                else{
-                    if(image_tracker.cam_info_.depth_ && it_per_frame.is_depth){
+                else
+                {
+                    if (image_tracker.cam_info_.depth_ && it_per_frame.is_depth)
+                    {
                         depthFactor *f_dep = new depthFactor(depth_i);
                         problem_ptr_->AddResidualBlock(f_dep, loss_function, &para_Feature);
                         depth_factor_cnt++;
                     }
                 }
 
-                if(image_tracker.cam_info_.stereo_ && it_per_frame.is_stereo)
+                if (image_tracker.cam_info_.stereo_ && it_per_frame.is_stereo)
                 {
                     Vector3d pts_j_right = it_per_frame.pointRight;
-                    if(imu_i != imu_j)
+                    if (imu_i != imu_j)
                     {
                         ProjectionTwoFrameTwoCamFactor *f = new ProjectionTwoFrameTwoCamFactor(pts_i, pts_j_right, it_per_id.second.feature_per_frame.front().velocity, it_per_frame.velocityRight,
-                                                                    it_per_id.second.feature_per_frame.front().cur_td, it_per_frame.cur_td);
+                                                                                               it_per_id.second.feature_per_frame.front().cur_td, it_per_frame.cur_td);
                         problem_ptr_->AddResidualBlock(f, loss_function, frame_i_ptr->para_Pose_, frame_j_ptr->para_Pose_, para_Ex_Pose[0], para_Ex_Pose[1], &para_Feature, &para_Td);
                         stereo_2f1c_factor_cnt++;
                     }
                     else
                     {
                         ProjectionOneFrameTwoCamFactor *f = new ProjectionOneFrameTwoCamFactor(pts_i, pts_j_right, it_per_id.second.feature_per_frame.front().velocity, it_per_frame.velocityRight,
-                                                                    it_per_id.second.feature_per_frame.front().cur_td, it_per_frame.cur_td);
+                                                                                               it_per_id.second.feature_per_frame.front().cur_td, it_per_frame.cur_td);
                         problem_ptr_->AddResidualBlock(f, loss_function, para_Ex_Pose[0], para_Ex_Pose[1], &para_Feature, &para_Td);
                         stereo_2f2c_factor_cnt++;
                     }
-
                 }
                 f_m_cnt++;
             }
         }
 
-        if(!ESTIMATE_EXTRINSIC || long_track_feature_num < 10 || !v_enough){
-            for(unsigned int j = 0; j < para_Ex_Pose.size(); j++){
+        if (!ESTIMATE_EXTRINSIC || long_track_feature_num < 10 || !v_enough)
+        {
+            for (unsigned int j = 0; j < para_Ex_Pose.size(); j++)
+            {
                 problem_ptr_->SetParameterBlockConstant(para_Ex_Pose[j]);
             }
         }
 
-        if(!ESTIMATE_TD || long_track_feature_num < 10 || !v_enough){
+        if (!ESTIMATE_TD || long_track_feature_num < 10 || !v_enough)
+        {
             problem_ptr_->SetParameterBlockConstant(&para_Td);
         }
 
@@ -1503,7 +1622,7 @@ void Estimator::optimization()
     ceres::Solver::Options options;
 
     options.linear_solver_type = ceres::DENSE_SCHUR;
-    //options.num_threads = 2;
+    // options.num_threads = 2;
     options.trust_region_strategy_type = ceres::DOGLEG;
     options.max_num_iterations = NUM_ITERATIONS;
 
@@ -1511,9 +1630,9 @@ void Estimator::optimization()
     options.dense_linear_algebra_library_type = ceres::CUDA;
 #endif
 
-    //options.use_explicit_schur_complement = true;
-    // options.minimizer_progress_to_stdout = true;
-    //options.use_nonmonotonic_steps = true;
+    // options.use_explicit_schur_complement = true;
+    //  options.minimizer_progress_to_stdout = true;
+    // options.use_nonmonotonic_steps = true;
     if (marginalization_flag_ == MARGIN_OLD)
         options.max_solver_time_in_seconds = SOLVER_TIME * 4.0 / 5.0;
     else
@@ -1526,12 +1645,12 @@ void Estimator::optimization()
     double2vector();
 }
 
-
-void Estimator::constructMarginalizationFator(){
+void Estimator::constructMarginalizationFator()
+{
 
     TicToc t_whole_marginalization;
     int img_cam_unique_id = frame_to_margin_->cam_module_unique_id_;
-    ceres::LossFunction* loss_function = new ceres::HuberLoss(1.0);
+    ceres::LossFunction *loss_function = new ceres::HuberLoss(1.0);
     if (marginalization_flag_ == MARGIN_OLD)
     {
         MarginalizationInfo *marginalization_info = new MarginalizationInfo();
@@ -1554,27 +1673,27 @@ void Estimator::constructMarginalizationFator(){
             marginalization_info->addResidualBlockInfo(residual_block_info);
         }
 
-        if(USE_IMU)
+        if (USE_IMU)
         {
 
-            auto& frame0ptr = image_frame_window_.all_image_frame_ptr_.begin()->second;
-            auto& frame1ptr = next(image_frame_window_.all_image_frame_ptr_.begin())->second;
+            auto &frame0ptr = image_frame_window_.all_image_frame_ptr_.begin()->second;
+            auto &frame1ptr = next(image_frame_window_.all_image_frame_ptr_.begin())->second;
 
             if (frame1ptr->pre_integration_->sum_dt < 10.0)
             {
-                IMUFactor* imu_factor = new IMUFactor(frame1ptr->pre_integration_);
+                IMUFactor *imu_factor = new IMUFactor(frame1ptr->pre_integration_);
                 ResidualBlockInfo *residual_block_info = new ResidualBlockInfo(imu_factor, NULL,
-                                                                           vector<double *>{frame0ptr->para_Pose_, frame0ptr->para_SpeedBias_, frame1ptr->para_Pose_, frame1ptr->para_SpeedBias_},
-                                                                           vector<int>{0, 1});
+                                                                               vector<double *>{frame0ptr->para_Pose_, frame0ptr->para_SpeedBias_, frame1ptr->para_Pose_, frame1ptr->para_SpeedBias_},
+                                                                               vector<int>{0, 1});
                 marginalization_info->addResidualBlockInfo(residual_block_info);
             }
         }
 
         {
-            auto& image_tracker = *img_trackers_[img_cam_unique_id];
-            auto& f_manager = image_tracker.f_manager_;
-            auto& para_Ex_Pose = img_trackers_[img_cam_unique_id]->cam_info_.para_Ex_Pose_;
-            auto& para_Td = img_trackers_[img_cam_unique_id]->cam_info_.td_;
+            auto &image_tracker = *img_trackers_[img_cam_unique_id];
+            auto &f_manager = image_tracker.f_manager_;
+            auto &para_Ex_Pose = img_trackers_[img_cam_unique_id]->cam_info_.para_Ex_Pose_;
+            auto &para_Td = img_trackers_[img_cam_unique_id]->cam_info_.td_;
 
             const int img_rows = img_trackers_[img_cam_unique_id]->cam_info_.img_height_;
             const double tr = img_trackers_[img_cam_unique_id]->cam_info_.tr_;
@@ -1599,51 +1718,55 @@ void Estimator::constructMarginalizationFator(){
                 double depth_i = it_per_id.second.feature_per_frame.front().depth;
                 auto frame_i_ptr = image_frame_window_.cam_wise_image_frame_ptr_[img_cam_unique_id][imu_i];
 
-                auto& para_Feature = it_per_id.second.inv_depth;
+                auto &para_Feature = it_per_id.second.inv_depth;
 
                 for (auto &it_per_frame : it_per_id.second.feature_per_frame)
                 {
                     imu_j++;
                     auto frame_j_ptr = image_frame_window_.cam_wise_image_frame_ptr_[img_cam_unique_id][imu_j];
-                    if(imu_i != imu_j)
+                    if (imu_i != imu_j)
                     {
                         Vector3d pts_j = it_per_frame.point;
                         double depth_j = it_per_frame.depth;
 
-                        if(image_tracker.cam_info_.depth_ && it_per_frame.is_depth){
+                        if (image_tracker.cam_info_.depth_ && it_per_frame.is_depth)
+                        {
                             ProjectionTwoFrameOneCamDepthFactor *f_dep = new ProjectionTwoFrameOneCamDepthFactor(pts_i, pts_j, it_per_id.second.feature_per_frame.front().velocity, it_per_frame.velocity,
-                                                                 it_per_id.second.feature_per_frame.front().cur_td, it_per_frame.cur_td, depth_j, it_per_id.second.feature_per_frame.front().uv.y(), it_per_frame.uv.y(), img_rows, tr);
+                                                                                                                 it_per_id.second.feature_per_frame.front().cur_td, it_per_frame.cur_td, depth_j, it_per_id.second.feature_per_frame.front().uv.y(), it_per_frame.uv.y(), img_rows, tr);
                             ResidualBlockInfo *residual_block_info = new ResidualBlockInfo(f_dep, loss_function,
-                                                                                        vector<double *>{frame_i_ptr->para_Pose_, frame_j_ptr->para_Pose_, para_Ex_Pose[0], &para_Feature, &para_Td},
-                                                                                        vector<int>{0, 3});
+                                                                                           vector<double *>{frame_i_ptr->para_Pose_, frame_j_ptr->para_Pose_, para_Ex_Pose[0], &para_Feature, &para_Td},
+                                                                                           vector<int>{0, 3});
                             marginalization_info->addResidualBlockInfo(residual_block_info);
                         }
-                        else{
+                        else
+                        {
                             ProjectionTwoFrameOneCamFactor *f_td = new ProjectionTwoFrameOneCamFactor(pts_i, pts_j, it_per_id.second.feature_per_frame.front().velocity, it_per_frame.velocity,
-                                                                          it_per_id.second.feature_per_frame.front().cur_td, it_per_frame.cur_td, it_per_id.second.feature_per_frame.front().uv.y(), it_per_frame.uv.y(), img_rows, tr);
+                                                                                                      it_per_id.second.feature_per_frame.front().cur_td, it_per_frame.cur_td, it_per_id.second.feature_per_frame.front().uv.y(), it_per_frame.uv.y(), img_rows, tr);
                             ResidualBlockInfo *residual_block_info = new ResidualBlockInfo(f_td, loss_function,
-                                                                                        vector<double *>{frame_i_ptr->para_Pose_, frame_j_ptr->para_Pose_, para_Ex_Pose[0], &para_Feature, &para_Td},
-                                                                                        vector<int>{0, 3});
+                                                                                           vector<double *>{frame_i_ptr->para_Pose_, frame_j_ptr->para_Pose_, para_Ex_Pose[0], &para_Feature, &para_Td},
+                                                                                           vector<int>{0, 3});
                             marginalization_info->addResidualBlockInfo(residual_block_info);
                         }
                     }
-                    else{
-                        if(image_tracker.cam_info_.depth_ && it_per_frame.is_depth){
+                    else
+                    {
+                        if (image_tracker.cam_info_.depth_ && it_per_frame.is_depth)
+                        {
                             depthFactor *f_dep = new depthFactor(depth_i);
                             ResidualBlockInfo *residual_block_info = new ResidualBlockInfo(f_dep, loss_function,
-                                                                                        vector<double *>{&para_Feature},
-                                                                                        vector<int>{0});
+                                                                                           vector<double *>{&para_Feature},
+                                                                                           vector<int>{0});
                             marginalization_info->addResidualBlockInfo(residual_block_info);
                         }
                     }
 
-                    if(image_tracker.cam_info_.stereo_ && it_per_frame.is_stereo)
+                    if (image_tracker.cam_info_.stereo_ && it_per_frame.is_stereo)
                     {
                         Vector3d pts_j_right = it_per_frame.pointRight;
-                        if(imu_i != imu_j)
+                        if (imu_i != imu_j)
                         {
                             ProjectionTwoFrameTwoCamFactor *f = new ProjectionTwoFrameTwoCamFactor(pts_i, pts_j_right, it_per_id.second.feature_per_frame.front().velocity, it_per_frame.velocityRight,
-                                                                          it_per_id.second.feature_per_frame.front().cur_td, it_per_frame.cur_td);
+                                                                                                   it_per_id.second.feature_per_frame.front().cur_td, it_per_frame.cur_td);
                             ResidualBlockInfo *residual_block_info = new ResidualBlockInfo(f, loss_function,
                                                                                            vector<double *>{frame_i_ptr->para_Pose_, frame_j_ptr->para_Pose_, para_Ex_Pose[0], para_Ex_Pose[1], &para_Feature, &para_Td},
                                                                                            vector<int>{0, 4});
@@ -1652,7 +1775,7 @@ void Estimator::constructMarginalizationFator(){
                         else
                         {
                             ProjectionOneFrameTwoCamFactor *f = new ProjectionOneFrameTwoCamFactor(pts_i, pts_j_right, it_per_id.second.feature_per_frame.front().velocity, it_per_frame.velocityRight,
-                                                                          it_per_id.second.feature_per_frame.front().cur_td, it_per_frame.cur_td);
+                                                                                                   it_per_id.second.feature_per_frame.front().cur_td, it_per_frame.cur_td);
                             ResidualBlockInfo *residual_block_info = new ResidualBlockInfo(f, loss_function,
                                                                                            vector<double *>{para_Ex_Pose[0], para_Ex_Pose[1], &para_Feature, &para_Td},
                                                                                            vector<int>{2});
@@ -1672,19 +1795,20 @@ void Estimator::constructMarginalizationFator(){
         ROS_DEBUG("marginalization %f ms", t_margin.toc());
 
         std::unordered_map<long, double *> addr_shift;
-        for (auto frame_it = next(image_frame_window_.all_image_frame_ptr_.begin()); frame_it !=  image_frame_window_.all_image_frame_ptr_.end(); frame_it++)
+        for (auto frame_it = next(image_frame_window_.all_image_frame_ptr_.begin()); frame_it != image_frame_window_.all_image_frame_ptr_.end(); frame_it++)
         {
             addr_shift[reinterpret_cast<long>(frame_it->second->para_Pose_)] = frame_it->second->para_Pose_;
-            if(USE_IMU)
+            if (USE_IMU)
                 addr_shift[reinterpret_cast<long>(frame_it->second->para_SpeedBias_)] = frame_it->second->para_SpeedBias_;
         }
 
-
-        for (unsigned int i = 0; i < img_trackers_.size(); i++){
+        for (unsigned int i = 0; i < img_trackers_.size(); i++)
+        {
             addr_shift[reinterpret_cast<long>(img_trackers_[i]->cam_info_.para_Ex_Pose_[0])] = img_trackers_[i]->cam_info_.para_Ex_Pose_[0];
-            if(img_trackers_[i]->cam_info_.stereo_){
-                    addr_shift[reinterpret_cast<long>(img_trackers_[i]->cam_info_.para_Ex_Pose_[1])] = img_trackers_[i]->cam_info_.para_Ex_Pose_[1];
-                }
+            if (img_trackers_[i]->cam_info_.stereo_)
+            {
+                addr_shift[reinterpret_cast<long>(img_trackers_[i]->cam_info_.para_Ex_Pose_[1])] = img_trackers_[i]->cam_info_.para_Ex_Pose_[1];
+            }
         }
 
         for (unsigned int i = 0; i < img_trackers_.size(); i++)
@@ -1696,7 +1820,6 @@ void Estimator::constructMarginalizationFator(){
             delete last_marginalization_info_;
         last_marginalization_info_ = marginalization_info;
         last_marginalization_parameter_blocks_ = parameter_blocks;
-
     }
     else
     {
@@ -1735,22 +1858,25 @@ void Estimator::constructMarginalizationFator(){
             ROS_DEBUG("end marginalization, %f ms", t_margin.toc());
 
             std::unordered_map<long, double *> addr_shift;
-            for (auto frame_it = image_frame_window_.all_image_frame_ptr_.begin(); frame_it !=  image_frame_window_.all_image_frame_ptr_.end(); frame_it++)
+            for (auto frame_it = image_frame_window_.all_image_frame_ptr_.begin(); frame_it != image_frame_window_.all_image_frame_ptr_.end(); frame_it++)
             {
-                if (frame_it->second == frame_to_margin_){
+                if (frame_it->second == frame_to_margin_)
+                {
                     continue;
                 }
                 else
                 {
                     addr_shift[reinterpret_cast<long>(frame_it->second->para_Pose_)] = frame_it->second->para_Pose_;
-                    if(USE_IMU)
+                    if (USE_IMU)
                         addr_shift[reinterpret_cast<long>(frame_it->second->para_SpeedBias_)] = frame_it->second->para_SpeedBias_;
                 }
             }
 
-            for (unsigned int i = 0; i < img_trackers_.size(); i++){
+            for (unsigned int i = 0; i < img_trackers_.size(); i++)
+            {
                 addr_shift[reinterpret_cast<long>(img_trackers_[i]->cam_info_.para_Ex_Pose_[0])] = img_trackers_[i]->cam_info_.para_Ex_Pose_[0];
-                if(img_trackers_[i]->cam_info_.stereo_){
+                if (img_trackers_[i]->cam_info_.stereo_)
+                {
                     addr_shift[reinterpret_cast<long>(img_trackers_[i]->cam_info_.para_Ex_Pose_[1])] = img_trackers_[i]->cam_info_.para_Ex_Pose_[1];
                 }
             }
@@ -1766,24 +1892,23 @@ void Estimator::constructMarginalizationFator(){
         }
     }
     // printf("whole marginalization costs: %f \n", t_whole_marginalization.toc());
-
 }
 
+void Estimator::slideWindow(const int img_cam_unique_id)
+{
 
-void Estimator::slideWindow(const int img_cam_unique_id){
-
-    if(marginalization_flag_ == MARGIN_OLD){
+    if (marginalization_flag_ == MARGIN_OLD)
+    {
         img_trackers_[img_cam_unique_id]->f_manager_.removeFront();
         unsigned int remove_state_idx = image_frame_window_.pop_front(img_cam_unique_id);
         state_hist_.erase(state_hist_.begin() + remove_state_idx);
-
     }
-    else if(marginalization_flag_ == MARGIN_SECOND_NEW){
+    else if (marginalization_flag_ == MARGIN_SECOND_NEW)
+    {
         img_trackers_[img_cam_unique_id]->f_manager_.removeSecondBack();
         unsigned int remove_state_idx = image_frame_window_.erase_second_new(img_cam_unique_id);
         state_hist_.erase(state_hist_.begin() + remove_state_idx);
     }
-
 
     double remove_imu_min_t = image_frame_window_.all_image_frame_ptr_.begin()->first - 0.01;
 
@@ -1791,30 +1916,37 @@ void Estimator::slideWindow(const int img_cam_unique_id){
 
     int max_remove_num = image_frame_window_.all_image_frame_ptr_.begin()->second->state_idx_ - 3;
 
-    for(; state_hist_.front().t_ < remove_imu_min_t; state_hist_.pop_front(), remove_imu_cnt++){
-        if(remove_imu_cnt >= max_remove_num){
+    for (; state_hist_.front().t_ < remove_imu_min_t; state_hist_.pop_front(), remove_imu_cnt++)
+    {
+        if (remove_imu_cnt >= max_remove_num)
+        {
             break;
         }
     }
 
-    if(remove_imu_cnt > 0){
-        for(auto frame_it = image_frame_window_.all_image_frame_ptr_.begin(); frame_it != image_frame_window_.all_image_frame_ptr_.end(); frame_it++){
+    if (remove_imu_cnt > 0)
+    {
+        for (auto frame_it = image_frame_window_.all_image_frame_ptr_.begin(); frame_it != image_frame_window_.all_image_frame_ptr_.end(); frame_it++)
+        {
             frame_it->second->state_idx_ -= remove_imu_cnt;
         }
     }
 }
 
-void Estimator::slideWindow(shared_ptr<ImageFrame>& frame_ptr){
+void Estimator::slideWindow(shared_ptr<ImageFrame> &frame_ptr)
+{
 
     TicToc tt;
 
-    if(!frame_ptr)
+    if (!frame_ptr)
         return;
 
     int cam_unique_id = frame_ptr->cam_module_unique_id_;
     int cam_wise_idx = 0;
-    for(int i = 0; i < image_frame_window_.cam_wise_image_frame_ptr_[cam_unique_id].size(); i++){
-        if(image_frame_window_.cam_wise_image_frame_ptr_[cam_unique_id][i] == frame_ptr){
+    for (int i = 0; i < image_frame_window_.cam_wise_image_frame_ptr_[cam_unique_id].size(); i++)
+    {
+        if (image_frame_window_.cam_wise_image_frame_ptr_[cam_unique_id][i] == frame_ptr)
+        {
             cam_wise_idx = i;
             break;
         }
@@ -1825,7 +1957,8 @@ void Estimator::slideWindow(shared_ptr<ImageFrame>& frame_ptr){
 
     double remove_time = state_hist_[remove_state_idx].t_;
 
-    if(image_frame_window_.all_image_frame_ptr_.rbegin()->first > remove_time && image_frame_window_.all_image_frame_ptr_.begin()->first < remove_time){
+    if (image_frame_window_.all_image_frame_ptr_.rbegin()->first > remove_time && image_frame_window_.all_image_frame_ptr_.begin()->first < remove_time)
+    {
         tt.tic();
         addPreintegrationToNextFrame(remove_state_idx);
         // ROS_INFO("add pre integration to next frame time: %lf ms", tt.toc());
@@ -1833,39 +1966,45 @@ void Estimator::slideWindow(shared_ptr<ImageFrame>& frame_ptr){
 
     state_hist_.erase(state_hist_.begin() + remove_state_idx);
 
-
     double remove_imu_min_t = image_frame_window_.all_image_frame_ptr_.begin()->first - 0.01;
 
     int remove_imu_cnt = 0;
 
     int max_remove_num = image_frame_window_.all_image_frame_ptr_.begin()->second->state_idx_ - 3;
 
-    for(; state_hist_.front().t_ < remove_imu_min_t; state_hist_.pop_front(), remove_imu_cnt++){
-        if(remove_imu_cnt >= max_remove_num){
+    for (; state_hist_.front().t_ < remove_imu_min_t; state_hist_.pop_front(), remove_imu_cnt++)
+    {
+        if (remove_imu_cnt >= max_remove_num)
+        {
             break;
         }
     }
 
-    if(remove_imu_cnt > 0){
-        for(auto frame_it = image_frame_window_.all_image_frame_ptr_.begin(); frame_it != image_frame_window_.all_image_frame_ptr_.end(); frame_it++){
+    if (remove_imu_cnt > 0)
+    {
+        for (auto frame_it = image_frame_window_.all_image_frame_ptr_.begin(); frame_it != image_frame_window_.all_image_frame_ptr_.end(); frame_it++)
+        {
             frame_it->second->state_idx_ -= remove_imu_cnt;
         }
     }
 }
 
-void Estimator::reorderWindow(){
+void Estimator::reorderWindow()
+{
 
     image_frame_window_.reorder();
     std::sort(state_hist_.begin(), state_hist_.end(), State::compare);
 
     unsigned int state_idx = 0;
-    Vector6d& prev_imu_data = state_hist_.begin()->imu_data_;
+    Vector6d &prev_imu_data = state_hist_.begin()->imu_data_;
     auto img_state_it = state_hist_.begin();
     bool img_flag = false;
 
-    for(auto state_it = state_hist_.begin(); state_it != state_hist_.end(); state_it++, state_idx++){
+    for (auto state_it = state_hist_.begin(); state_it != state_hist_.end(); state_it++, state_idx++)
+    {
 
-        if(state_it->type_ == State::IMAGE){
+        if (state_it->type_ == State::IMAGE)
+        {
             state_it->image_frame_ptr_->state_idx_ = state_idx;
 
             state_it->image_frame_ptr_->prev_acc_ = prev_imu_data.topRows(3);
@@ -1873,23 +2012,22 @@ void Estimator::reorderWindow(){
 
             img_state_it = state_it;
             img_flag = true;
-
         }
 
-        if(state_it->type_ == State::IMU){
+        if (state_it->type_ == State::IMU)
+        {
             prev_imu_data = state_it->imu_data_;
-            if(img_flag){
-                for(auto set_state_it = img_state_it; set_state_it != state_hist_.begin() && set_state_it->type_ == State::IMAGE; set_state_it--){
+            if (img_flag)
+            {
+                for (auto set_state_it = img_state_it; set_state_it != state_hist_.begin() && set_state_it->type_ == State::IMAGE; set_state_it--)
+                {
                     set_state_it->imu_data_ = state_it->imu_data_;
                 }
             }
             img_flag = false;
         }
     }
-
-
 }
-
 
 void Estimator::getPoseInWorldFrame(const int unique_id, Eigen::Matrix4d &T)
 {
@@ -1909,15 +2047,14 @@ void Estimator::getPoseInWorldFrame(const int unique_id, const int index, Eigen:
 
 void Estimator::predictPtsInNextFrame(const int unique_id)
 {
-    //printf("predict pts in next frame\n");
-    if(image_frame_window_.cam_wise_image_frame_ptr_[unique_id].size() < 2)
+    // printf("predict pts in next frame\n");
+    if (image_frame_window_.cam_wise_image_frame_ptr_[unique_id].size() < 2)
         return;
     // predict next pose. Assume constant velocity motion
     Eigen::Matrix4d curT, prevT, nextT;
     getPoseInWorldFrame(unique_id, curT);
 
-    //get last frame in cam[unique_id]
-
+    // get last frame in cam[unique_id]
 
     getPoseInWorldFrame(unique_id, image_frame_window_.cam_wise_image_frame_ptr_[unique_id].size() - 2, prevT);
     nextT = curT * (prevT.inverse() * curT);
@@ -1925,12 +2062,12 @@ void Estimator::predictPtsInNextFrame(const int unique_id)
 
     for (auto &it_per_id : img_trackers_[unique_id]->f_manager_.feature_)
     {
-        if(it_per_id.second.estimated_depth > 0)
+        if (it_per_id.second.estimated_depth > 0)
         {
             int firstIndex = it_per_id.second.start_frame;
             int lastIndex = it_per_id.second.start_frame + it_per_id.second.feature_per_frame.size() - 1;
-            //printf("cur frame index  %d last frame index %d\n", frame_count_, lastIndex);
-            if((int)it_per_id.second.feature_per_frame.size() >= 2 && lastIndex == image_frame_window_.cam_wise_image_frame_ptr_[unique_id].size())
+            // printf("cur frame index  %d last frame index %d\n", frame_count_, lastIndex);
+            if ((int)it_per_id.second.feature_per_frame.size() >= 2 && lastIndex == image_frame_window_.cam_wise_image_frame_ptr_[unique_id].size())
             {
                 double depth = it_per_id.second.estimated_depth;
                 Vector3d pts_j = img_trackers_[unique_id]->cam_info_.ric_[0] * (depth * it_per_id.second.feature_per_frame.front().point) + img_trackers_[unique_id]->cam_info_.tic_[0];
@@ -1944,11 +2081,10 @@ void Estimator::predictPtsInNextFrame(const int unique_id)
         }
     }
     img_trackers_[unique_id]->featureTracker_.setPrediction(predictPts);
-    //printf("estimator output %d predict pts\n",(int)predictPts.size());
+    // printf("estimator output %d predict pts\n",(int)predictPts.size());
 }
 
-
-void Estimator::propagateIMU(const State& x, State& x_next)
+void Estimator::propagateIMU(const State &x, State &x_next)
 {
     double dt = x_next.t_ - x.t_;
     Eigen::Vector3d un_acc_0 = x.Q_ * (x.imu_data_.topRows(3) - x.Ba_) - g_;
@@ -1972,13 +2108,14 @@ void Estimator::propagateIMU(const State& x, State& x_next)
     // x_next.Q_lpf_ = x_next.Q_;
     // latest_acc_0_ = linear_acceleration;
     // latest_gyr_0_ = angular_velocity;
-    if(x_next.type_ == State::IMU){
+    if (x_next.type_ == State::IMU)
+    {
         x_next.Ba_ = x.Ba_;
         x_next.Bg_ = x.Bg_;
     }
 }
 
-void Estimator::propagateIMULowpass(const State& x, State& x_next, const double& alpha)
+void Estimator::propagateIMULowpass(const State &x, State &x_next, const double &alpha)
 {
     double dt = x_next.t_ - x.t_;
 
@@ -2007,7 +2144,8 @@ void Estimator::propagateIMULowpass(const State& x, State& x_next, const double&
     x_next.Q_lpf_ = x_next.Q_lpf_.slerp(alpha, x_next.Q_);
     // latest_acc_0_ = linear_acceleration;
     // latest_gyr_0_ = angular_velocity;
-    if(x_next.type_ == State::IMU){
+    if (x_next.type_ == State::IMU)
+    {
         x_next.Ba_ = x.Ba_;
         x_next.Bg_ = x.Bg_;
     }
@@ -2016,7 +2154,7 @@ void Estimator::propagateIMULowpass(const State& x, State& x_next, const double&
 void Estimator::updateLatestStates(const int unique_id)
 {
     // mBuf_.lock();
-    auto& image_frame =image_frame_window_.all_image_frame_ptr_.rbegin()->second;
+    auto &image_frame = image_frame_window_.all_image_frame_ptr_.rbegin()->second;
     latest_time_ = image_frame->t_ + image_frame->td_;
     latest_P_ = image_frame->T_;
     latest_Q_ = image_frame->R_;
@@ -2030,7 +2168,7 @@ void Estimator::updateLatestStates(const int unique_id)
     last_P0_ = image_frame_window_.all_image_frame_ptr_.begin()->second->T_;
 
     unsigned int last_image_state_idx = image_frame->state_idx_;
-    repropagateIMU(state_hist_.begin()+last_image_state_idx+1, false);
+    repropagateIMU(state_hist_.begin() + last_image_state_idx + 1, false);
     lpf_idx_ = 0;
     // printf("propagate imu time: %lf s\n", state_hist_.back().t_ -  state_hist_[last_image_state_idx].t_);
 
@@ -2047,16 +2185,16 @@ void Estimator::updateLatestStates(const int unique_id)
     pubCameraPose(*this, unique_id);
     pubPointCloud(*this, unique_id);
 
-    if(image_frame->t_ > latest_image_time_){
+    if (image_frame->t_ > latest_image_time_)
+    {
         pubTF(*this);
         pubOdometry(*this);
         pubKeyPoses(*this);
         pubKeyframe(*this);
 
         latest_image_time_ = image_frame->t_;
-
     }
     // printStatistics(*this, 0);
 }
 
-}
+} // namespace vins_multi

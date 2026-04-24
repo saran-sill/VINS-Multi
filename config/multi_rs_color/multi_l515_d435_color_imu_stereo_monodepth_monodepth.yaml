@@ -2,7 +2,7 @@
 
 use_gpu: 0
 #common parameters
-#support: 1 imu 1 cam; 1 imu 2 cam: 2 cam; 
+#support: 1 imu 1 cam; 1 imu 2 cam: 2 cam;
 output_path: "/home/nx/workspaces/catkin_ws/output"
 
 imu:
@@ -40,7 +40,7 @@ cam_module:
         cam1_calib: "right.yaml"
         td: 0.015                             # initial value of time offset. unit: s. readed image clock + td = real image clock (IMU clock)
         rolling_shutter: 1                      # 0: global shutter camera, 1: rolling shutter camera
-        rolling_shutter_tr: 0.03333               # unit: s. rolling shutter read out time per frame (from data sheet). 
+        rolling_shutter_tr: 0.03333               # unit: s. rolling shutter read out time per frame (from data sheet).
 
         imu_T_cam0: !!opencv-matrix
             rows: 4
@@ -51,8 +51,8 @@ cam_module:
                 -2.9479336054914120e-02, -9.9955439454256156e-01,
                 -4.6884001978471689e-03, 9.6933771765262540e-03,
                 9.9759010175374097e-01, -2.9715486293087266e-02,
-                6.2697517951879722e-02, 5.9663428958918324e-03, 0., 0., 0., 1. ]         
-        
+                6.2697517951879722e-02, 5.9663428958918324e-03, 0., 0., 0., 1. ]
+
         imu_T_cam1: !!opencv-matrix
             rows: 4
             cols: 4
@@ -106,7 +106,7 @@ cam_module:
         cam1_calib: "right1.yaml"
         td: 0.015                             # initial value of time offset. unit: s. readed image clock + td = real image clock (IMU clock)
         rolling_shutter: 1                      # 0: global shutter camera, 1: rolling shutter camera
-        rolling_shutter_tr: 0.03333               # unit: s. rolling shutter read out time per frame (from data sheet). 
+        rolling_shutter_tr: 0.03333               # unit: s. rolling shutter read out time per frame (from data sheet).
 
         imu_T_cam0: !!opencv-matrix
             rows: 4
@@ -118,7 +118,7 @@ cam_module:
                 -3.2757931385404088e-02, 1.3680113485164757e-02,
                 1.2048574879444118e-02, 3.2699439363680041e-02,
                 -9.9939260478986713e-01, -4.0997369314525207e-02, 0., 0., 0., 1. ]
-        
+
         imu_T_cam1: !!opencv-matrix
             rows: 4
             cols: 4
@@ -140,12 +140,12 @@ multiple_thread: 0
 
 #feature traker paprameters
 max_cnt: 250            # max feature number in feature tracking
-min_dist: 40            # min distance between two features 
-freq: 15                # frequence (Hz) of publish tracking result. At least 10Hz for good estimation. If set 0, the frequence will be same as raw image 
+min_dist: 40            # min distance between two features
+freq: 15                # frequence (Hz) of publish tracking result. At least 10Hz for good estimation. If set 0, the frequence will be same as raw image
 depth_min: 0.2
 depth_max: 9.0
 F_threshold: 1.0        # ransac threshold (pixel)
-show_track: 0           # publish tracking image as topic
+show_track: 1           # publish tracking image as topic
 flow_back: 1            # perform forward and backward optical flow to improve feature tracking accuracy
 equalize: 1             # if image is too dark or light, trun on equalize to find enough features
 
@@ -160,4 +160,4 @@ estimate_td: 0                      # online estimate time offset between camera
 #loop closure parameters
 load_previous_pose_graph: 0        # load and reuse previous pose graph; load from 'pose_graph_save_path'
 pose_graph_save_path: "/home/dji/output/pose_graph/" # save and load path
-save_image: 0                   # save image in pose graph for visualization prupose; you can close this function by setting 0 
+save_image: 0                   # save image in pose graph for visualization prupose; you can close this function by setting 0

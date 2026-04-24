@@ -1,8 +1,8 @@
 /*******************************************************
  * Copyright (C) 2025, Aerial Robotics Group, Hong Kong University of Science and Technology
- * 
+ *
  * This file is part of VINS.
- * 
+ *
  * Licensed under the GNU General Public License v3.0;
  * you may not use this file except in compliance with the License.
  *******************************************************/
@@ -22,9 +22,20 @@ int main(int argc, char **argv)
     ros::NodeHandle n("~");
     ros::console::set_logger_level(ROSCONSOLE_DEFAULT_NAME, ros::console::levels::Info);
 
+    std::string cli_config_file;
+    if (argc >= 2)
+    {
+        cli_config_file = argv[1];
+    }
+    else
+    {
+        printf("usage : %s [config.yaml]\n", argv[0]);
+        return EXIT_FAILURE;
+    }
+
     vins_multi::VinsNodeBaseClass vins_node;
 
-    vins_node.init_node(n);
+    vins_node.init_node(n, cli_config_file);
 
 #ifdef EIGEN_DONT_PARALLELIZE
     ROS_DEBUG("EIGEN_DONT_PARALLELIZE");

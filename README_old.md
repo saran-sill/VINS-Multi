@@ -5,7 +5,7 @@
 
 <img src="./support/image/tunnel_vent_1.jpg" width = 26.1% height = 26.1% div align=center /> <img src="./support/image/vent_1_rviz.png" width = 32.7% height = 32.7% div align=center />
 
-VINS-Multi is a robust optimization-based asynchronous multi-camera-IMU state estimator, which achieves accurate self-localization for autonomous applications (drones, cars, and AR/VR). VINS-Multi is an extension of [VINS-Fusion](https://github.com/HKUST-Aerial-Robotics/VINS-Fusion), which supports multiple asynchronous visual-inertial sensor types (stereo camera modules + IMU, RGB-D camera modules + IMU).
+VINS-Multi is a robust optimization-based asynchronous multi-camera-IMU state estimator, which achieves accurate self-localization for autonomous applications (drones, cars, and AR/VR). VINS-Multi is an extension of [VINS-Fusion](https://github.com/HKUST-Aerial-Robotics/VINS-Fusion), which supports multiple asynchronous visual-inertial sensor types (stereo camera modules + IMU, RGB-D camera modules + IMU). 
 
 **Features:**
 - multiple asynchronous sensors support (stereo camera modules + IMU, RGB-D camera modules + IMU)
@@ -17,7 +17,7 @@ VINS-Multi is a robust optimization-based asynchronous multi-camera-IMU state es
 
 **Videos:**
 
-<a href="https://www.youtube.com/embed/Zom2qmBTa0E" target="_blank"><img src="http://img.youtube.com/vi/Zom2qmBTa0E/0.jpg"
+<a href="https://www.youtube.com/embed/Zom2qmBTa0E" target="_blank"><img src="http://img.youtube.com/vi/Zom2qmBTa0E/0.jpg" 
 alt="VINS" width="320" height="240" border="10" /></a>
 
 
@@ -47,35 +47,35 @@ ROS Noetic. [ROS Installation](http://wiki.ros.org/ROS/Installation)
 Follow [Ceres Installation](http://ceres-solver.org/installation.html).
 
 
-## 2. Build VINS-Multi
+## 2. Build VINS-Fusion
 Clone the repository and catkin_make:
 ```
-    mkdir -p build && cd build
-    cmake ..
-    make -j3
-    make install
+    cd ~/catkin_ws/src
+    git clone https://github.com/HKUST-Aerial-Robotics/VINS-Multi.git
+    cd ../
+    catkin_make
+    source ~/catkin_ws/devel/setup.bash
 ```
 (if you fail in this step, try to find another computer with clean system or reinstall Ubuntu and ROS)
 
 ## 3. Intel Realsense L515 + D435 camera modules Example
 Download [realsense_raw_515_435.bag](https://hkustconnect-my.sharepoint.com/:u:/g/personal/lwangax_connect_ust_hk/ET9mwzUWOfFHi8peXYDYQesBQFOo08KqS0ZY_HPqsTu-xg?e=hsBbCc) to YOUR_DATASET_FOLDER.
-Open four terminals, run vins odometry, rviz and play the bag file respectively.
+Open four terminals, run vins odometry, rviz and play the bag file respectively. 
 Green path is VIO odometry.
 ```
-    roscore
-    rviz -d /home/arm/HiveGround/VINS-Multi/config/vins_rviz_config.rviz
-    taskset -c 0 ./vins_multi /home/arm/HiveGround/VINS-Multi/config/multi_rs_color/multi_l515_d435_color_imu_stereo.yaml
-    rosbag play realsense_raw_515_435.bag
+    roslaunch vins_multi vins_rviz.launch
+    roslaunch vins_multi multi_l515_d435.launch
+    rosbag play YOUR_DATASET_FOLDER/realsense_raw_515_435.bag
 ```
 
 <img src="./support/image/435_traj.png" width = 427 height = 351  />
 
 
-## 4. Run with your devices
+## 4. Run with your devices 
 VIO is not only a software algorithm, it heavily relies on hardware quality. For beginners, we recommend you to run VIO with professional equipment, like Intel Realsense camera modules.
 
 ### 4.1 Configuration file
-Write a config file for your device. You can take config files of the previous example.
+Write a config file for your device. You can take config files of the previous example. 
 
 ### 4.2 Camera calibration
 VINS-Multi follows VINS-Fusion and support several camera models (pinhole, mei, equidistant). You can follow the same calibration procedure in VINS-Fusion to calibrate the cameras. For example:

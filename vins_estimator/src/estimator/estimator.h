@@ -1,56 +1,62 @@
 /*******************************************************
  * Copyright (C) 2025, Aerial Robotics Group, Hong Kong University of Science and Technology
- * 
+ *
  * This file is part of VINS.
- * 
+ *
  * Licensed under the GNU General Public License v3.0;
  * you may not use this file except in compliance with the License.
  *******************************************************/
 
 #pragma once
- 
-#include <thread>
-#include <chrono>
-#include <std_msgs/Header.h>
-#include <std_msgs/Float32.h>
+
 #include <ceres/ceres.h>
-#include <unordered_map>
-#include <queue>
-#include <list>
-#include <opencv2/core/eigen.hpp>
+#include <chrono>
 #include <eigen3/Eigen/Dense>
 #include <eigen3/Eigen/Geometry>
+#include <list>
+#include <opencv2/core/eigen.hpp>
+#include <queue>
+#include <std_msgs/Float32.h>
+#include <std_msgs/Header.h>
+#include <thread>
+#include <unordered_map>
 
-#include "parameters.h"
 #include "feature_manager.h"
+#include "parameters.h"
 // #include "../utility/utility.h"
 // #include "../utility/tic_toc.h"
 // #include "../initial/solve_5pts.h"
 // #include "../initial/initial_sfm.h"
 #include "../initial/initial_alignment.h"
 // #include "../initial/initial_ex_rotation.h"
+#include "../factor/depthFactor.h"
 #include "../factor/imu_factor.h"
-#include "../factor/pose_local_parameterization.h"
 #include "../factor/marginalization_factor.h"
+#include "../factor/pose_local_parameterization.h"
+#include "../factor/projectionOneFrameTwoCamFactor.h"
 #include "../factor/projectionTwoFrameOneCamFactor.h"
 #include "../factor/projectionTwoFrameTwoCamFactor.h"
-#include "../factor/projectionOneFrameTwoCamFactor.h"
-#include "../factor/depthFactor.h"
 // #include "../factor/reprojectionDepthFactor.h"
 #include "../factor/projectionTwoFrameOneCamDepthFactor.h"
 #include "../featureTracker/feature_tracker.h"
 
-namespace vins_multi{
+namespace vins_multi
+{
 
 class Estimator
 {
   public:
-
-    class rawImageFrame{
-    public:
-        rawImageFrame() : t_(-1.0), img_(cv::Mat()), img1_(cv::Mat()){}
-        rawImageFrame(double t, const cv::Mat& img, const cv::Mat& img1) : t_(t), img_(img), img1_(img1){}
-        void setImageFrame(double t, const cv::Mat& img, const cv::Mat& img1){
+    class rawImageFrame
+    {
+      public:
+        rawImageFrame() : t_(-1.0), img_(cv::Mat()), img1_(cv::Mat())
+        {
+        }
+        rawImageFrame(double t, const cv::Mat &img, const cv::Mat &img1) : t_(t), img_(img), img1_(img1)
+        {
+        }
+        void setImageFrame(double t, const cv::Mat &img, const cv::Mat &img1)
+        {
             t_ = t;
             img_ = img;
             img1_ = img1;
@@ -62,142 +68,169 @@ class Estimator
         cv::Mat img1_;
     };
 
-    class imageBuffer{
-    public:
-        imageBuffer(const unsigned int buffer_size){
-            unsigned int buffer_real_size = max(1U,buffer_size);
-            for(unsigned int i = 0U; i < buffer_real_size; i++){
+    class imageBuffer
+    {
+      public:
+        imageBuffer(const unsigned int buffer_size)
+        {
+            unsigned int buffer_real_size = max(1U, buffer_size);
+            for (unsigned int i = 0U; i < buffer_real_size; i++)
+            {
                 free_memory_buffer_.emplace_back(new rawImageFrame());
-            }    
+            }
         }
 
-        void insertImage(double t, const cv::Mat &_img, const cv::Mat &_img1 = cv::Mat()){
-            if(free_memory_buffer_.empty()){
+        void insertImage(double t, const cv::Mat &_img, const cv::Mat &_img1 = cv::Mat())
+        {
+            if (free_memory_buffer_.empty())
+            {
 
-                if(image_buffer_.empty()){
-
+                if (image_buffer_.empty())
+                {
                 }
-                else{
+                else
+                {
                     image_buffer_.back()->setImageFrame(t, _img, _img1);
                 }
-
             }
-            else{
+            else
+            {
                 image_buffer_.emplace_back(free_memory_buffer_.front());
                 free_memory_buffer_.pop_front();
                 image_buffer_.back()->setImageFrame(t, _img, _img1);
-
             }
         }
 
-        void releaseImage(shared_ptr<rawImageFrame> frame_ptr){
+        void releaseImage(shared_ptr<rawImageFrame> frame_ptr)
+        {
 
             free_memory_buffer_.emplace_back(frame_ptr);
-            
         }
 
-        shared_ptr<rawImageFrame> retrieveFrame(){
-            if(image_buffer_.empty()){
+        shared_ptr<rawImageFrame> retrieveFrame()
+        {
+            if (image_buffer_.empty())
+            {
                 return shared_ptr<rawImageFrame>(nullptr);
             }
-            else{
+            else
+            {
                 shared_ptr<rawImageFrame> frame_ptr = image_buffer_.front();
                 image_buffer_.pop_front();
                 return frame_ptr;
             }
         }
 
-    private:
-
+      private:
         list<shared_ptr<rawImageFrame>> image_buffer_;
         list<shared_ptr<rawImageFrame>> free_memory_buffer_;
     };
 
-    class imgTracker{
-        public:
-            imgTracker(camera_module_info& cam_module, vector<shared_ptr<ImageFrame>>& image_frame_ptr, int max_feature_per_module): cam_info_{cam_module}, featureTracker_{cam_module.depth_, cam_module.stereo_, max_feature_per_module}, f_manager_(cam_module.depth_, cam_module.stereo_, image_frame_ptr), image_buffer_(5U){
-                ROS_WARN("set tracker, id %d", cam_module.module_id_);
-                featureTracker_.readIntrinsicParameter(cam_module.calib_file_);
+    class imgTracker
+    {
+      public:
+        imgTracker(camera_module_info &cam_module, vector<shared_ptr<ImageFrame>> &image_frame_ptr, int max_feature_per_module) : cam_info_{cam_module}, featureTracker_{cam_module.depth_, cam_module.stereo_, max_feature_per_module}, f_manager_(cam_module.depth_, cam_module.stereo_, image_frame_ptr), image_buffer_(5U)
+        {
+            ROS_WARN("set tracker, id %d", cam_module.module_id_);
+            featureTracker_.readIntrinsicParameter(cam_module.calib_file_);
+        }
+
+        ~imgTracker()
+        {
+            // spdlog::info("imgTracker destructor");
+        }
+
+        void set_f_manager_cam_info()
+        {
+            f_manager_.setCamInfo(this->cam_info_);
+        }
+
+        double get_feature_priority()
+        {
+            return static_cast<double>(featureTracker_.max_cnt) / static_cast<double>(MAX_TRACK_NUM_PER_MODULE);
+        }
+
+        void clean_frame_time_hist(const double t)
+        {
+            while (frame_time_hist_.size() > 2 && *(frame_time_hist_.begin() + 2) < t)
+            {
+                frame_time_hist_.pop_front();
             }
+        }
 
+        double get_this_time_priority(const double t)
+        {
 
-            void set_f_manager_cam_info(){
-                f_manager_.setCamInfo(this->cam_info_);
-            }
+            double time_priority = min(1.0, frame_time_priority_ratio_ * exp(FRAME_PRIORITY_CONST * (-1.0 - t)));
 
-            double get_feature_priority(){
-                return static_cast<double>(featureTracker_.max_cnt) / static_cast<double>(MAX_TRACK_NUM_PER_MODULE);
-            }
-
-            void clean_frame_time_hist(const double t){
-                while(frame_time_hist_.size() > 2 && *(frame_time_hist_.begin()+2) < t){
-                    frame_time_hist_.pop_front();
-                }
-            }
-
-            double get_this_time_priority(const double t){
-
-                double time_priority = min(1.0, frame_time_priority_ratio_ * exp(FRAME_PRIORITY_CONST * (-1.0 - t)));
-
-                if(frame_time_hist_.empty() || frame_time_hist_.front() >= t || frame_time_hist_.size() < 2){
-                    return time_priority;
-                }
-
-                for(auto rit = frame_time_hist_.rbegin(); rit != frame_time_hist_.rend(); rit++){
-                    if(*rit < t){
-                        if(next(rit) == frame_time_hist_.rend()){
-                            return time_priority;
-                        }
-                        else{
-                            time_priority = min(1.0, frame_time_priority_ratio_ * exp(FRAME_PRIORITY_CONST * (*next(rit) - t)));
-                        }
-                    }
-                }
+            if (frame_time_hist_.empty() || frame_time_hist_.front() >= t || frame_time_hist_.size() < 2)
+            {
                 return time_priority;
             }
 
-            double get_time_priority(const double t){
-
-                double time_priority = min(1.0, frame_time_priority_ratio_ * exp(FRAME_PRIORITY_CONST * (-1.0 - t)));
-
-                if(frame_time_hist_.empty()){
-                    return time_priority;
+            for (auto rit = frame_time_hist_.rbegin(); rit != frame_time_hist_.rend(); rit++)
+            {
+                if (*rit < t)
+                {
+                    if (next(rit) == frame_time_hist_.rend())
+                    {
+                        return time_priority;
+                    }
+                    else
+                    {
+                        time_priority = min(1.0, frame_time_priority_ratio_ * exp(FRAME_PRIORITY_CONST * (*next(rit) - t)));
+                    }
                 }
+            }
+            return time_priority;
+        }
 
-                return min(1.0, frame_time_priority_ratio_ * exp(FRAME_PRIORITY_CONST * (frame_time_hist_.back() - t)));
+        double get_time_priority(const double t)
+        {
+
+            double time_priority = min(1.0, frame_time_priority_ratio_ * exp(FRAME_PRIORITY_CONST * (-1.0 - t)));
+
+            if (frame_time_hist_.empty())
+            {
+                return time_priority;
             }
 
-            double get_total_priority(const double t){
+            return min(1.0, frame_time_priority_ratio_ * exp(FRAME_PRIORITY_CONST * (frame_time_hist_.back() - t)));
+        }
 
-                double feature_priority = get_feature_priority();
-                double frame_time_priority =  min(1.0, frame_time_priority_ratio_ * exp(FRAME_PRIORITY_CONST * (last_frame_time_ - t)));
-                return feature_priority + frame_time_priority;
-            }
+        double get_total_priority(const double t)
+        {
 
-            void increase_frame_time_priority(){
-                frame_time_priority_ratio_ *= 1.5;
-            }
+            double feature_priority = get_feature_priority();
+            double frame_time_priority = min(1.0, frame_time_priority_ratio_ * exp(FRAME_PRIORITY_CONST * (last_frame_time_ - t)));
+            return feature_priority + frame_time_priority;
+        }
 
-            void reset_frame_time_priority(){
-                frame_time_priority_ratio_ = 1.0;
-            }
+        void increase_frame_time_priority()
+        {
+            frame_time_priority_ratio_ *= 1.5;
+        }
 
-            camera_module_info cam_info_;
-            FeatureTracker featureTracker_;
-            FeatureManager f_manager_;
+        void reset_frame_time_priority()
+        {
+            frame_time_priority_ratio_ = 1.0;
+        }
 
-            double last_frame_time_ = -1.0;
-            double last_keep_frame_time_ = -1.0;
-            double frame_time_priority_ratio_ = 1.0;
+        camera_module_info cam_info_;
+        FeatureTracker featureTracker_;
+        FeatureManager f_manager_;
 
-            double max_frame_time_priority = 1.0;
+        double last_frame_time_ = -1.0;
+        double last_keep_frame_time_ = -1.0;
+        double frame_time_priority_ratio_ = 1.0;
 
-            deque<double> frame_time_hist_;
+        double max_frame_time_priority = 1.0;
 
-            imageBuffer image_buffer_;
-            mutex image_buffer_mutex_;
+        deque<double> frame_time_hist_;
+
+        imageBuffer image_buffer_;
+        mutex image_buffer_mutex_;
     };
-
 
     // struct featureFrame{
     //     double t_;
@@ -219,15 +252,15 @@ class Estimator
     void inputImageToBuffer(const unsigned int unique_id, double t, const cv::Mat &_img, const cv::Mat &_img1 = cv::Mat());
     void processImageBuffer(const unsigned int unique_id);
     void inputImage(const unsigned int unique_id, double t, const cv::Mat &_img, const cv::Mat &_img1 = cv::Mat());
-    
+
     void updateFeatureTrackerMaxCnt();
     bool CheckKeepImageUpdatePriority(const int cam_unique_id, const double t);
-    deque<State>::iterator insertState(const State& state);
+    deque<State>::iterator insertState(const State &state);
 
     void setImageIMUData(const deque<State>::iterator img_it);
     void setImageState(const deque<State>::iterator img_it);
     void setStateFromImage();
-    
+
     void processIMU(double t, double dt, const Vector3d &linear_acceleration, const Vector3d &angular_velocity);
     void processImage(const deque<State>::iterator img_it, const map<double, shared_ptr<ImageFrame>>::iterator img_frame_it);
     void processMeasurements(const deque<State>::iterator img_it);
@@ -242,15 +275,13 @@ class Estimator
     // void constructPriorFactor(shared_ptr<ImageFrame>& frame_ptr_to_margin);
     void constructMarginalizationFator();
 
-
-
     // internal
     void clearState();
     // bool initialStructure();
     // bool visualInitialAlign();
     // bool relativePose(Matrix3d &relative_R, Vector3d &relative_T, int &l);
     void slideWindow(const int img_cam_unique_id);
-    void slideWindow(shared_ptr<ImageFrame>& frame_ptr);
+    void slideWindow(shared_ptr<ImageFrame> &frame_ptr);
     // void slideWindowNew();
     // void slideWindowOld();
 
@@ -266,14 +297,14 @@ class Estimator
     void predictPtsInNextFrame(const int unique_id);
     // void outliersRejection(set<int> &removeIndex);
     // double reprojectionError(Matrix3d &Ri, Vector3d &Pi, Matrix3d &rici, Vector3d &tici,
-    //                                  Matrix3d &Rj, Vector3d &Pj, Matrix3d &ricj, Vector3d &ticj, 
+    //                                  Matrix3d &Rj, Vector3d &Pj, Matrix3d &ricj, Vector3d &ticj,
     //                                  double depth, Vector3d &uvi, Vector3d &uvj);
     void updateLatestStates(const int unique_id);
     // void fastPredictIMU(double t, Eigen::Vector3d linear_acceleration, Eigen::Vector3d angular_velocity);
-    
+
     void repropagateIMU(const deque<State>::iterator start_it, const bool low_pass);
-    void propagateIMU(const State& x, State& x_next);
-    void propagateIMULowpass(const State& x, State& x_next, const double& alpha);
+    void propagateIMU(const State &x, State &x_next);
+    void propagateIMULowpass(const State &x, State &x_next, const double &alpha);
     bool IMUAvailable(double t);
     bool IMUInitReady(double img_time);
     // void initFirstIMUPose(vector<pair<double, Eigen::Vector3d>> &accVector);
@@ -308,13 +339,11 @@ class Estimator
     std::thread trackThread_;
     std::thread processThread_;
 
-
     SolverFlag solver_flag_;
-    MarginalizationFlag  marginalization_flag_;
+    MarginalizationFlag marginalization_flag_;
     Vector3d g_;
 
     unsigned int total_feature_track_num_;
-
 
     // Vector3d        Ps_[(WINDOW_SIZE + 1)];
     // Vector3d        Vs_[(WINDOW_SIZE + 1)];
@@ -365,7 +394,7 @@ class Estimator
     int loop_window_index_;
 
     MarginalizationInfo *last_marginalization_info_;
-    ceres::Problem* problem_ptr_;
+    ceres::Problem *problem_ptr_;
     // unique_ptr<Marginalizer> marginalizer_;
     // PriorFactor* last_prior_ptr_;
     vector<double *> last_marginalization_parameter_blocks_;
@@ -395,7 +424,7 @@ class Estimator
     bool initFirstPoseFlag_;
     bool initThreadFlag_;
 
-    std::vector<std::thread>image_process_thread_vec_;
+    std::vector<std::thread> image_process_thread_vec_;
 };
 
-}
+} // namespace vins_multi

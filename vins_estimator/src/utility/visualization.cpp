@@ -1,8 +1,8 @@
 /*******************************************************
  * Copyright (C) 2025, Aerial Robotics Group, Hong Kong University of Science and Technology
- * 
+ *
  * This file is part of VINS.
- * 
+ *
  * Licensed under the GNU General Public License v3.0;
  * you may not use this file except in compliance with the License.
  *******************************************************/
@@ -60,7 +60,7 @@ void registerPub(ros::NodeHandle &n)
         pub_image_track.emplace_back(n.advertise<sensor_msgs::Image>(std::string("image_track_")+std::to_string(i), 1000));
         pub_point_cloud.emplace_back(n.advertise<sensor_msgs::PointCloud>(std::string("point_cloud_")+std::to_string(i), 1000));
     }
-    
+
 
     cameraposevisual.setScale(0.1);
     cameraposevisual.setLineWidth(0.01);
@@ -71,13 +71,13 @@ void pubLatestOdometry(const Estimator &estimator)
 
     const double t = estimator.state_hist_.back().t_;
 
-    const Eigen::Vector3d& P = estimator.state_hist_.back().P_lpf_;    
+    const Eigen::Vector3d& P = estimator.state_hist_.back().P_lpf_;
     const Eigen::Quaterniond &R= estimator.state_hist_.back().Q_lpf_;
     const Eigen::Vector3d &V = estimator.state_hist_.back().V_lpf_;
 
 
     const Eigen::Vector3d &omega = estimator.state_hist_.back().un_gyr_;
-    
+
     const Eigen::Matrix3d &center_R_imu = estimator.imu_module_.rcenterimu_;
     const Eigen::Vector3d &center_T_imu = estimator.imu_module_.tcenterimu_;
 
@@ -123,7 +123,7 @@ void pubLatestOdometry(const Estimator &estimator)
     odometry.twist.twist.angular.x = omega_center.x();
     odometry.twist.twist.angular.y = omega_center.y();
     odometry.twist.twist.angular.z = omega_center.z();
-    
+
     pub_latest_odometry.publish(odometry);
 
     last_pos = w_T_center;
@@ -190,7 +190,7 @@ void printStatistics(const Estimator &estimator, double t)
         for (int i = 0; i < estimator.img_trackers_.size(); i++)
         {
             //ROS_DEBUG("calibration result for camera %d", i);
-            
+
             ROS_DEBUG_STREAM("extirnsic tic: " << estimator.img_trackers_[i]->cam_info_.tic_[0].transpose());
             ROS_DEBUG_STREAM("extrinsic ric: " << Utility::R2ypr(estimator.img_trackers_[i]->cam_info_.ric_[0].toRotationMatrix()).transpose());
 
@@ -219,14 +219,14 @@ void printStatistics(const Estimator &estimator, double t)
     sum_of_calculation++;
     ROS_DEBUG("vo solver costs: %f ms", t);
     ROS_DEBUG("average of time %f ms", sum_of_time / sum_of_calculation);
-    
+
     // if (ESTIMATE_TD){
     //     for (int i = 0; i < estimator.img_trackers_.size(); i++)
     //     {
     //         ROS_INFO("td %d: %f", i, estimator.img_trackers_[i]->cam_info_.td_);
     //     }
     // }
-        
+
 }
 
 void pubOdometry(const Estimator &estimator)
@@ -324,7 +324,7 @@ void pubCameraPose(const Estimator &estimator, const unsigned int unique_id)
     if (estimator.solver_flag_ == Estimator::SolverFlag::NON_LINEAR)
     {
         auto& frame_ptr = estimator.image_frame_window_.cam_wise_image_frame_ptr_[unique_id].back();
-        
+
         auto stamp = ros::Time{frame_ptr->t_};
         Vector3d P = frame_ptr->T_ + frame_ptr->R_ * estimator.img_trackers_[unique_id]->cam_info_.tic_[0];
         Quaterniond R = frame_ptr->R_ * estimator.img_trackers_[unique_id]->cam_info_.ric_[0];
@@ -386,7 +386,7 @@ void pubPointCloud(const Estimator &estimator, const unsigned int unique_id)
     int margin_cam_unique_id = margin_frame_ptr->cam_module_unique_id_;
 
     for (auto &it_per_id : estimator.img_trackers_[margin_cam_unique_id]->f_manager_.feature_)
-    { 
+    {
         int used_num;
         used_num = it_per_id.second.feature_per_frame.size();
         if (used_num < 2)
@@ -394,7 +394,7 @@ void pubPointCloud(const Estimator &estimator, const unsigned int unique_id)
         //if (it_per_id->start_frame > WINDOW_SIZE * 3.0 / 4.0 || it_per_id->solve_flag != 1)
         //        continue;
 
-        if (it_per_id.second.start_frame == 0 && it_per_id.second.feature_per_frame.size() <= 2 
+        if (it_per_id.second.start_frame == 0 && it_per_id.second.feature_per_frame.size() <= 2
             && it_per_id.second.solve_flag == FeaturePerId::ESTIMATED)
         {
             int imu_i = it_per_id.second.start_frame;
