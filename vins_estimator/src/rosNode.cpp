@@ -149,11 +149,23 @@ void VinsNodeBaseClass::camera_module_info_with_sub::imgs_callback(const sensor_
             img0_gpu.upload(img_0->image);
             cv::cuda::cvtColor(img0_gpu, img0_gray_gpu, cv::COLOR_RGB2GRAY);
             img0_gray_gpu.download(img_0->image);
+
+            if (module_info_.stereo_)
+            {
+                cv::cuda::GpuMat img1_gpu;
+                cv::cuda::GpuMat img1_gray_gpu;
+                img1_gpu.upload(img_1->image);
+                cv::cuda::cvtColor(img1_gpu, img1_gray_gpu, cv::COLOR_RGB2GRAY);
+                img1_gray_gpu.download(img_1->image);
+            }
 #endif
         }
         else
         {
             cv::cvtColor(img_0->image, img_0->image, cv::COLOR_RGB2GRAY);
+
+            if (module_info_.stereo_)
+                cv::cvtColor(img_1->image, img_1->image, cv::COLOR_RGB2GRAY);
         }
     }
     else if (img0_msg->encoding == sensor_msgs::image_encodings::BGR8)
@@ -167,11 +179,23 @@ void VinsNodeBaseClass::camera_module_info_with_sub::imgs_callback(const sensor_
             img0_gpu.upload(img_0->image);
             cv::cuda::cvtColor(img0_gpu, img0_gray_gpu, cv::COLOR_BGR2GRAY);
             img0_gray_gpu.download(img_0->image);
+
+            if (module_info_.stereo_)
+            {
+                cv::cuda::GpuMat img1_gpu;
+                cv::cuda::GpuMat img1_gray_gpu;
+                img1_gpu.upload(img_1->image);
+                cv::cuda::cvtColor(img1_gpu, img1_gray_gpu, cv::COLOR_BGR2GRAY);
+                img1_gray_gpu.download(img_1->image);
+            }
 #endif
         }
         else
         {
             cv::cvtColor(img_0->image, img_0->image, cv::COLOR_BGR2GRAY);
+
+            if (module_info_.stereo_)
+                cv::cvtColor(img_1->image, img_1->image, cv::COLOR_BGR2GRAY);
         }
     }
 
@@ -232,6 +256,7 @@ void VinsNodeBaseClass::Init(ros::NodeHandle &n, const std::string &config_file)
 
 void VinsNodeBaseClass::init_node(ros::NodeHandle &n, const std::string &config_file)
 {
+
     this->Init(n, config_file);
 }
 

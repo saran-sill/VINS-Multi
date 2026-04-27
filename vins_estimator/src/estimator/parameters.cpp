@@ -45,6 +45,9 @@ int FLOW_BACK;
 double DEPTH_MIN;
 double DEPTH_MAX;
 
+int OPTFLOW_WIN_SIZE;
+int OPTFLOW_PYR_LEVELS;
+
 int EQUALIZE;
 
 int MAX_TRACK_NUM_PER_MODULE;
@@ -192,7 +195,7 @@ void readParameters(std::string config_file)
         CAM_MODULES[cur_cam_module].calib_file_[0] = configPath + "/" + CAM_MODULES[cur_cam_module].calib_file_[0];
 
         cv::Mat cv_T;
-        (*it)["imu_T_cam0"] >> cv_T;
+        (*it)["imu_T_cam0"] >> cv_T; // pt_in_imu = [R, t] * pt_in_cam0
         Eigen::Matrix4d T;
         cv::cv2eigen(cv_T, T);
         CAM_MODULES[cur_cam_module].ric_[0] = T.block<3, 3>(0, 0);
@@ -306,6 +309,9 @@ void readParameters(std::string config_file)
     FLOW_BACK = fsSettings["flow_back"];
 
     EQUALIZE = fsSettings["equalize"];
+
+    OPTFLOW_WIN_SIZE = fsSettings["optflow_win_size"];
+    OPTFLOW_PYR_LEVELS = fsSettings["optflow_pyr_levels"];
 
     DEPTH_MIN = fsSettings["depth_min"];
     DEPTH_MAX = fsSettings["depth_max"];

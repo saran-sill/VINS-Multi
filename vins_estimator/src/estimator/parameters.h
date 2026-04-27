@@ -1,8 +1,8 @@
 /*******************************************************
  * Copyright (C) 2025, Aerial Robotics Group, Hong Kong University of Science and Technology
- * 
+ *
  * This file is part of VINS.
- * 
+ *
  * Licensed under the GNU General Public License v3.0;
  * you may not use this file except in compliance with the License.
  *******************************************************/
@@ -100,15 +100,15 @@ struct camera_module_info{
     // void vec2mat(){
 
     //     for(unsigned int i = 0; i < ric_.size(); i++){
-    //         tic_[i].x() = para_Ex_Pose_[i][0]; 
-    //         tic_[i].y() = para_Ex_Pose_[i][1]; 
+    //         tic_[i].x() = para_Ex_Pose_[i][0];
+    //         tic_[i].y() = para_Ex_Pose_[i][1];
     //         tic_[i].z() = para_Ex_Pose_[i][2];
 
     //         ric_[i] = Quaterniond(para_Ex_Pose_[i][6],
     //                              para_Ex_Pose_[i][3],
     //                              para_Ex_Pose_[i][4],
     //                              para_Ex_Pose_[i][5]).normalized().toRotationMatrix();
-    //     }        
+    //     }
 
     // }
 
@@ -128,7 +128,7 @@ struct camera_module_info{
             tic_.clear();
             tic_.emplace_back(Eigen::Map<Eigen::Vector3d>(&para_Ex_Pose_[0][0]));
             tic_.emplace_back(Eigen::Map<Eigen::Vector3d>(&para_Ex_Pose_[1][0]));
-            
+
 
         }
         else{
@@ -140,10 +140,10 @@ struct camera_module_info{
                 img_topic_.resize(1);
                 calib_file_.resize(1);
             }
-            
+
 
             para_Ex_Pose_.resize(1, new double[SIZE_POSE]);
-            
+
             ric_.clear();
             ric_.emplace_back(Eigen::Map<Eigen::Quaterniond>(&para_Ex_Pose_[0][3]));
 
@@ -197,6 +197,8 @@ extern int EQUALIZE;
 extern double DEPTH_MIN;
 extern double DEPTH_MAX;
 
+extern int OPTFLOW_WIN_SIZE;
+extern int OPTFLOW_PYR_LEVELS;
 
 extern double INIT_DEPTH;
 extern double MIN_PARALLAX;

@@ -31,3 +31,4 @@ message(STATUS "Install prefix: ${CMAKE_INSTALL_PREFIX}")
 # ---------------------------------------------------------------
 add_subdirectory(camera_models)
 add_subdirectory(vins_estimator)
+add_subdirectory(kalibr_to_vinsmulti)

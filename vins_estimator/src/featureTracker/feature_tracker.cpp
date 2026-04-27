@@ -1,8 +1,8 @@
 /*******************************************************
  * Copyright (C) 2025, Aerial Robotics Group, Hong Kong University of Science and Technology
- * 
+ *
  * This file is part of VINS.
- * 
+ *
  * Licensed under the GNU General Public License v3.0;
  * you may not use this file except in compliance with the License.
  *******************************************************/
@@ -10,7 +10,8 @@
 #include "feature_tracker.h"
 #include <Eigen/src/Core/Matrix.h>
 
-namespace vins_multi{
+namespace vins_multi
+{
 
 bool FeatureTracker::inBorder(const cv::Point2f &pt)
 {
@@ -22,7 +23,7 @@ bool FeatureTracker::inBorder(const cv::Point2f &pt)
 
 double distance(cv::Point2f pt1, cv::Point2f pt2)
 {
-    //printf("pt1: %f %f pt2: %f %f\n", pt1.x, pt1.y, pt2.x, pt2.y);
+    // printf("pt1: %f %f pt2: %f %f\n", pt1.x, pt1.y, pt2.x, pt2.y);
     double dx = pt1.x - pt2.x;
     double dy = pt1.y - pt2.y;
     return sqrt(dx * dx + dy * dy);
@@ -46,7 +47,7 @@ void reduceVector(vector<int> &v, vector<uchar> status)
     v.resize(j);
 }
 
-FeatureTracker::FeatureTracker(bool is_depth, bool is_stereo, int feature_max_cnt): depth{is_depth}, stereo{is_stereo}, max_cnt{feature_max_cnt}, track_num{feature_max_cnt}, track_percentage{1.0}
+FeatureTracker::FeatureTracker(bool is_depth, bool is_stereo, int feature_max_cnt) : depth{is_depth}, stereo{is_stereo}, max_cnt{feature_max_cnt}, track_num{feature_max_cnt}, track_percentage{1.0}
 {
     n_id = 0;
     hasPrediction = false;
@@ -68,7 +69,8 @@ FeatureTracker::FeatureTracker(bool is_depth, bool is_stereo, int feature_max_cn
     pts_depth.reserve(feature_max_cnt);
 }
 
-void FeatureTracker::set_max_feature_num(int max_feature_num){
+void FeatureTracker::set_max_feature_num(int max_feature_num)
+{
     max_cnt = max_feature_num;
 }
 
@@ -82,10 +84,9 @@ void FeatureTracker::setMask()
     for (unsigned int i = 0; i < cur_pts.size(); i++)
         cnt_pts_id.push_back(make_pair(track_cnt[i], make_pair(cur_pts[i], ids[i])));
 
-    sort(cnt_pts_id.begin(), cnt_pts_id.end(), [](const pair<int, pair<cv::Point2f, int>> &a, const pair<int, pair<cv::Point2f, int>> &b)
-         {
-            return a.first > b.first;
-         });
+    sort(cnt_pts_id.begin(), cnt_pts_id.end(), [](const pair<int, pair<cv::Point2f, int>> &a, const pair<int, pair<cv::Point2f, int>> &b) {
+        return a.first > b.first;
+    });
 
     cur_pts.clear();
     ids.clear();
@@ -105,7 +106,7 @@ void FeatureTracker::setMask()
 
 double FeatureTracker::distance(cv::Point2f &pt1, cv::Point2f &pt2)
 {
-    //printf("pt1: %f %f pt2: %f %f\n", pt1.x, pt1.y, pt2.x, pt2.y);
+    // printf("pt1: %f %f pt2: %f %f\n", pt1.x, pt1.y, pt2.x, pt2.y);
     double dx = pt1.x - pt2.x;
     double dy = pt1.y - pt2.y;
     return sqrt(dx * dx + dy * dy);
@@ -122,19 +123,20 @@ map<int, FeaturePerFrame> FeatureTracker::trackImage(double _cur_time, const cv:
     if (EQUALIZE)
     {
         cv::Mat img_tmp;
-        cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(3.0, cv::Size(8, 8));
+        cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(5.0, cv::Size(5, 5));
         TicToc t_c;
         clahe->apply(_img, img_tmp);
         ROS_DEBUG("CLAHE costs: %fms", t_c.toc());
         cur_img = img_tmp;
 
-        if(stereo && !_img1.empty())
+        if (stereo && !_img1.empty())
         {
-            cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(3.0, cv::Size(8, 8));
+            cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(5.0, cv::Size(5, 5));
             clahe->apply(_img1, rightImg);
         }
     }
-    else{
+    else
+    {
         cur_img = _img;
     }
 
@@ -155,34 +157,43 @@ map<int, FeaturePerFrame> FeatureTracker::trackImage(double _cur_time, const cv:
         vector<float> err;
 
         auto prev_pt_size = prev_pts.size();
-        if(hasPrediction)
+        if (hasPrediction)
         {
             cur_pts = predict_pts;
-            cv::calcOpticalFlowPyrLK(prev_img, cur_img, prev_pts, cur_pts, status, err, cv::Size(15, 15), 1,
-            cv::TermCriteria(cv::TermCriteria::COUNT+cv::TermCriteria::EPS, 30, 0.01), cv::OPTFLOW_USE_INITIAL_FLOW);
+            // cv::calcOpticalFlowPyrLK(prev_img, cur_img, prev_pts, cur_pts, status, err, cv::Size(OPTFLOW_WIN_SIZE, OPTFLOW_WIN_SIZE), 1,
+            //                          cv::TermCriteria(cv::TermCriteria::COUNT + cv::TermCriteria::EPS, 30, 0.01), cv::OPTFLOW_USE_INITIAL_FLOW);
 
-            int succ_num = 0;
-            for (size_t i = 0; i < status.size(); i++)
-            {
-                if (status[i])
-                    succ_num++;
-            }
-            if (succ_num < 10)
-            cv::calcOpticalFlowPyrLK(prev_img, cur_img, prev_pts, cur_pts, status, err, cv::Size(15, 15), 3);
+            // int succ_num = 0;
+            // for (size_t i = 0; i < status.size(); i++)
+            // {
+            //     if (status[i])
+            //         succ_num++;
+            // }
+            // if (succ_num < 10)
+                cv::calcOpticalFlowPyrLK(prev_img, cur_img, prev_pts, cur_pts, status, err, cv::Size(OPTFLOW_WIN_SIZE, OPTFLOW_WIN_SIZE), OPTFLOW_PYR_LEVELS);
         }
         else
-            cv::calcOpticalFlowPyrLK(prev_img, cur_img, prev_pts, cur_pts, status, err, cv::Size(15, 15), 3);
+            cv::calcOpticalFlowPyrLK(prev_img, cur_img, prev_pts, cur_pts, status, err, cv::Size(OPTFLOW_WIN_SIZE, OPTFLOW_WIN_SIZE), OPTFLOW_PYR_LEVELS);
         // reverse check
-        if(FLOW_BACK)
+        if (FLOW_BACK)
         {
             vector<uchar> reverse_status;
             vector<cv::Point2f> reverse_pts = prev_pts;
-            cv::calcOpticalFlowPyrLK(cur_img, prev_img, cur_pts, reverse_pts, reverse_status, err, cv::Size(15, 15), 1,
-            cv::TermCriteria(cv::TermCriteria::COUNT+cv::TermCriteria::EPS, 30, 0.01), cv::OPTFLOW_USE_INITIAL_FLOW);
-            //cv::calcOpticalFlowPyrLK(cur_img, prev_img, cur_pts, reverse_pts, reverse_status, err, cv::Size(15, 15), 3);
-            for(size_t i = 0; i < status.size(); i++)
+            // cv::calcOpticalFlowPyrLK(cur_img, prev_img, cur_pts, reverse_pts, reverse_status, err, cv::Size(OPTFLOW_WIN_SIZE, OPTFLOW_WIN_SIZE), 1,
+            //                          cv::TermCriteria(cv::TermCriteria::COUNT + cv::TermCriteria::EPS, 30, 0.01), cv::OPTFLOW_USE_INITIAL_FLOW);
+
+            // int succ_num = 0;
+            // for (size_t i = 0; i < reverse_status.size(); i++)
+            // {
+            //     if (reverse_status[i])
+            //         succ_num++;
+            // }
+            // if (succ_num < 10)
+                cv::calcOpticalFlowPyrLK(cur_img, prev_img, cur_pts, reverse_pts, reverse_status, err, cv::Size(OPTFLOW_WIN_SIZE, OPTFLOW_WIN_SIZE), OPTFLOW_PYR_LEVELS);
+
+            for (size_t i = 0; i < status.size(); i++)
             {
-                if(status[i] && reverse_status[i] && distance(prev_pts[i], reverse_pts[i]) <= 0.5)
+                if (status[i] && reverse_status[i] && distance(prev_pts[i], reverse_pts[i]) <= 0.5)
                 {
                     status[i] = 1;
                 }
@@ -191,7 +202,8 @@ map<int, FeaturePerFrame> FeatureTracker::trackImage(double _cur_time, const cv:
             }
         }
 
-        for (int i = 0; i < int(cur_pts.size()); i++){
+        for (int i = 0; i < int(cur_pts.size()); i++)
+        {
             if (status[i] && !inBorder(cur_pts[i]))
                 status[i] = 0;
         }
@@ -222,7 +234,7 @@ map<int, FeaturePerFrame> FeatureTracker::trackImage(double _cur_time, const cv:
         int n_max_cnt = max_cnt - static_cast<int>(cur_pts.size());
         if (n_max_cnt > 0)
         {
-            if(mask.empty())
+            if (mask.empty())
                 cout << "mask is empty " << endl;
             if (mask.type() != CV_8UC1)
                 cout << "mask type wrong " << endl;
@@ -230,7 +242,7 @@ map<int, FeaturePerFrame> FeatureTracker::trackImage(double _cur_time, const cv:
         }
         else
             n_pts.clear();
-        ROS_DEBUG("detect feature %d costs: %f ms",n_max_cnt, t_t.toc());
+        ROS_DEBUG("detect feature %d costs: %f ms", n_max_cnt, t_t.toc());
 
         for (auto &p : n_pts)
         {
@@ -244,35 +256,35 @@ map<int, FeaturePerFrame> FeatureTracker::trackImage(double _cur_time, const cv:
         }
 
         // return map<int,FeaturePerFrame>();
-        //printf("feature cnt after add %d\n", (int)ids.size());
+        // printf("feature cnt after add %d\n", (int)ids.size());
     }
 
     cur_un_pts = undistortedPts(cur_pts, m_camera[0]);
 
     pts_velocity = ptsVelocity(ids, cur_un_pts, cur_un_pts_map, prev_un_pts_map);
 
-    if(!_img1.empty() && stereo)
+    if (!_img1.empty() && stereo)
     {
         ids_right.clear();
         cur_right_pts.clear();
         cur_un_right_pts.clear();
         right_pts_velocity.clear();
         cur_un_right_pts_map.clear();
-        if(!cur_pts.empty())
+        if (!cur_pts.empty())
         {
             // printf("stereo image; track feature on right image\n");
             vector<cv::Point2f> reverseLeftPts;
             vector<uchar> status, statusRightLeft;
             vector<float> err;
             // cur left ---- cur right
-            cv::calcOpticalFlowPyrLK(cur_img, rightImg, cur_pts, cur_right_pts, status, err, cv::Size(15, 15), 3);
+            cv::calcOpticalFlowPyrLK(cur_img, rightImg, cur_pts, cur_right_pts, status, err, cv::Size(OPTFLOW_WIN_SIZE, OPTFLOW_WIN_SIZE), OPTFLOW_PYR_LEVELS);
             // reverse check cur right ---- cur left
-            if(FLOW_BACK)
+            if (FLOW_BACK)
             {
-                cv::calcOpticalFlowPyrLK(rightImg, cur_img, cur_right_pts, reverseLeftPts, statusRightLeft, err, cv::Size(15, 15), 3);
-                for(size_t i = 0; i < status.size(); i++)
+                cv::calcOpticalFlowPyrLK(rightImg, cur_img, cur_right_pts, reverseLeftPts, statusRightLeft, err, cv::Size(OPTFLOW_WIN_SIZE, OPTFLOW_WIN_SIZE), OPTFLOW_PYR_LEVELS);
+                for (size_t i = 0; i < status.size(); i++)
                 {
-                    if(status[i] && statusRightLeft[i] && inBorder(cur_right_pts[i]) && distance(cur_pts[i], reverseLeftPts[i]) <= 0.5)
+                    if (status[i] && statusRightLeft[i] && inBorder(cur_right_pts[i]) && distance(cur_pts[i], reverseLeftPts[i]) <= 0.5)
                         status[i] = 1;
                     else
                         status[i] = 0;
@@ -295,12 +307,13 @@ map<int, FeaturePerFrame> FeatureTracker::trackImage(double _cur_time, const cv:
         }
         prev_un_right_pts_map = cur_un_right_pts_map;
     }
-    else if(!_img1.empty() && depth){
+    else if (!_img1.empty() && depth)
+    {
         // rejectDepth(_img1);
         setDepth(_img1);
     }
 
-    if(SHOW_TRACK)
+    if (SHOW_TRACK)
         drawTrack(cur_img, rightImg, ids, cur_pts, cur_right_pts, prevLeftPtsMap);
 
     prev_img = cur_img;
@@ -311,12 +324,12 @@ map<int, FeaturePerFrame> FeatureTracker::trackImage(double _cur_time, const cv:
     hasPrediction = false;
 
     prevLeftPtsMap.clear();
-    for(size_t i = 0; i < cur_pts.size(); i++)
+    for (size_t i = 0; i < cur_pts.size(); i++)
         prevLeftPtsMap[ids[i]] = cur_pts[i];
 
     // map<int, vector<pair<int, Eigen::VectorXd>>> featureFrame;
     FeaturePerFrame featurePt;
-    map<int,FeaturePerFrame> featureFrame;
+    map<int, FeaturePerFrame> featureFrame;
     for (size_t i = 0; i < ids.size(); i++)
     {
         int feature_id = ids[i];
@@ -344,15 +357,17 @@ map<int, FeaturePerFrame> FeatureTracker::trackImage(double _cur_time, const cv:
 
         featurePt.is_depth = featurePt.is_stereo = false;
 
-
-        if(depth && pts_depth[i] > 0.0){
+        if (depth && pts_depth[i] > 0.0)
+        {
             // Eigen::Matrix<double, 8, 1> xyz_uv_velocity_depth;
             // xyz_uv_velocity_depth << x, y, z, p_u, p_v, velocity_x, velocity_y, pts_depth[i];
             // featurePt.pt_data = xyz_uv_velocity_depth;
             featurePt.depth = pts_depth[i];
             featurePt.is_depth = true;
             // featureFrame[feature_id].emplace_back(camera_id,  xyz_uv_velocity_depth);
-        } else {
+        }
+        else
+        {
             featurePt.depth = -1.0;
             // Eigen::Matrix<double, 7, 1> xyz_uv_velocity;
             // xyz_uv_velocity << x, y, z, p_u, p_v, velocity_x, velocity_y;
@@ -360,7 +375,7 @@ map<int, FeaturePerFrame> FeatureTracker::trackImage(double _cur_time, const cv:
             // featurePt.depth = false;
             // featureFrame[feature_id].emplace_back(camera_id,  xyz_uv_velocity);
         }
-        featureFrame[feature_id]=featurePt;
+        featureFrame[feature_id] = featurePt;
     }
 
     if (!_img1.empty() && stereo)
@@ -395,7 +410,6 @@ map<int, FeaturePerFrame> FeatureTracker::trackImage(double _cur_time, const cv:
             // featureFrame[feature_id].emplace_back(camera_id,  xyz_uv_velocity);
             // featureFrame[feature_id].pt_data_right = xyz_uv_velocity;
             featureFrame[feature_id].is_stereo = true;
-
         }
     }
 
@@ -442,14 +456,13 @@ map<int, FeaturePerFrame> FeatureTracker::trackImageGPU(double _cur_time, const 
         // GPU_MUTEX.lock();
         TicToc t_og;
 
-
         // TicToc gpu_mat_time;
         cv::cuda::GpuMat prev_gpu_pts(prev_pts);
         cv::cuda::GpuMat cur_gpu_pts(cur_pts);
         cv::cuda::GpuMat gpu_status;
         // cout<<"gpu mat construct time: "<<gpu_mat_time.toc()<<endl;
 
-        if(hasPrediction)
+        if (hasPrediction)
         {
             cur_gpu_pts = cv::cuda::GpuMat(predict_pts);
             cv::Ptr<cv::cuda::SparsePyrLKOpticalFlow> d_pyrLK_sparse = cv::cuda::SparsePyrLKOpticalFlow::create(cv::Size(15, 15), 3, 30, true);
@@ -476,7 +489,7 @@ map<int, FeaturePerFrame> FeatureTracker::trackImageGPU(double _cur_time, const 
             if (succ_num < 10)
             {
                 cv::Ptr<cv::cuda::SparsePyrLKOpticalFlow> d_pyrLK_sparse = cv::cuda::SparsePyrLKOpticalFlow::create(
-                cv::Size(15, 15), 3, 30, false);
+                    cv::Size(15, 15), 3, 30, false);
                 d_pyrLK_sparse->calc(prev_pyr, cur_pyr, prev_gpu_pts, cur_gpu_pts, gpu_status);
 
                 // vector<cv::Point2f> tmp1_cur_pts(cur_gpu_pts.cols);
@@ -495,7 +508,7 @@ map<int, FeaturePerFrame> FeatureTracker::trackImageGPU(double _cur_time, const 
             // ROS_ERROR("GPU optical flow!");
             TicToc gpu_of_time;
             cv::Ptr<cv::cuda::SparsePyrLKOpticalFlow> d_pyrLK_sparse = cv::cuda::SparsePyrLKOpticalFlow::create(
-            cv::Size(15, 15), 3, 30, false);
+                cv::Size(15, 15), 3, 30, false);
             // d_pyrLK_sparse->calc(prev_gpu_img, cur_gpu_img, prev_gpu_pts, cur_gpu_pts, gpu_status);
             d_pyrLK_sparse->calc(prev_pyr, cur_pyr, prev_gpu_pts, cur_gpu_pts, gpu_status);
             // cout<<"gpu of cal time: "<<gpu_of_time.toc()<<endl;
@@ -504,7 +517,6 @@ map<int, FeaturePerFrame> FeatureTracker::trackImageGPU(double _cur_time, const 
             cur_gpu_pts.download(cur_pts);
             gpu_status.download(status);
             // cout<<"gpu mat download time: "<<gpu_mat_download_time.toc()<<endl;
-
 
             // vector<cv::Point2f> tmp1_cur_pts(cur_gpu_pts.cols);
             // cur_gpu_pts.download(tmp1_cur_pts);
@@ -516,22 +528,20 @@ map<int, FeaturePerFrame> FeatureTracker::trackImageGPU(double _cur_time, const 
 
             // d_pyrLK_sparse.release();
         }
-        if(FLOW_BACK)
+        if (FLOW_BACK)
         {
             // TicToc rev_gpu_mat_time;
             cv::cuda::GpuMat reverse_gpu_status;
             cv::cuda::GpuMat reverse_gpu_pts = prev_gpu_pts;
             // cout<<"rev gpu mat construct time: "<<rev_gpu_mat_time.toc()<<endl;
 
-
             // ROS_ERROR("GPU optical flow!");
             TicToc gpu_of_back_time;
             cv::Ptr<cv::cuda::SparsePyrLKOpticalFlow> d_pyrLK_sparse = cv::cuda::SparsePyrLKOpticalFlow::create(
-            cv::Size(15, 15), 3, 30, true);
+                cv::Size(15, 15), 3, 30, true);
             // d_pyrLK_sparse->calc(cur_gpu_img, prev_gpu_img, cur_gpu_pts, reverse_gpu_pts, reverse_gpu_status);
             d_pyrLK_sparse->calc(cur_pyr, prev_pyr, cur_gpu_pts, reverse_gpu_pts, reverse_gpu_status);
             // cout<<"gpu of back time: "<<gpu_of_back_time.toc()<<endl;
-
 
             // TicToc rev_gpu_mat_download_time;
             vector<cv::Point2f> reverse_pts(reverse_gpu_pts.cols);
@@ -541,12 +551,11 @@ map<int, FeaturePerFrame> FeatureTracker::trackImageGPU(double _cur_time, const 
             reverse_gpu_status.download(reverse_status);
             // cout<<"rev gpu mat download time: "<<rev_gpu_mat_download_time.toc()<<endl;
 
-
             // d_pyrLK_sparse.release();
 
-            for(size_t i = 0; i < status.size(); i++)
+            for (size_t i = 0; i < status.size(); i++)
             {
-                if(status[i] && reverse_status[i] && distance(prev_pts[i], reverse_pts[i]) <= 0.5)
+                if (status[i] && reverse_status[i] && distance(prev_pts[i], reverse_pts[i]) <= 0.5)
                 {
                     status[i] = 1;
                 }
@@ -559,18 +568,23 @@ map<int, FeaturePerFrame> FeatureTracker::trackImageGPU(double _cur_time, const 
         // GPU_MUTEX.unlock();
         // printf("gpu temporal optical flow costs: %f ms\n",t_og.toc());
 
-        for (int i = 0; i < int(cur_pts.size()); i++){
+        for (int i = 0; i < int(cur_pts.size()); i++)
+        {
             if (status[i] && !inBorder(cur_pts[i]))
                 status[i] = 0;
 
-            for(int j = i+1;  j < int(cur_pts.size()); j++ ){
+            for (int j = i + 1; j < int(cur_pts.size()); j++)
+            {
                 auto dist = cur_pts[i] - cur_pts[j];
 
-                if(dist.x * dist.x + dist.y * dist.y < MIN_DIST * MIN_DIST){
-                    if(track_cnt[i] < track_cnt[j]){
+                if (dist.x * dist.x + dist.y * dist.y < MIN_DIST * MIN_DIST)
+                {
+                    if (track_cnt[i] < track_cnt[j])
+                    {
                         status[i] = 0;
                     }
-                    else{
+                    else
+                    {
                         status[j] = 0;
                     }
                 }
@@ -581,7 +595,7 @@ map<int, FeaturePerFrame> FeatureTracker::trackImageGPU(double _cur_time, const 
         reduceVector(ids, status);
         reduceVector(track_cnt, status);
         ROS_DEBUG("temporal optical flow costs: %fms", t_o.toc());
-        //printf("track cnt %d\n", (int)ids.size());
+        // printf("track cnt %d\n", (int)ids.size());
 
         track_num = static_cast<double>(cur_pts.size());
         track_percentage = track_num / static_cast<double>(prev_pt_size);
@@ -635,11 +649,11 @@ map<int, FeaturePerFrame> FeatureTracker::trackImageGPU(double _cur_time, const 
             // cout<<"gpu feature time: "<<t_g.toc()<<endl;
 
             // std::cout << "d_prevPts size: "<< d_prevPts.size()<<std::endl;
-            if(!d_prevPts.empty()){
+            if (!d_prevPts.empty())
+            {
                 // TicToc feature_gpu_mat_download_time;
                 n_pts = cv::Mat_<cv::Point2f>(cv::Mat(d_prevPts));
                 // cout<<"feature_gpu_mat_download_time: "<<feature_gpu_mat_download_time.toc()<<endl;
-
             }
             else
                 n_pts.clear();
@@ -655,27 +669,31 @@ map<int, FeaturePerFrame> FeatureTracker::trackImageGPU(double _cur_time, const 
         else
             n_pts.clear();
 
-        ROS_DEBUG("detect feature %d costs: %f ms",n_max_cnt, t_t.toc());
+        ROS_DEBUG("detect feature %d costs: %f ms", n_max_cnt, t_t.toc());
 
         unsigned int cur_pt_size = cur_pts.size();
 
         for (auto &p : n_pts)
         {
-            if(cur_pts.size() >= max_cnt){
+            if (cur_pts.size() >= max_cnt)
+            {
                 break;
             }
 
             bool close_new_pt = false;
-            for(auto &cur_p : cur_pts){
+            for (auto &cur_p : cur_pts)
+            {
                 auto dist = cur_p - p;
 
-                if(dist.x * dist.x + dist.y * dist.y <= MIN_DIST * MIN_DIST){
+                if (dist.x * dist.x + dist.y * dist.y <= MIN_DIST * MIN_DIST)
+                {
                     close_new_pt = true;
                     break;
                 }
             }
 
-            if(!close_new_pt){
+            if (!close_new_pt)
+            {
                 cur_pts.emplace_back(p);
                 ids.emplace_back(n_id++);
                 track_cnt.emplace_back(1);
@@ -687,14 +705,14 @@ map<int, FeaturePerFrame> FeatureTracker::trackImageGPU(double _cur_time, const 
         }
 
         // return map<int,FeaturePerFrame>();
-        //printf("feature cnt after add %d\n", (int)ids.size());
+        // printf("feature cnt after add %d\n", (int)ids.size());
     }
 
     cur_un_pts = undistortedPts(cur_pts, m_camera[0]);
 
     pts_velocity = ptsVelocity(ids, cur_un_pts, cur_un_pts_map, prev_un_pts_map);
 
-    if(!_img1.empty() && stereo)
+    if (!_img1.empty() && stereo)
     {
         // ids_right.clear();
         // cur_right_pts.clear();
@@ -738,12 +756,13 @@ map<int, FeaturePerFrame> FeatureTracker::trackImageGPU(double _cur_time, const 
         // }
         // prev_un_right_pts_map = cur_un_right_pts_map;
     }
-    else if(!_img1.empty() && depth){
+    else if (!_img1.empty() && depth)
+    {
         // rejectDepth(_img1);
         setDepth(_img1);
     }
 
-    if(SHOW_TRACK)
+    if (SHOW_TRACK)
         drawTrack(_img, rightImg, ids, cur_pts, cur_right_pts, prevLeftPtsMap);
 
     // prev_img = _img;
@@ -754,12 +773,12 @@ map<int, FeaturePerFrame> FeatureTracker::trackImageGPU(double _cur_time, const 
     hasPrediction = false;
 
     prevLeftPtsMap.clear();
-    for(size_t i = 0; i < cur_pts.size(); i++)
+    for (size_t i = 0; i < cur_pts.size(); i++)
         prevLeftPtsMap[ids[i]] = cur_pts[i];
 
     // map<int, vector<pair<int, Eigen::VectorXd>>> featureFrame;
     FeaturePerFrame featurePt;
-    map<int,FeaturePerFrame> featureFrame;
+    map<int, FeaturePerFrame> featureFrame;
     for (size_t i = 0; i < ids.size(); i++)
     {
         int feature_id = ids[i];
@@ -787,8 +806,8 @@ map<int, FeaturePerFrame> FeatureTracker::trackImageGPU(double _cur_time, const 
 
         featurePt.is_depth = featurePt.is_stereo = false;
 
-
-        if(depth && pts_depth[i] > 0.0){
+        if (depth && pts_depth[i] > 0.0)
+        {
             // Eigen::Matrix<double, 8, 1> xyz_uv_velocity_depth;
             // xyz_uv_velocity_depth << x, y, z, p_u, p_v, velocity_x, velocity_y, pts_depth[i];
             // featurePt.pt_data = xyz_uv_velocity_depth;
@@ -796,7 +815,8 @@ map<int, FeaturePerFrame> FeatureTracker::trackImageGPU(double _cur_time, const 
             featurePt.is_depth = true;
             // featureFrame[feature_id].emplace_back(camera_id,  xyz_uv_velocity_depth);
         }
-        else{
+        else
+        {
             featurePt.depth = -1.0;
             // Eigen::Matrix<double, 7, 1> xyz_uv_velocity;
             // xyz_uv_velocity << x, y, z, p_u, p_v, velocity_x, velocity_y;
@@ -804,7 +824,7 @@ map<int, FeaturePerFrame> FeatureTracker::trackImageGPU(double _cur_time, const 
             // featurePt.depth = false;
             // featureFrame[feature_id].emplace_back(camera_id,  xyz_uv_velocity);
         }
-        featureFrame[feature_id]=featurePt;
+        featureFrame[feature_id] = featurePt;
     }
 
     if (!_img1.empty() && stereo)
@@ -839,7 +859,6 @@ map<int, FeaturePerFrame> FeatureTracker::trackImageGPU(double _cur_time, const 
             // featureFrame[feature_id].emplace_back(camera_id,  xyz_uv_velocity);
             // featureFrame[feature_id].pt_data_right = xyz_uv_velocity;
             featureFrame[feature_id].is_stereo = true;
-
         }
     }
 
@@ -847,7 +866,8 @@ map<int, FeaturePerFrame> FeatureTracker::trackImageGPU(double _cur_time, const 
     return featureFrame;
 }
 
-std::vector<cv::cuda::GpuMat> FeatureTracker::buildImagePyramid(const cv::cuda::GpuMat& img, int maxLevel_) {
+std::vector<cv::cuda::GpuMat> FeatureTracker::buildImagePyramid(const cv::cuda::GpuMat &img, int maxLevel_)
+{
     std::vector<cv::cuda::GpuMat> pyr;
     pyr.resize(maxLevel_ + 1);
 
@@ -856,7 +876,8 @@ std::vector<cv::cuda::GpuMat> FeatureTracker::buildImagePyramid(const cv::cuda::
     CV_Assert(cn == 1 || cn == 3 || cn == 4);
 
     pyr[0] = img;
-    for (int level = 1; level <= maxLevel_; ++level) {
+    for (int level = 1; level <= maxLevel_; ++level)
+    {
         cv::cuda::pyrDown(pyr[level - 1], pyr[level]);
     }
 
@@ -866,7 +887,7 @@ std::vector<cv::cuda::GpuMat> FeatureTracker::buildImagePyramid(const cv::cuda::
 #endif
 
 void FeatureTracker::rejectWithF()
-  {
+{
     if (cur_pts.size() >= 8)
     {
         ROS_DEBUG("FM ransac begins");
@@ -899,7 +920,8 @@ void FeatureTracker::rejectWithF()
     }
 }
 
-void FeatureTracker::rejectDepth(const cv::Mat &depth_img){
+void FeatureTracker::rejectDepth(const cv::Mat &depth_img)
+{
 
     // ROS_WARN("rej depth");
     // ROS_WARN("cur_pts size init: %d", cur_pts.size());
@@ -907,7 +929,8 @@ void FeatureTracker::rejectDepth(const cv::Mat &depth_img){
     // ros::Time t0 = ros::Time::now();
 
     std::vector<uchar> valid_status(cur_pts.size(), 0);
-    for (unsigned int i = 0; i < cur_pts.size(); i++){
+    for (unsigned int i = 0; i < cur_pts.size(); i++)
+    {
         double dep = depth_img.at<uint16_t>(cur_pts[i].y, cur_pts[i].x) * 0.001;
         valid_status[i] = (dep < DEPTH_MAX && dep > DEPTH_MIN) ? 1 : 0;
     }
@@ -936,7 +959,6 @@ void FeatureTracker::rejectDepth(const cv::Mat &depth_img){
     //             break;
     //         }
     //     }
-
 
     //     if(depth_valid){
     //         cur_pts_lap = fabs(depth[1] + depth[2] + depth[3] + depth[4] - 4.0 * depth[0]);
@@ -968,10 +990,12 @@ void FeatureTracker::rejectDepth(const cv::Mat &depth_img){
     reduceVector(pts_velocity, valid_status);
 }
 
-void FeatureTracker::setDepth(const cv::Mat &depth_img){
+void FeatureTracker::setDepth(const cv::Mat &depth_img)
+{
 
     pts_depth.resize(cur_pts.size());
-    for (unsigned int i = 0; i < cur_pts.size(); i++){
+    for (unsigned int i = 0; i < cur_pts.size(); i++)
+    {
         double dep = depth_img.at<uint16_t>(cur_pts[i].y, cur_pts[i].x) * 0.001;
         pts_depth[i] = (dep < DEPTH_MAX && dep > DEPTH_MIN) ? dep : -1.0;
     }
@@ -984,7 +1008,8 @@ void FeatureTracker::readIntrinsicParameter(const vector<std::string> &calib_fil
     camodocal::CameraPtr camera = CameraFactory::instance()->generateCameraFromYamlFile(calib_file[0]);
     m_camera.push_back(camera);
 
-    if(stereo){
+    if (stereo)
+    {
         ROS_INFO("reading paramerter of camera %s", calib_file[1].c_str());
         camodocal::CameraPtr camera_1 = CameraFactory::instance()->generateCameraFromYamlFile(calib_file[1]);
         m_camera.push_back(camera_1);
@@ -1003,7 +1028,7 @@ void FeatureTracker::showUndistortion(const string &name)
             m_camera[0]->liftProjective(a, b);
             distortedp.push_back(a);
             undistortedp.push_back(Eigen::Vector2d(b.x() / b.z(), b.y() / b.z()));
-            //printf("%f,%f->%f,%f,%f\n)\n", a.x(), a.y(), b.x(), b.y(), b.z());
+            // printf("%f,%f->%f,%f,%f\n)\n", a.x(), a.y(), b.x(), b.y(), b.z());
         }
     for (int i = 0; i < int(undistortedp.size()); i++)
     {
@@ -1011,16 +1036,16 @@ void FeatureTracker::showUndistortion(const string &name)
         pp.at<float>(0, 0) = undistortedp[i].x() * FOCAL_LENGTH + col / 2;
         pp.at<float>(1, 0) = undistortedp[i].y() * FOCAL_LENGTH + row / 2;
         pp.at<float>(2, 0) = 1.0;
-        //cout << trackerData[0].K << endl;
-        //printf("%lf %lf\n", p.at<float>(1, 0), p.at<float>(0, 0));
-        //printf("%lf %lf\n", pp.at<float>(1, 0), pp.at<float>(0, 0));
+        // cout << trackerData[0].K << endl;
+        // printf("%lf %lf\n", p.at<float>(1, 0), p.at<float>(0, 0));
+        // printf("%lf %lf\n", pp.at<float>(1, 0), pp.at<float>(0, 0));
         if (pp.at<float>(1, 0) + 300 >= 0 && pp.at<float>(1, 0) + 300 < row + 600 && pp.at<float>(0, 0) + 300 >= 0 && pp.at<float>(0, 0) + 300 < col + 600)
         {
             undistortedImg.at<uchar>(pp.at<float>(1, 0) + 300, pp.at<float>(0, 0) + 300) = cur_img.at<uchar>(distortedp[i].y(), distortedp[i].x());
         }
         else
         {
-            //ROS_ERROR("(%f %f) -> (%f %f)", distortedp[i].y, distortedp[i].x, pp.at<float>(1, 0), pp.at<float>(0, 0));
+            // ROS_ERROR("(%f %f) -> (%f %f)", distortedp[i].y, distortedp[i].x, pp.at<float>(1, 0), pp.at<float>(0, 0));
         }
     }
     // turn the following code on if you need
@@ -1042,7 +1067,7 @@ vector<cv::Point2f> FeatureTracker::undistortedPts(vector<cv::Point2f> &pts, cam
 }
 
 vector<cv::Point2f> FeatureTracker::ptsVelocity(vector<int> &ids, vector<cv::Point2f> &pts,
-                                            map<int, cv::Point2f> &cur_id_pts, map<int, cv::Point2f> &prev_id_pts)
+                                                map<int, cv::Point2f> &cur_id_pts, map<int, cv::Point2f> &prev_id_pts)
 {
     vector<cv::Point2f> pts_velocity;
     cur_id_pts.clear();
@@ -1074,7 +1099,6 @@ vector<cv::Point2f> FeatureTracker::ptsVelocity(vector<int> &ids, vector<cv::Poi
             }
             else
                 pts_velocity.emplace_back(0, 0);
-
         }
     }
     else
@@ -1085,10 +1109,12 @@ vector<cv::Point2f> FeatureTracker::ptsVelocity(vector<int> &ids, vector<cv::Poi
         }
     }
 
-    if(optical_flow_pt_cnt > 0){
+    if (optical_flow_pt_cnt > 0)
+    {
         mean_optical_flow_speed /= optical_flow_pt_cnt;
     }
-    else{
+    else
+    {
         mean_optical_flow_speed = std::numeric_limits<double>::max();
     }
 
@@ -1101,12 +1127,14 @@ void FeatureTracker::drawTrack(const cv::Mat &imLeft, const cv::Mat &imRight,
                                vector<cv::Point2f> &curRightPts,
                                map<int, cv::Point2f> &prevLeftPtsMap)
 {
-    //int rows = imLeft.rows;
+    // int rows = imLeft.rows;
     int cols = imLeft.cols;
     if (!imRight.empty() && stereo)
         cv::hconcat(imLeft, imRight, imTrack);
-    else{
-        if(USE_GPU){
+    else
+    {
+        if (USE_GPU)
+        {
 
 #ifdef WITH_CUDA
             cv::cuda::GpuMat gray_img, bgr_img;
@@ -1115,9 +1143,9 @@ void FeatureTracker::drawTrack(const cv::Mat &imLeft, const cv::Mat &imRight,
             bgr_img.download(imTrack);
 
 #endif
-
         }
-        else{
+        else
+        {
             imTrack = imLeft.clone();
         }
     }
@@ -1135,8 +1163,8 @@ void FeatureTracker::drawTrack(const cv::Mat &imLeft, const cv::Mat &imRight,
             cv::Point2f rightPt = curRightPts[i];
             rightPt.x += cols;
             cv::circle(imTrack, rightPt, 2, cv::Scalar(0, 255, 0), 2);
-            //cv::Point2f leftPt = curLeftPtsTrackRight[i];
-            //cv::line(imTrack, leftPt, rightPt, cv::Scalar(0, 255, 0), 1, 8, 0);
+            // cv::Point2f leftPt = curLeftPtsTrackRight[i];
+            // cv::line(imTrack, leftPt, rightPt, cv::Scalar(0, 255, 0), 1, 8, 0);
         }
     }
 
@@ -1145,25 +1173,24 @@ void FeatureTracker::drawTrack(const cv::Mat &imLeft, const cv::Mat &imRight,
     {
         int id = curLeftIds[i];
         mapIt = prevLeftPtsMap.find(id);
-        if(mapIt != prevLeftPtsMap.end())
+        if (mapIt != prevLeftPtsMap.end())
         {
             cv::arrowedLine(imTrack, curLeftPts[i], mapIt->second, cv::Scalar(0, 255, 0), 1, 8, 0, 0.2);
         }
     }
 
-    //draw prediction
+    // draw prediction
     /*
     for(size_t i = 0; i < predict_pts_debug.size(); i++)
     {
         cv::circle(imTrack, predict_pts_debug[i], 2, cv::Scalar(0, 170, 255), 2);
     }
     */
-    //printf("predict pts size %d \n", (int)predict_pts_debug.size());
+    // printf("predict pts size %d \n", (int)predict_pts_debug.size());
 
-    //cv::Mat imCur2Compress;
-    //cv::resize(imCur2, imCur2Compress, cv::Size(cols, rows / 2));
+    // cv::Mat imCur2Compress;
+    // cv::resize(imCur2, imCur2Compress, cv::Size(cols, rows / 2));
 }
-
 
 void FeatureTracker::setPrediction(map<int, Eigen::Vector3d> &predictPts)
 {
@@ -1173,7 +1200,7 @@ void FeatureTracker::setPrediction(map<int, Eigen::Vector3d> &predictPts)
     map<int, Eigen::Vector3d>::iterator itPredict;
     for (size_t i = 0; i < ids.size(); i++)
     {
-        //printf("prevLeftId size %d prevLeftPts size %d\n",(int)prevLeftIds.size(), (int)prevLeftPts.size());
+        // printf("prevLeftId size %d prevLeftPts size %d\n",(int)prevLeftIds.size(), (int)prevLeftPts.size());
         int id = ids[i];
         itPredict = predictPts.find(id);
         if (itPredict != predictPts.end())
@@ -1188,7 +1215,6 @@ void FeatureTracker::setPrediction(map<int, Eigen::Vector3d> &predictPts)
     }
 }
 
-
 void FeatureTracker::removeOutliers(set<int> &removePtsIds)
 {
     std::set<int>::iterator itSet;
@@ -1196,7 +1222,7 @@ void FeatureTracker::removeOutliers(set<int> &removePtsIds)
     for (size_t i = 0; i < ids.size(); i++)
     {
         itSet = removePtsIds.find(ids[i]);
-        if(itSet != removePtsIds.end())
+        if (itSet != removePtsIds.end())
             status.emplace_back(0);
         else
             status.emplace_back(1);
@@ -1207,10 +1233,9 @@ void FeatureTracker::removeOutliers(set<int> &removePtsIds)
     reduceVector(track_cnt, status);
 }
 
-
-cv::Mat& FeatureTracker::getTrackImage()
+cv::Mat &FeatureTracker::getTrackImage()
 {
     return imTrack;
 }
 
-}
+} // namespace vins_multi
