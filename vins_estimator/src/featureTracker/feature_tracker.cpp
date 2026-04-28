@@ -15,7 +15,7 @@ namespace vins_multi
 
 bool FeatureTracker::inBorder(const cv::Point2f &pt)
 {
-    const int BORDER_SIZE = 1;
+    const int BORDER_SIZE = OPTFLOW_WIN_SIZE / 2;
     int img_x = cvRound(pt.x);
     int img_y = cvRound(pt.y);
     return BORDER_SIZE <= img_x && img_x < col - BORDER_SIZE && BORDER_SIZE <= img_y && img_y < row - BORDER_SIZE;
