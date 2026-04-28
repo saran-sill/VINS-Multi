@@ -1,47 +1,48 @@
 /*******************************************************
  * Copyright (C) 2025, Aerial Robotics Group, Hong Kong University of Science and Technology
- * 
+ *
  * This file is part of VINS.
- * 
+ *
  * Licensed under the GNU General Public License v3.0;
  * you may not use this file except in compliance with the License.
  *******************************************************/
 
 #pragma once
 
-#include <cstdio>
-#include <iostream>
-#include <queue>
-#include <execinfo.h>
 #include <csignal>
-#include <opencv2/opencv.hpp>
+#include <cstdio>
+#include <execinfo.h>
+#include <iostream>
 #include <opencv2/imgproc/imgproc_c.h>
+#include <opencv2/opencv.hpp>
+#include <queue>
 
 #ifdef WITH_CUDA
 
-#include <opencv2/cudawarping.hpp>
-#include <opencv2/cudafeatures2d.hpp>
-#include <opencv2/cudaoptflow.hpp>
-#include <opencv2/cudaimgproc.hpp>
 #include <opencv2/cudaarithm.hpp>
+#include <opencv2/cudafeatures2d.hpp>
+#include <opencv2/cudaimgproc.hpp>
+#include <opencv2/cudaoptflow.hpp>
+#include <opencv2/cudawarping.hpp>
 
 #endif
 
-#include <eigen3/Eigen/Dense>
 #include <atomic>
+#include <eigen3/Eigen/Dense>
 
+#include "../estimator/feature_data_type.h"
+#include "../estimator/parameters.h"
+#include "../utility/tic_toc.h"
 #include "camodocal/camera_models/CameraFactory.h"
 #include "camodocal/camera_models/CataCamera.h"
 #include "camodocal/camera_models/PinholeCamera.h"
-#include "../estimator/parameters.h"
-#include "../utility/tic_toc.h"
-#include "../estimator/feature_data_type.h"
 
 using namespace std;
 using namespace camodocal;
 using namespace Eigen;
 
-namespace vins_multi{
+namespace vins_multi
+{
 
 bool inBorder(const cv::Point2f &pt);
 void reduceVector(vector<cv::Point2f> &v, vector<uchar> status);
@@ -49,11 +50,11 @@ void reduceVector(vector<int> &v, vector<uchar> status);
 
 class FeatureTracker
 {
-public:
-
+  public:
     FeatureTracker(bool is_depth, bool is_stereo, int feature_max_cnt);
-    FeatureTracker(const FeatureTracker& s) = delete;
-    ~FeatureTracker(){
+    FeatureTracker(const FeatureTracker &s) = delete;
+    ~FeatureTracker()
+    {
         ROS_ERROR("delete feature tracker!");
     }
     map<int, FeaturePerFrame> trackImage(double _cur_time, const cv::Mat &_img, const cv::Mat &_img1 = cv::Mat());
@@ -66,19 +67,19 @@ public:
     void setDepth(const cv::Mat &depth_img);
     void undistortedPoints();
     vector<cv::Point2f> undistortedPts(vector<cv::Point2f> &pts, camodocal::CameraPtr cam);
-    vector<cv::Point2f> ptsVelocity(vector<int> &ids, vector<cv::Point2f> &pts, 
+    vector<cv::Point2f> ptsVelocity(vector<int> &ids, vector<cv::Point2f> &pts,
                                     map<int, cv::Point2f> &cur_id_pts, map<int, cv::Point2f> &prev_id_pts);
-    void showTwoImage(const cv::Mat &img1, const cv::Mat &img2, 
+    void showTwoImage(const cv::Mat &img1, const cv::Mat &img2,
                       vector<cv::Point2f> pts1, vector<cv::Point2f> pts2);
-    void drawTrack(const cv::Mat &imLeft, const cv::Mat &imRight, 
-                                   vector<int> &curLeftIds,
-                                   vector<cv::Point2f> &curLeftPts, 
-                                   vector<cv::Point2f> &curRightPts,
-                                   map<int, cv::Point2f> &prevLeftPtsMap);
+    void drawTrack(const cv::Mat &imLeft, const cv::Mat &imRight,
+                   vector<int> &curLeftIds,
+                   vector<cv::Point2f> &curLeftPts,
+                   vector<cv::Point2f> &curRightPts,
+                   map<int, cv::Point2f> &prevLeftPtsMap);
     void setPrediction(map<int, Eigen::Vector3d> &predictPts);
     double distance(cv::Point2f &pt1, cv::Point2f &pt2);
     void removeOutliers(set<int> &removePtsIds);
-    cv::Mat& getTrackImage();
+    cv::Mat &getTrackImage();
     bool inBorder(const cv::Point2f &pt);
 
     int row, col;
@@ -96,7 +97,7 @@ public:
     std::vector<cv::cuda::GpuMat> prev_pyr;
 
     map<int, FeaturePerFrame> trackImageGPU(double _cur_time, const cv::Mat &_img, const cv::Mat &_img1 = cv::Mat());
-    std::vector<cv::cuda::GpuMat> buildImagePyramid(const cv::cuda::GpuMat& prevImg, int maxLevel_);
+    std::vector<cv::cuda::GpuMat> buildImagePyramid(const cv::cuda::GpuMat &prevImg, int maxLevel_);
 
 #endif
 
@@ -127,6 +128,8 @@ public:
 
     bool depth;
     bool stereo;
+
+    int min_dist_; // resolution-scaled
 };
 
-}
+} // namespace vins_multi

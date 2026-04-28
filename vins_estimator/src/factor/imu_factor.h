@@ -1,8 +1,8 @@
 /*******************************************************
  * Copyright (C) 2025, Aerial Robotics Group, Hong Kong University of Science and Technology
- * 
+ *
  * This file is part of VINS.
- * 
+ *
  * Licensed under the GNU General Public License v3.0;
  * you may not use this file except in compliance with the License.
  *******************************************************/
@@ -47,7 +47,7 @@ class IMUFactor : public ceres::SizedCostFunction<15, 7, 9, 7, 9>
         // }
 
         sqrt_info =  Eigen::LLT<Eigen::Matrix<double, 15, 15>>(_pre_integration->covariance.inverse()).matrixL().transpose();
- 
+
     }
     virtual bool Evaluate(double const *const *parameters, double *residuals, double **jacobians) const
     {
@@ -145,9 +145,9 @@ class IMUFactor : public ceres::SizedCostFunction<15, 7, 9, 7, 9>
                 if (jacobian_pose_i.maxCoeff() > 1e8 || jacobian_pose_i.minCoeff() < -1e8)
                 {
                     ROS_WARN("numerical unstable in preintegration pose i");
-                    ROS_ERROR("imu covar dt %lf", pre_integration->sum_dt);
-                    cout<<pre_integration->covariance<<endl;
-                    std::cout << sqrt_info << std::endl;
+                    // ROS_ERROR("imu covar dt %lf", pre_integration->sum_dt);
+                    // cout<<pre_integration->covariance<<endl;
+                    // std::cout << sqrt_info << std::endl;
                     //ROS_BREAK();
                 }
             }

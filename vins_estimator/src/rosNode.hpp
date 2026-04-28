@@ -43,12 +43,13 @@ class VinsNodeBaseClass
 
     struct uni_image_sub_ptr
     {
-        message_filters::Subscriber<sensor_msgs::Image> *img0_sync_sub_ptr_;
-        message_filters::Subscriber<sensor_msgs::Image> *img1_sync_sub_ptr_;
+        message_filters::Subscriber<sensor_msgs::Image> *img0_sync_sub_ptr_ = nullptr;
+        message_filters::Subscriber<sensor_msgs::Image> *img1_sync_sub_ptr_ = nullptr;
 
         SynchronizerImageExact sync_image_exact_;
 
-        ros::Subscriber *img0_sub_;
+        // Mono: single-image subscriber (value, not pointer)
+        ros::Subscriber img0_sub_;
     };
 
     class camera_module_info_with_sub

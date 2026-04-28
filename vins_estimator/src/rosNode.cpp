@@ -105,7 +105,7 @@ void VinsNodeBaseClass::registerSub(ros::NodeHandle &n)
         }
         else
         {
-            *camera_modules_[i].img_sub_.img0_sub_ = n.subscribe(CAM_MODULES[i].img_topic_[0], 1000, &VinsNodeBaseClass::camera_module_info_with_sub::img_callback, &(this->camera_modules_[i]), ros::TransportHints().tcpNoDelay(true));
+            camera_modules_[i].img_sub_.img0_sub_ = n.subscribe(CAM_MODULES[i].img_topic_[0], 1000, &VinsNodeBaseClass::camera_module_info_with_sub::img_callback, &(this->camera_modules_[i]), ros::TransportHints().tcpNoDelay(true));
         }
     }
 
@@ -208,7 +208,44 @@ void VinsNodeBaseClass::camera_module_info_with_sub::imgs_callback(const sensor_
 
 void VinsNodeBaseClass::camera_module_info_with_sub::img_callback(const sensor_msgs::ImageConstPtr &img0_msg)
 {
-    estimator_ptr_->inputImage(unique_id_, img0_msg->header.stamp.toSec(), getImageFromMsg(img0_msg)->image);
+    cv_bridge::CvImagePtr img_0 = getImageFromMsg(img0_msg);
+
+    if (img0_msg->encoding == sensor_msgs::image_encodings::RGB8)
+    {
+        if (USE_GPU)
+        {
+#ifdef WITH_CUDA
+            cv::cuda::GpuMat img0_gpu, img0_gray_gpu;
+            img0_gpu.upload(img_0->image);
+            cv::cuda::cvtColor(img0_gpu, img0_gray_gpu, cv::COLOR_RGB2GRAY);
+            img0_gray_gpu.download(img_0->image);
+#endif
+        }
+        else
+        {
+            cv::cvtColor(img_0->image, img_0->image, cv::COLOR_RGB2GRAY);
+        }
+    }
+    else if (img0_msg->encoding == sensor_msgs::image_encodings::BGR8)
+    {
+        if (USE_GPU)
+        {
+#ifdef WITH_CUDA
+            cv::cuda::GpuMat img0_gpu, img0_gray_gpu;
+            img0_gpu.upload(img_0->image);
+            cv::cuda::cvtColor(img0_gpu, img0_gray_gpu, cv::COLOR_BGR2GRAY);
+            img0_gray_gpu.download(img_0->image);
+#endif
+        }
+        else
+        {
+            cv::cvtColor(img_0->image, img_0->image, cv::COLOR_BGR2GRAY);
+        }
+    }
+
+    // Use the buffered path — same as stereo. Don't call inputImage directly,
+    // because that blocks waiting for IMU and deadlocks the ROS callback thread.
+    estimator_ptr_->inputImageToBuffer(unique_id_, img0_msg->header.stamp.toSec(), img_0->image);
 }
 
 void VinsNodeBaseClass::camera_module_info_with_sub::comp_imgs_callback(const sensor_msgs::CompressedImageConstPtr &img1_msg, const sensor_msgs::CompressedImageConstPtr &img2_msg)

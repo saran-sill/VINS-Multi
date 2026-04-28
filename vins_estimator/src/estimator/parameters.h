@@ -9,18 +9,19 @@
 
 #pragma once
 
-#include <ros/ros.h>
-#include <vector>
-#include <eigen3/Eigen/Dense>
 #include "../utility/utility.h"
-#include <opencv2/opencv.hpp>
-#include <opencv2/core/eigen.hpp>
+#include <eigen3/Eigen/Dense>
 #include <fstream>
 #include <map>
+#include <opencv2/core/eigen.hpp>
+#include <opencv2/opencv.hpp>
+#include <ros/ros.h>
+#include <vector>
 
 using namespace std;
 
-namespace vins_multi{
+namespace vins_multi
+{
 
 enum SIZE_PARAMETERIZATION
 {
@@ -49,7 +50,7 @@ enum NoiseOrder
 };
 
 const double FOCAL_LENGTH = 460.0;
-const int WINDOW_SIZE = 21;
+
 const int MAX_WINDOW_SIZE = 30;
 const int MAX_NUM_OF_F = 1000;
 const double MIN_OPT_INTERVAL = 0.04;
@@ -60,9 +61,10 @@ const double MIN_FRAME_INTERVAL_FOR_OPT = 0.005;
 const int MIN_TRACK_NUM_PER_MODULE = 30;
 extern int MAX_TRACK_NUM_PER_MODULE;
 const double FRAME_PRIORITY_CONST = 20.0;
-//#define UNIT_SPHERE_ERROR
+// #define UNIT_SPHERE_ERROR
 
-struct camera_module_info{
+struct camera_module_info
+{
     int module_id_;
     bool depth_;
     bool stereo_;
@@ -75,7 +77,7 @@ struct camera_module_info{
     vector<Eigen::Map<Eigen::Quaterniond>> ric_;
     vector<Eigen::Map<Eigen::Vector3d>> tic_;
 
-    vector<double*> para_Ex_Pose_;
+    vector<double *> para_Ex_Pose_;
 
     // void mat2vec(){
     //     for(unsigned int i = 0; i < ric_.size(); i++){
@@ -112,8 +114,10 @@ struct camera_module_info{
 
     // }
 
-    void set_size(){
-        if(stereo_){
+    void set_size()
+    {
+        if (stereo_)
+        {
             img_topic_.resize(2);
             calib_file_.resize(2);
 
@@ -128,19 +132,19 @@ struct camera_module_info{
             tic_.clear();
             tic_.emplace_back(Eigen::Map<Eigen::Vector3d>(&para_Ex_Pose_[0][0]));
             tic_.emplace_back(Eigen::Map<Eigen::Vector3d>(&para_Ex_Pose_[1][0]));
-
-
         }
-        else{
-            if(depth_){
+        else
+        {
+            if (depth_)
+            {
                 img_topic_.resize(2);
                 calib_file_.resize(2);
             }
-            else{
+            else
+            {
                 img_topic_.resize(1);
                 calib_file_.resize(1);
             }
-
 
             para_Ex_Pose_.resize(1, new double[SIZE_POSE]);
 
@@ -153,7 +157,8 @@ struct camera_module_info{
     }
 };
 
-struct imu_info{
+struct imu_info
+{
     std::string imu_topic_;
     double acc_n_;
     double gyr_n_;
@@ -173,6 +178,10 @@ extern std::vector<camera_module_info> CAM_MODULES;
 extern imu_info IMU_MODULE;
 extern Eigen::Vector3d G;
 extern map<int, Eigen::Vector3d> pts_gt;
+
+extern int WINDOW_SIZE;
+
+extern std::string DEBUG_LEVEL;
 
 extern double BIAS_ACC_THRESHOLD;
 extern double BIAS_GYR_THRESHOLD;
@@ -197,6 +206,11 @@ extern int EQUALIZE;
 extern double DEPTH_MIN;
 extern double DEPTH_MAX;
 
+extern double CLAHE_CLIP_LIMIT;
+extern int CLAHE_GRID_SIZE;
+
+extern double GOOD_FEAT_TO_TRACK_QUALITY;
+
 extern int OPTFLOW_WIN_SIZE;
 extern int OPTFLOW_PYR_LEVELS;
 
@@ -204,8 +218,11 @@ extern double INIT_DEPTH;
 extern double MIN_PARALLAX;
 extern int ESTIMATE_EXTRINSIC;
 
+extern int VIS_CIRCLE_RADIUS;
+extern int VIS_ARROW_THICKNESS;
+
 extern std::mutex GPU_MUTEX;
 
 void readParameters(std::string config_file);
 
-}
+} // namespace vins_multi

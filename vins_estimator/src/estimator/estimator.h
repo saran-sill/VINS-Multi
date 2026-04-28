@@ -355,7 +355,7 @@ class Estimator
     Matrix3d back_R0_, last_R_, last_R0_;
     Vector3d back_P0_, last_P_, last_P0_;
     Vector3d origin_R0, origin_P0;
-    double Headers_[(WINDOW_SIZE + 1)];
+    // double Headers_[(WINDOW_SIZE + 1)];
 
     // IntegrationBase *pre_integrations_[(WINDOW_SIZE + 1)];
     // Vector3d acc_0_, gyr_0_;

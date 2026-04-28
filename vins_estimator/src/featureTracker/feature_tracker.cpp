@@ -99,7 +99,7 @@ void FeatureTracker::setMask()
             cur_pts.push_back(it.second.first);
             ids.push_back(it.second.second);
             track_cnt.push_back(it.first);
-            cv::circle(mask, it.second.first, MIN_DIST, 0, -1);
+            cv::circle(mask, it.second.first, min_dist_, 0, -1);
         }
     }
 }
@@ -114,6 +114,9 @@ double FeatureTracker::distance(cv::Point2f &pt1, cv::Point2f &pt2)
 
 map<int, FeaturePerFrame> FeatureTracker::trackImage(double _cur_time, const cv::Mat &_img, const cv::Mat &_img1)
 {
+    const double dist_scale = std::max(1.0, cur_img.rows / 720.0);
+    min_dist_ = std::max(10, static_cast<int>(std::round(MIN_DIST * dist_scale)));
+
     TicToc t_r;
     cur_time = _cur_time;
     row = cur_img.rows;
@@ -123,7 +126,7 @@ map<int, FeaturePerFrame> FeatureTracker::trackImage(double _cur_time, const cv:
     if (EQUALIZE)
     {
         cv::Mat img_tmp;
-        cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(5.0, cv::Size(5, 5));
+        cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(CLAHE_CLIP_LIMIT, cv::Size(CLAHE_GRID_SIZE, CLAHE_GRID_SIZE));
         TicToc t_c;
         clahe->apply(_img, img_tmp);
         ROS_DEBUG("CLAHE costs: %fms", t_c.toc());
@@ -131,7 +134,7 @@ map<int, FeaturePerFrame> FeatureTracker::trackImage(double _cur_time, const cv:
 
         if (stereo && !_img1.empty())
         {
-            cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(5.0, cv::Size(5, 5));
+            cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(CLAHE_CLIP_LIMIT, cv::Size(CLAHE_GRID_SIZE, CLAHE_GRID_SIZE));
             clahe->apply(_img1, rightImg);
         }
     }
@@ -142,7 +145,7 @@ map<int, FeaturePerFrame> FeatureTracker::trackImage(double _cur_time, const cv:
 
     /*
     {
-        cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(3.0, cv::Size(8, 8));
+        cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(CLAHE_CLIP_LIMIT, cv::Size(CLAHE_GRID_SIZE, CLAHE_GRID_SIZE));
         clahe->apply(cur_img, cur_img);
         if(!rightImg.empty())
             clahe->apply(rightImg, rightImg);
@@ -170,10 +173,14 @@ map<int, FeaturePerFrame> FeatureTracker::trackImage(double _cur_time, const cv:
             //         succ_num++;
             // }
             // if (succ_num < 10)
-                cv::calcOpticalFlowPyrLK(prev_img, cur_img, prev_pts, cur_pts, status, err, cv::Size(OPTFLOW_WIN_SIZE, OPTFLOW_WIN_SIZE), OPTFLOW_PYR_LEVELS);
+            //     cv::calcOpticalFlowPyrLK(prev_img, cur_img, prev_pts, cur_pts, status, err, cv::Size(OPTFLOW_WIN_SIZE, OPTFLOW_WIN_SIZE), OPTFLOW_PYR_LEVELS);
+
+            cv::calcOpticalFlowPyrLK(prev_img, cur_img, prev_pts, cur_pts, status, err, cv::Size(OPTFLOW_WIN_SIZE, OPTFLOW_WIN_SIZE), OPTFLOW_PYR_LEVELS,
+                                    cv::TermCriteria(cv::TermCriteria::COUNT + cv::TermCriteria::EPS, 30, 0.01), cv::OPTFLOW_USE_INITIAL_FLOW);
         }
         else
             cv::calcOpticalFlowPyrLK(prev_img, cur_img, prev_pts, cur_pts, status, err, cv::Size(OPTFLOW_WIN_SIZE, OPTFLOW_WIN_SIZE), OPTFLOW_PYR_LEVELS);
+
         // reverse check
         if (FLOW_BACK)
         {
@@ -238,7 +245,7 @@ map<int, FeaturePerFrame> FeatureTracker::trackImage(double _cur_time, const cv:
                 cout << "mask is empty " << endl;
             if (mask.type() != CV_8UC1)
                 cout << "mask type wrong " << endl;
-            cv::goodFeaturesToTrack(cur_img, n_pts, n_max_cnt, 0.01, MIN_DIST, mask);
+            cv::goodFeaturesToTrack(cur_img, n_pts, n_max_cnt, GOOD_FEAT_TO_TRACK_QUALITY, min_dist_, mask);
         }
         else
             n_pts.clear();
@@ -421,6 +428,9 @@ map<int, FeaturePerFrame> FeatureTracker::trackImage(double _cur_time, const cv:
 
 map<int, FeaturePerFrame> FeatureTracker::trackImageGPU(double _cur_time, const cv::Mat &_img, const cv::Mat &_img1)
 {
+    const double dist_scale = std::max(1.0, cur_img.rows / 720.0);
+    min_dist_ = std::max(10, static_cast<int>(std::round(MIN_DIST * dist_scale)));
+
     TicToc t_r;
     cur_time = _cur_time;
     row = _img.rows;
@@ -436,7 +446,7 @@ map<int, FeaturePerFrame> FeatureTracker::trackImageGPU(double _cur_time, const 
 
     /*
     {
-        cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(3.0, cv::Size(8, 8));
+        cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(CLAHE_CLIP_LIMIT, cv::Size(CLAHE_GRID_SIZE, CLAHE_GRID_SIZE));
         clahe->apply(cur_img, cur_img);
         if(!rightImg.empty())
             clahe->apply(rightImg, rightImg);
@@ -577,7 +587,7 @@ map<int, FeaturePerFrame> FeatureTracker::trackImageGPU(double _cur_time, const 
             {
                 auto dist = cur_pts[i] - cur_pts[j];
 
-                if (dist.x * dist.x + dist.y * dist.y < MIN_DIST * MIN_DIST)
+                if (dist.x * dist.x + dist.y * dist.y < min_dist_ * min_dist_)
                 {
                     if (track_cnt[i] < track_cnt[j])
                     {
@@ -634,7 +644,7 @@ map<int, FeaturePerFrame> FeatureTracker::trackImageGPU(double _cur_time, const 
             // cv::cuda::GpuMat gpu_mask(mask);
             // printf("gpumat cost: %fms\n",t_gg.toc());
             // ROS_ERROR("GPU feature!");
-            cv::Ptr<cv::cuda::CornersDetector> detector = cv::cuda::createGoodFeaturesToTrackDetector(cur_gpu_img.type(), n_max_cnt, 0.01, MIN_DIST);
+            cv::Ptr<cv::cuda::CornersDetector> detector = cv::cuda::createGoodFeaturesToTrackDetector(cur_gpu_img.type(), n_max_cnt, GOOD_FEAT_TO_TRACK_QUALITY, min_dist_);
             // cout << "new gpu points: "<< MAX_CNT - cur_pts.size()<<endl;
             // detector->detect(cur_gpu_img, d_prevPts, gpu_mask);
 
@@ -685,7 +695,7 @@ map<int, FeaturePerFrame> FeatureTracker::trackImageGPU(double _cur_time, const 
             {
                 auto dist = cur_p - p;
 
-                if (dist.x * dist.x + dist.y * dist.y <= MIN_DIST * MIN_DIST)
+                if (dist.x * dist.x + dist.y * dist.y <= min_dist_ * min_dist_)
                 {
                     close_new_pt = true;
                     break;
@@ -1121,27 +1131,132 @@ vector<cv::Point2f> FeatureTracker::ptsVelocity(vector<int> &ids, vector<cv::Poi
     return pts_velocity;
 }
 
+// void FeatureTracker::drawTrack(const cv::Mat &imLeft, const cv::Mat &imRight,
+//                                vector<int> &curLeftIds,
+//                                vector<cv::Point2f> &curLeftPts,
+//                                vector<cv::Point2f> &curRightPts,
+//                                map<int, cv::Point2f> &prevLeftPtsMap)
+// {
+
+//     // int rows = imLeft.rows;
+//     int cols = imLeft.cols;
+//     if (!imRight.empty() && stereo)
+//         cv::hconcat(imLeft, imRight, imTrack);
+//     else
+//     {
+//         if (USE_GPU)
+//         {
+
+// #ifdef WITH_CUDA
+//             cv::cuda::GpuMat gray_img, bgr_img;
+//             gray_img.upload(imLeft);
+//             cv::cuda::cvtColor(gray_img, bgr_img, cv::COLOR_GRAY2BGR);
+//             bgr_img.download(imTrack);
+
+// #endif
+//         }
+//         else
+//         {
+//             imTrack = imLeft.clone();
+//         }
+//     }
+//     cv::cvtColor(imTrack, imTrack, cv::COLOR_GRAY2BGR);
+
+//     for (size_t j = 0; j < curLeftPts.size(); j++)
+//     {
+//         double len = std::min(1.0, 1.0 * track_cnt[j] / 20);
+//         cv::circle(imTrack, curLeftPts[j], VIS_CIRCLE_RADIUS, cv::Scalar(255 * (1 - len), 0, 255 * len), -1);
+//     }
+//     if (!imRight.empty() && stereo)
+//     {
+//         for (size_t i = 0; i < curRightPts.size(); i++)
+//         {
+//             cv::Point2f rightPt = curRightPts[i];
+//             rightPt.x += cols;
+//             cv::circle(imTrack, rightPt, VIS_CIRCLE_RADIUS, cv::Scalar(0, 255, 0), -1);
+//             // cv::Point2f leftPt = curLeftPtsTrackRight[i];
+//             // cv::line(imTrack, leftPt, rightPt, cv::Scalar(0, 255, 0), 1, 8, 0);
+//         }
+//     }
+
+//     map<int, cv::Point2f>::iterator mapIt;
+//     for (size_t i = 0; i < curLeftIds.size(); i++)
+//     {
+//         int id = curLeftIds[i];
+//         mapIt = prevLeftPtsMap.find(id);
+//         if (mapIt != prevLeftPtsMap.end())
+//         {
+//             cv::arrowedLine(imTrack, curLeftPts[i], mapIt->second, cv::Scalar(0, 255, 0), VIS_ARROW_THICKNESS, 8, 0, 0.2);
+//         }
+//     }
+
+//     // draw prediction
+//     /*
+//     for(size_t i = 0; i < predict_pts_debug.size(); i++)
+//     {
+//         cv::circle(imTrack, predict_pts_debug[i], VIS_CIRCLE_RADIUS, cv::Scalar(0, 170, 255), 2);
+//     }
+//     */
+//     // printf("predict pts size %d \n", (int)predict_pts_debug.size());
+
+//     // cv::Mat imCur2Compress;
+//     // cv::resize(imCur2, imCur2Compress, cv::Size(cols, rows / 2));
+// }
+
 void FeatureTracker::drawTrack(const cv::Mat &imLeft, const cv::Mat &imRight,
                                vector<int> &curLeftIds,
                                vector<cv::Point2f> &curLeftPts,
                                vector<cv::Point2f> &curRightPts,
                                map<int, cv::Point2f> &prevLeftPtsMap)
 {
-    // int rows = imLeft.rows;
+
+    // =============================================================================
+    // drawTrack — visualization of feature tracking state
+    //
+    // Renders three layers of information onto a side-by-side stereo image (or
+    // single image in mono mode). Each visual element encodes a different piece of
+    // the tracker's state:
+    //
+    //   Layer            | Source                                 | Camera | Time
+    //   -----------------+----------------------------------------+--------+------------
+    //   Left dot color   | track_cnt[i]                           | Left   | Cumulative
+    //   (blue -> red)    | (frames this feature has lived)        |        | age
+    //   -----------------+----------------------------------------+--------+------------
+    //   Left arrow       | prev_pts -> cur_pts                    | Left   | Frame
+    //                    | (temporal KLT optical flow)            |        | N-1 -> N
+    //   -----------------+----------------------------------------+--------+------------
+    //   Right dot        | cur_right_pts                          | Right  | Frame N
+    //   (solid green)    | (stereo KLT match, current frame only) |        |
+    //
+    // Notes:
+    //   - Right-camera temporal flow is not drawn; the right image is treated as a
+    //     per-frame stereo match of the left, not a tracker in its own right.
+    //   - A feature with no arrow is brand new this frame (not yet in prevLeftPtsMap).
+    //   - Left dots saturate to red after VIS_TRACK_AGE_SATURATION frames of tracking.
+    //   - Arrow direction: tail at current position, head at previous position.
+    // =============================================================================
+
     int cols = imLeft.cols;
+
+    // Reference resolution: 720p. Visualization scales linearly with image height,
+    // so a 1920x1200 image gets ~1.67x larger circles than a 1280x800 one, and
+    // both look visually similar despite the resolution difference.
+    const double scale = std::max(1.0, imLeft.rows / 720.0);
+    const int circle_radius   = std::max(2, static_cast<int>(std::round(VIS_CIRCLE_RADIUS * scale)));
+    const int circle_thick    = -1;  // filled
+    const int arrow_thickness = std::max(1, static_cast<int>(std::round(VIS_ARROW_THICKNESS * scale)));
+
     if (!imRight.empty() && stereo)
         cv::hconcat(imLeft, imRight, imTrack);
     else
     {
         if (USE_GPU)
         {
-
 #ifdef WITH_CUDA
             cv::cuda::GpuMat gray_img, bgr_img;
             gray_img.upload(imLeft);
             cv::cuda::cvtColor(gray_img, bgr_img, cv::COLOR_GRAY2BGR);
             bgr_img.download(imTrack);
-
 #endif
         }
         else
@@ -1154,7 +1269,8 @@ void FeatureTracker::drawTrack(const cv::Mat &imLeft, const cv::Mat &imRight,
     for (size_t j = 0; j < curLeftPts.size(); j++)
     {
         double len = std::min(1.0, 1.0 * track_cnt[j] / 20);
-        cv::circle(imTrack, curLeftPts[j], 2, cv::Scalar(255 * (1 - len), 0, 255 * len), 2);
+        cv::circle(imTrack, curLeftPts[j], circle_radius,
+                   cv::Scalar(255 * (1 - len), 0, 255 * len), circle_thick);
     }
     if (!imRight.empty() && stereo)
     {
@@ -1162,9 +1278,8 @@ void FeatureTracker::drawTrack(const cv::Mat &imLeft, const cv::Mat &imRight,
         {
             cv::Point2f rightPt = curRightPts[i];
             rightPt.x += cols;
-            cv::circle(imTrack, rightPt, 2, cv::Scalar(0, 255, 0), 2);
-            // cv::Point2f leftPt = curLeftPtsTrackRight[i];
-            // cv::line(imTrack, leftPt, rightPt, cv::Scalar(0, 255, 0), 1, 8, 0);
+            cv::circle(imTrack, rightPt, circle_radius,
+                       cv::Scalar(0, 255, 0), circle_thick);
         }
     }
 
@@ -1175,21 +1290,10 @@ void FeatureTracker::drawTrack(const cv::Mat &imLeft, const cv::Mat &imRight,
         mapIt = prevLeftPtsMap.find(id);
         if (mapIt != prevLeftPtsMap.end())
         {
-            cv::arrowedLine(imTrack, curLeftPts[i], mapIt->second, cv::Scalar(0, 255, 0), 1, 8, 0, 0.2);
+            cv::arrowedLine(imTrack, curLeftPts[i], mapIt->second,
+                            cv::Scalar(0, 255, 0), arrow_thickness, 8, 0, 0.2);
         }
     }
-
-    // draw prediction
-    /*
-    for(size_t i = 0; i < predict_pts_debug.size(); i++)
-    {
-        cv::circle(imTrack, predict_pts_debug[i], 2, cv::Scalar(0, 170, 255), 2);
-    }
-    */
-    // printf("predict pts size %d \n", (int)predict_pts_debug.size());
-
-    // cv::Mat imCur2Compress;
-    // cv::resize(imCur2, imCur2Compress, cv::Size(cols, rows / 2));
 }
 
 void FeatureTracker::setPrediction(map<int, Eigen::Vector3d> &predictPts)

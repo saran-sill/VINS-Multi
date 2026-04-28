@@ -23,6 +23,10 @@ imu_info IMU_MODULE;
 Eigen::Vector3d G(0.0, 0.0, 9.8);
 map<int, Eigen::Vector3d> pts_gt;
 
+std::string DEBUG_LEVEL;
+
+int WINDOW_SIZE;
+
 double BIAS_ACC_THRESHOLD;
 double BIAS_GYR_THRESHOLD;
 double SOLVER_TIME;
@@ -45,12 +49,20 @@ int FLOW_BACK;
 double DEPTH_MIN;
 double DEPTH_MAX;
 
+double CLAHE_CLIP_LIMIT;
+int CLAHE_GRID_SIZE;
+
+double GOOD_FEAT_TO_TRACK_QUALITY;
+
 int OPTFLOW_WIN_SIZE;
 int OPTFLOW_PYR_LEVELS;
 
 int EQUALIZE;
 
 int MAX_TRACK_NUM_PER_MODULE;
+
+int VIS_CIRCLE_RADIUS;
+int VIS_ARROW_THICKNESS;
 
 template <typename T>
 T readParam(ros::NodeHandle &n, std::string name)
@@ -297,6 +309,11 @@ void readParameters(std::string config_file)
     //     assert(0);
     // }
 
+    fsSettings["debug_level"] >> DEBUG_LEVEL;
+
+    WINDOW_SIZE = fsSettings["window_size"];
+    printf("WINDOW_SIZE: %d\n", WINDOW_SIZE);
+
     MAX_CNT = fsSettings["max_cnt"];
     int max_feature_per_module = max(static_cast<int>(ceil(MAX_CNT / static_cast<double>(CAM_MODULES.size()))), MIN_TRACK_NUM_PER_MODULE);
     MAX_CNT = max_feature_per_module * CAM_MODULES.size();
@@ -310,6 +327,9 @@ void readParameters(std::string config_file)
 
     EQUALIZE = fsSettings["equalize"];
 
+    CLAHE_CLIP_LIMIT = fsSettings["clahe_clip_limit"];
+    CLAHE_GRID_SIZE = fsSettings["clahe_grid_size"];
+
     OPTFLOW_WIN_SIZE = fsSettings["optflow_win_size"];
     OPTFLOW_PYR_LEVELS = fsSettings["optflow_pyr_levels"];
 
@@ -318,12 +338,19 @@ void readParameters(std::string config_file)
     printf("DEPTH_MIN: %lf\n", DEPTH_MIN);
     printf("DEPTH_MAX: %lf\n", DEPTH_MAX);
 
+    GOOD_FEAT_TO_TRACK_QUALITY = fsSettings["good_feat_to_track_quality"];
+    printf("GOOD_FEAT_TO_TRACK_QUALITY: %lf\n", GOOD_FEAT_TO_TRACK_QUALITY);
+
     MULTIPLE_THREAD = fsSettings["multiple_thread"];
 
     SOLVER_TIME = fsSettings["max_solver_time"];
     NUM_ITERATIONS = fsSettings["max_num_iterations"];
     MIN_PARALLAX = fsSettings["keyframe_parallax"];
+    printf("MIN_PARALLAX: %lf pixels\n", MIN_PARALLAX);
     MIN_PARALLAX = MIN_PARALLAX / FOCAL_LENGTH;
+
+    VIS_CIRCLE_RADIUS = fsSettings["vis_circle_radius"];
+    VIS_ARROW_THICKNESS = fsSettings["vis_arrow_thickness"];
 
     // ESTIMATE_EXTRINSIC = fsSettings["estimate_extrinsic"];
     // if (ESTIMATE_EXTRINSIC == 2)

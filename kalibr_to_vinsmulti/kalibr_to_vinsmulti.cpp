@@ -420,8 +420,13 @@ static void writeMainYaml(const std::string &outpath,
     }
 
     // -------- defaults copied from a working VINS-Multi config --------
+    f << "debug_level: \"info\"\n\n";
+
     f << "estimate_extrinsic: 1\n\n";
+
     f << "multiple_thread: 0\n\n";
+
+    f << "window_size: 21\n";
     f << "max_cnt: 250\n";
     f << "min_dist: 40\n";
     f << "freq: 15\n";
@@ -430,16 +435,28 @@ static void writeMainYaml(const std::string &outpath,
     f << "F_threshold: 1.0\n";
     f << "show_track: 1\n";
     f << "flow_back: 1\n";
-    f << "equalize: 1\n";
+    f << "equalize: 1\n\n";
+
+    f << "clahe_clip_limit: 3.0\n";
+    f << "clahe_grid_size: 3\n\n";
+
+    f << "good_feat_to_track_quality: 0.01\n\n";
+
     f << "optflow_win_size: 15\n\n";
     f << "optflow_pyr_levels: 3\n\n";
+
     f << "max_solver_time: 0.06\n";
     f << "max_num_iterations: 12\n";
     f << "keyframe_parallax: 10.0\n\n";
+
     f << "estimate_td: 0\n\n";
+
     f << "load_previous_pose_graph: 0\n";
     f << "pose_graph_save_path: \"/tmp/vins_multi_pose_graph/\"\n";
-    f << "save_image: 0\n";
+    f << "save_image: 0\n\n";
+
+    f << "vis_circle_radius: 5\n";
+    f << "vis_arrow_thickness: 3\n";
 }
 
 // =====================================================================

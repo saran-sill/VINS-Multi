@@ -14,13 +14,12 @@
 #include <mutex>
 #include <ros/ros.h>
 #include "rosNode.hpp"
-
+#include "estimator/parameters.h"
 
 int main(int argc, char **argv)
 {
     ros::init(argc, argv, "vins_multi");
     ros::NodeHandle n("~");
-    ros::console::set_logger_level(ROSCONSOLE_DEFAULT_NAME, ros::console::levels::Info);
 
     std::string cli_config_file;
     if (argc >= 2)
@@ -36,6 +35,12 @@ int main(int argc, char **argv)
     vins_multi::VinsNodeBaseClass vins_node;
 
     vins_node.init_node(n, cli_config_file);
+
+    ros::console::set_logger_level(ROSCONSOLE_DEFAULT_NAME, ros::console::levels::Info);
+    if (vins_multi::DEBUG_LEVEL == "debug")
+    {
+        ros::console::set_logger_level(ROSCONSOLE_DEFAULT_NAME, ros::console::levels::Debug);
+    }
 
 #ifdef EIGEN_DONT_PARALLELIZE
     ROS_DEBUG("EIGEN_DONT_PARALLELIZE");

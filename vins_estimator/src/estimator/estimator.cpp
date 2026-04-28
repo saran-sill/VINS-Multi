@@ -276,6 +276,15 @@ void Estimator::inputImage(const unsigned int unique_id, double t, const cv::Mat
         return;
     }
 
+    // Ignore monocular frames while the system is still initializing
+    if (solver_flag_ == INITIAL &&
+        !img_trackers_[unique_id]->cam_info_.stereo_ &&
+        !img_trackers_[unique_id]->cam_info_.depth_)
+    {
+        mBuf_.unlock();
+        return;
+    }
+
     State img_state;
     img_state.type_ = State::IMAGE;
     img_state.image_frame_ptr_.reset(new ImageFrame{t, img_trackers_[unique_id]->cam_info_.td_, unique_id, featurePts});
@@ -468,37 +477,54 @@ deque<State>::iterator Estimator::insertState(const State &state)
     return state_it;
 }
 
+// void Estimator::updateFeatureTrackerMaxCnt()
+// {
+
+//     if (solver_flag_ == NON_LINEAR)
+//     {
+//         for (int i = 0; i < img_trackers_.size(); i++)
+//         {
+
+//             if (img_trackers_[i]->last_frame_time_ < image_frame_window_.all_image_frame_ptr_.begin()->second->t_)
+//             {
+//                 img_trackers_[i]->featureTracker_.track_num = MIN_TRACK_NUM_PER_MODULE;
+//             }
+//         }
+//     }
+
+//     VectorXd track_num(img_trackers_.size());
+//     for (unsigned int i = 0; i < img_trackers_.size(); i++)
+//     {
+//         track_num(i) = img_trackers_[i]->featureTracker_.track_num;
+//         // track_num(i) = img_trackers_[i]->f_manager_.long_track_num_;
+//     }
+
+//     double track_num_sum = track_num.sum();
+
+//     if (track_num_sum < 0.5)
+//         return;
+
+//     for (unsigned int i = 0; i < img_trackers_.size(); i++)
+//     {
+//         img_trackers_[i]->featureTracker_.max_cnt = min(max(static_cast<int>(ceil(track_num(i) / track_num_sum * MAX_CNT)), MIN_TRACK_NUM_PER_MODULE), MAX_TRACK_NUM_PER_MODULE);
+//         ROS_DEBUG("cam %d max cnt: %d, track num: %lf", i, int(img_trackers_[i]->featureTracker_.max_cnt), track_num(i));
+//     }
+// }
+
 void Estimator::updateFeatureTrackerMaxCnt()
 {
+    if (img_trackers_.empty()) return;
 
-    if (solver_flag_ == NON_LINEAR)
-    {
-        for (int i = 0; i < img_trackers_.size(); i++)
-        {
-
-            if (img_trackers_[i]->last_frame_time_ < image_frame_window_.all_image_frame_ptr_.begin()->second->t_)
-            {
-                img_trackers_[i]->featureTracker_.track_num = MIN_TRACK_NUM_PER_MODULE;
-            }
-        }
-    }
-
-    VectorXd track_num(img_trackers_.size());
-    for (unsigned int i = 0; i < img_trackers_.size(); i++)
-    {
-        track_num(i) = img_trackers_[i]->featureTracker_.track_num;
-        // track_num(i) = img_trackers_[i]->f_manager_.long_track_num_;
-    }
-
-    double track_num_sum = track_num.sum();
-
-    if (track_num_sum < 0.5)
-        return;
+    // Equal budget per module. Each cam gets the same cap regardless of
+    // how well it's currently tracking — so weak modules don't get starved
+    // by the rich-get-richer feedback loop.
+    int per_module = MAX_CNT / static_cast<int>(img_trackers_.size());
+    per_module = std::max(per_module, MIN_TRACK_NUM_PER_MODULE);
+    per_module = std::min(per_module, MAX_TRACK_NUM_PER_MODULE);
 
     for (unsigned int i = 0; i < img_trackers_.size(); i++)
     {
-        img_trackers_[i]->featureTracker_.max_cnt = min(max(static_cast<int>(ceil(track_num(i) / track_num_sum * MAX_CNT)), MIN_TRACK_NUM_PER_MODULE), MAX_TRACK_NUM_PER_MODULE);
-        ROS_DEBUG("cam %d max cnt: %d, track num: %lf", i, int(img_trackers_[i]->featureTracker_.max_cnt), track_num(i));
+        img_trackers_[i]->featureTracker_.max_cnt = per_module;
     }
 }
 
@@ -1498,7 +1524,8 @@ void Estimator::optimization()
         {
             auto next_frame_it = next(frame_it);
             auto pre_integration = next_frame_it->second->pre_integration_;
-            if (pre_integration->sum_dt > 10.0)
+            // if (pre_integration->sum_dt > 10.0)
+            if (pre_integration->sum_dt > 3.0)
                 continue;
             IMUFactor *imu_factor = new IMUFactor(pre_integration);
             auto frame_ptr = frame_it->second;
