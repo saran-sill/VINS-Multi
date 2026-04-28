@@ -422,6 +422,8 @@ static void writeMainYaml(const std::string &outpath,
     // -------- defaults copied from a working VINS-Multi config --------
     f << "debug_level: \"info\"\n\n";
 
+    f << "cv_num_threads: 1\n\n";
+
     f << "estimate_extrinsic: 1\n\n";
 
     f << "multiple_thread: 0\n\n";
@@ -436,6 +438,12 @@ static void writeMainYaml(const std::string &outpath,
     f << "show_track: 1\n";
     f << "flow_back: 1\n";
     f << "equalize: 1\n\n";
+
+    f << "min_track_frame_for_opt: 3\n";
+    f << "min_frame_interval_per_module: 3\n";
+    f << "min_frame_interval_for_opt: 3\n";
+    f << "min_opt_interval: 3\n";
+    f << "min_track_num_per_module: 3\n\n";
 
     f << "clahe_clip_limit: 3.0\n";
     f << "clahe_grid_size: 3\n\n";

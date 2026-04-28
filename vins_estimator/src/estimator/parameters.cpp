@@ -25,7 +25,15 @@ map<int, Eigen::Vector3d> pts_gt;
 
 std::string DEBUG_LEVEL;
 
+int CV_NUM_THREADS;
+
 int WINDOW_SIZE;
+
+int MIN_TRACK_NUM_PER_MODULE;
+double MIN_OPT_INTERVAL;
+double MIN_FRAME_INTERVAL_PER_MODULE;
+double MIN_FRAME_INTERVAL_FOR_OPT;
+int MIN_TRACK_FRAME_FOR_OPT;
 
 double BIAS_ACC_THRESHOLD;
 double BIAS_GYR_THRESHOLD;
@@ -311,8 +319,25 @@ void readParameters(std::string config_file)
 
     fsSettings["debug_level"] >> DEBUG_LEVEL;
 
+    CV_NUM_THREADS = fsSettings["cv_num_threads"];
+
     WINDOW_SIZE = fsSettings["window_size"];
     printf("WINDOW_SIZE: %d\n", WINDOW_SIZE);
+
+    MIN_TRACK_NUM_PER_MODULE = fsSettings["min_track_num_per_module"];
+    printf("MIN_TRACK_NUM_PER_MODULE: %d\n", MIN_TRACK_NUM_PER_MODULE);
+
+    MIN_OPT_INTERVAL = fsSettings["min_opt_interval"];
+    printf("MIN_OPT_INTERVAL: %d\n", MIN_OPT_INTERVAL);
+
+    MIN_FRAME_INTERVAL_FOR_OPT = fsSettings["min_frame_interval_for_opt"];
+    printf("MIN_FRAME_INTERVAL_FOR_OPT: %d\n", MIN_FRAME_INTERVAL_FOR_OPT);
+
+    MIN_FRAME_INTERVAL_PER_MODULE = fsSettings["min_frame_interval_per_module"];
+    printf("MIN_FRAME_INTERVAL_PER_MODULE: %d\n", MIN_FRAME_INTERVAL_PER_MODULE);
+
+    MIN_TRACK_FRAME_FOR_OPT = fsSettings["min_track_frame_for_opt"];
+    printf("MIN_TRACK_FRAME_FOR_OPT: %d\n", MIN_TRACK_FRAME_FOR_OPT);
 
     MAX_CNT = fsSettings["max_cnt"];
     int max_feature_per_module = max(static_cast<int>(ceil(MAX_CNT / static_cast<double>(CAM_MODULES.size()))), MIN_TRACK_NUM_PER_MODULE);

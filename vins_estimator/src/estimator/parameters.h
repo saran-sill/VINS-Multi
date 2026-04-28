@@ -50,17 +50,8 @@ enum NoiseOrder
 };
 
 const double FOCAL_LENGTH = 460.0;
-
-const int MAX_WINDOW_SIZE = 30;
-const int MAX_NUM_OF_F = 1000;
-const double MIN_OPT_INTERVAL = 0.04;
-const int MIN_TRACK_FRAME_FOR_OPT = 3;
-const double MIN_FRAME_INTERVAL_PER_MODULE = 0.05;
-const double MIN_PRE_INTEGRATION_INTERVAL = 0.01;
-const double MIN_FRAME_INTERVAL_FOR_OPT = 0.005;
-const int MIN_TRACK_NUM_PER_MODULE = 30;
-extern int MAX_TRACK_NUM_PER_MODULE;
 const double FRAME_PRIORITY_CONST = 20.0;
+
 // #define UNIT_SPHERE_ERROR
 
 struct camera_module_info
@@ -180,6 +171,34 @@ extern Eigen::Vector3d G;
 extern map<int, Eigen::Vector3d> pts_gt;
 
 extern int WINDOW_SIZE;
+
+extern int CV_NUM_THREADS;
+
+// Minimum number of features that must be tracked per camera module.
+// Used as a guaranteed allocation floor when distributing the total
+// feature budget across modules, and as the lower bound when computing
+// MAX_TRACK_NUM_PER_MODULE.
+extern int MIN_TRACK_NUM_PER_MODULE;
+extern int MAX_TRACK_NUM_PER_MODULE;
+
+// Minimum time (seconds) that must elapse between consecutive back-end
+// optimization runs. Caps the optimizer frequency regardless of frame arrival rate.
+extern double MIN_OPT_INTERVAL;
+
+// Minimum time gap (seconds) between consecutive frames accepted from
+// a single camera module. Acts as a per-module frame rate cap (e.g. 0.05s = 20Hz).
+extern double MIN_FRAME_INTERVAL_PER_MODULE;
+
+// Minimum time gap (seconds) between any two adjacent frames in the
+// optimization window. Rejects incoming frames that would be inserted
+// too close to an existing neighbor — primarily prevents near-simultaneous
+// frames from different camera modules crowding the same window slot.
+extern double MIN_FRAME_INTERVAL_FOR_OPT;
+
+// Minimum number of frames a feature must be continuously tracked
+// before it is included in optimization. Filters out short-lived
+// observations that are too noisy to constrain the estimator reliably.
+extern int MIN_TRACK_FRAME_FOR_OPT;
 
 extern std::string DEBUG_LEVEL;
 

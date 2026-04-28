@@ -42,6 +42,13 @@ int main(int argc, char **argv)
         ros::console::set_logger_level(ROSCONSOLE_DEFAULT_NAME, ros::console::levels::Debug);
     }
 
+     cv::setNumThreads(vins_multi::CV_NUM_THREADS);
+
+#ifdef _OPENMP
+    // omp_set_dynamic(0);     // Explicitly disable dynamic teams
+    omp_set_num_threads(vins_multi::CV_NUM_THREADS); // Use 4 threads for all consecutive parallel regions
+#endif
+
 #ifdef EIGEN_DONT_PARALLELIZE
     ROS_DEBUG("EIGEN_DONT_PARALLELIZE");
 #endif
