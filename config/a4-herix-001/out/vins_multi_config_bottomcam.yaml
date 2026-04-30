@@ -126,7 +126,7 @@ cv_num_threads: 1
 
 window_size: 21
 max_cnt: 250
-min_dist: 40
+min_dist: 30
 freq: 15
 depth_min: 0.2
 depth_max: 20.0
@@ -135,7 +135,7 @@ show_track: 1
 flow_back: 1
 equalize: 1
 
-min_track_frame_for_opt: 4
+min_track_frame_for_opt: 3
 min_frame_interval_per_module: 0.05
 min_frame_interval_for_opt: 0.005
 min_opt_interval: 0.04
@@ -150,9 +150,9 @@ optflow_win_size: 15
 optflow_pyr_levels: 8
 
 max_solver_time: 0.06
-max_num_iterations: 12
+max_num_iterations: 20
 
-keyframe_parallax: 60.0
+keyframe_parallax: 15.0
 
 estimate_td: 0
 

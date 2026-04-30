@@ -328,13 +328,13 @@ void readParameters(std::string config_file)
     printf("MIN_TRACK_NUM_PER_MODULE: %d\n", MIN_TRACK_NUM_PER_MODULE);
 
     MIN_OPT_INTERVAL = fsSettings["min_opt_interval"];
-    printf("MIN_OPT_INTERVAL: %d\n", MIN_OPT_INTERVAL);
+    printf("MIN_OPT_INTERVAL: %lf\n", MIN_OPT_INTERVAL);
 
     MIN_FRAME_INTERVAL_FOR_OPT = fsSettings["min_frame_interval_for_opt"];
-    printf("MIN_FRAME_INTERVAL_FOR_OPT: %d\n", MIN_FRAME_INTERVAL_FOR_OPT);
+    printf("MIN_FRAME_INTERVAL_FOR_OPT: %lf\n", MIN_FRAME_INTERVAL_FOR_OPT);
 
     MIN_FRAME_INTERVAL_PER_MODULE = fsSettings["min_frame_interval_per_module"];
-    printf("MIN_FRAME_INTERVAL_PER_MODULE: %d\n", MIN_FRAME_INTERVAL_PER_MODULE);
+    printf("MIN_FRAME_INTERVAL_PER_MODULE: %lf\n", MIN_FRAME_INTERVAL_PER_MODULE);
 
     MIN_TRACK_FRAME_FOR_OPT = fsSettings["min_track_frame_for_opt"];
     printf("MIN_TRACK_FRAME_FOR_OPT: %d\n", MIN_TRACK_FRAME_FOR_OPT);

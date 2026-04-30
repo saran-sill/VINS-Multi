@@ -37,6 +37,7 @@ endif()
 set(OPENCV_LIB_FOLDER "$ENV{OPENCV_LIB_FOLDER}/build/install/lib/cmake/opencv4")
 set(OpenCV_LIB_DIRS "${OPENCV_LIB_FOLDER}/../../")
 set(CERES_LIB_FOLDER "$ENV{CERES_LIB_FOLDER}/build/install/lib/cmake/Ceres")
+set(CERES_INCLUDE_DIRS "$ENV{CERES_LIB_FOLDER}/build/install/include")
 #########################################################
 
 set(ENABLE_BACKWARD false)

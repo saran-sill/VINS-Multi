@@ -18,19 +18,21 @@
 
 int main(int argc, char **argv)
 {
-    ros::init(argc, argv, "vins_multi");
-    ros::NodeHandle n("~");
-
     std::string cli_config_file;
-    if (argc >= 2)
+    if (argc >= 3)
     {
-        cli_config_file = argv[1];
+        cli_config_file = argv[2];
     }
     else
     {
-        printf("usage : %s [config.yaml]\n", argv[0]);
+        printf("usage : %s [device_name] [config.yaml]\n", argv[0]);
         return EXIT_FAILURE;
     }
+
+    const std::string device_name = std::string(argv[1]);
+
+    ros::init(argc, argv, device_name);
+    ros::NodeHandle n("~");
 
     vins_multi::VinsNodeBaseClass vins_node;
 

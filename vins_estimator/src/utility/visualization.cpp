@@ -44,9 +44,9 @@ const double interpolation_alpha = 0.5;
 
 void registerPub(ros::NodeHandle &n)
 {
-    pub_latest_odometry = n.advertise<nav_msgs::Odometry>("imu_propagate", 1000);
+    pub_latest_odometry = n.advertise<nav_msgs::Odometry>("odomimu", 1000);
     pub_path = n.advertise<nav_msgs::Path>("path", 1000);
-    pub_odometry = n.advertise<nav_msgs::Odometry>("odometry", 1000);
+    pub_odometry = n.advertise<nav_msgs::Odometry>("odomimu_lowhz", 1000);
     pub_key_poses = n.advertise<visualization_msgs::Marker>("key_poses", 1000);
     pub_keyframe_pose = n.advertise<nav_msgs::Odometry>("keyframe_pose", 1000);
     // pub_keyframe_point = n.advertise<sensor_msgs::PointCloud>("keyframe_point", 1000);
