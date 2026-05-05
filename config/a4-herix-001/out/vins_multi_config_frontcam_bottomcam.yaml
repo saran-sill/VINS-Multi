@@ -127,7 +127,7 @@ cv_num_threads: 1
 window_size: 21
 max_cnt: 250
 min_dist: 30
-img_freq: 10
+img_freq: 15
 depth_min: 0.2
 depth_max: 20.0
 F_threshold: 5.0
@@ -153,7 +153,7 @@ optflow_pyr_levels: 8
 max_solver_time: 0.06
 max_num_iterations: 20
 
-keyframe_parallax: 30.0
+keyframe_parallax: 20.0
 
 estimate_td: 0
 
