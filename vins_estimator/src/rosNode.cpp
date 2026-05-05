@@ -124,6 +124,11 @@ void VinsNodeBaseClass::restart_callback(const std_msgs::BoolConstPtr &restart_m
 void VinsNodeBaseClass::camera_module_info_with_sub::imgs_callback(const sensor_msgs::ImageConstPtr &img0_msg, const sensor_msgs::ImageConstPtr &img1_msg)
 {
 
+    double t = img0_msg->header.stamp.toSec();
+    if (last_img_t_ > 0 && t - last_img_t_ < 1.0 / IMG_FREQ)
+        return;
+    last_img_t_ = t;
+
     cv_bridge::CvImagePtr img_0;
     cv_bridge::CvImagePtr img_1;
 
@@ -208,6 +213,11 @@ void VinsNodeBaseClass::camera_module_info_with_sub::imgs_callback(const sensor_
 
 void VinsNodeBaseClass::camera_module_info_with_sub::img_callback(const sensor_msgs::ImageConstPtr &img0_msg)
 {
+    double t = img0_msg->header.stamp.toSec();
+    if (last_img_t_ > 0 && t - last_img_t_ < 1.0 / IMG_FREQ)
+        return;
+    last_img_t_ = t;
+
     cv_bridge::CvImagePtr img_0 = getImageFromMsg(img0_msg);
 
     if (img0_msg->encoding == sensor_msgs::image_encodings::RGB8)

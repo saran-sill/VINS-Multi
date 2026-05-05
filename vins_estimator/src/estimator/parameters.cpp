@@ -64,6 +64,8 @@ int CLAHE_GRID_SIZE;
 
 double GOOD_FEAT_TO_TRACK_QUALITY;
 
+double IMG_FREQ;
+
 int OPTFLOW_WIN_SIZE;
 int OPTFLOW_PYR_LEVELS;
 
@@ -370,6 +372,9 @@ void readParameters(std::string config_file)
 
     GOOD_FEAT_TO_TRACK_QUALITY = fsSettings["good_feat_to_track_quality"];
     printf("GOOD_FEAT_TO_TRACK_QUALITY: %lf\n", GOOD_FEAT_TO_TRACK_QUALITY);
+
+    IMG_FREQ = fsSettings["img_freq"];
+    printf("IMG_FREQ: %lf\n", IMG_FREQ);
 
     MULTIPLE_THREAD = fsSettings["multiple_thread"];
 

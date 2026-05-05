@@ -122,12 +122,12 @@ debug_level: "info"
 estimate_extrinsic: 1
 
 multiple_thread: 0
-cv_num_threads: 4
+cv_num_threads: 1
 
 window_size: 21
 max_cnt: 250
 min_dist: 30
-freq: 15
+img_freq: 10
 depth_min: 0.2
 depth_max: 20.0
 F_threshold: 5.0
@@ -140,7 +140,7 @@ min_track_frame_for_opt: 3
 min_frame_interval_per_module: 0.05
 min_frame_interval_for_opt: 0.005
 min_opt_interval: 0.04
-min_track_num_per_module: 15
+min_track_num_per_module: 30
 
 clahe_clip_limit: 3.0
 clahe_grid_size: 8

@@ -231,6 +231,8 @@ extern int CLAHE_GRID_SIZE;
 
 extern double GOOD_FEAT_TO_TRACK_QUALITY;
 
+extern double IMG_FREQ;
+
 extern int OPTFLOW_WIN_SIZE;
 extern int OPTFLOW_PYR_LEVELS;
 

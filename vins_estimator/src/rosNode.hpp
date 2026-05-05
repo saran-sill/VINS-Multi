@@ -65,6 +65,8 @@ class VinsNodeBaseClass
 
         unsigned int unique_id_;
 
+        double last_img_t_ = -1.0;
+
         Estimator *estimator_ptr_;
 
         void imgs_callback(const sensor_msgs::ImageConstPtr &img0_msg, const sensor_msgs::ImageConstPtr &img1_msg);
