@@ -1,8 +1,8 @@
 /*******************************************************
  * Copyright (C) 2025, Aerial Robotics Group, Hong Kong University of Science and Technology
- * 
+ *
  * This file is part of VINS.
- * 
+ *
  * Licensed under the GNU General Public License v3.0;
  * you may not use this file except in compliance with the License.
  *******************************************************/
@@ -151,8 +151,20 @@ bool FeatureManager::addFeatureCheckParallax(const map<int,FeaturePerFrame> &fea
     num_frame_++;
     //if (frame_count < 2 || last_track_num_ < 20)
     //if (frame_count < 2 || last_track_num_ < 20 || new_feature_num_ > 0.5 * last_track_num_)
-    if (num_frame_ < 3 || last_track_num_ < 20 || long_track_num_ < 40 || new_feature_num_ > 0.5 * last_track_num_)
+
+    ROS_DEBUG("addFeatureCheckParallax: num_frame_=%d last_track_num_=%d long_track_num_=%d new_feature_num_=%d",
+              num_frame_, last_track_num_, long_track_num_, new_feature_num_);
+
+    if (num_frame_ < 3 || last_track_num_ < 20 || long_track_num_ < 40 || new_feature_num_ > NEW_FEATURE_RATIO_THRESHOLD * last_track_num_)
+    {
+        ROS_DEBUG("early exit: num_frame_<3=%d last_track<20=%d long_track<40=%d new_feat_ratio=%d",
+                  num_frame_ < 3,
+                  last_track_num_ < 20,
+                  long_track_num_ < 40,
+                  new_feature_num_ > NEW_FEATURE_RATIO_THRESHOLD * last_track_num_);
+
         return true;
+    }
 
     for (auto &it_per_id : feature_)
     {
@@ -787,7 +799,7 @@ void FeatureManager::triangulate(vector<shared_ptr<ImageFrame>>& frameHist, cons
 }
 
 double FeatureManager::reprojectionError(Matrix3d &Ri, Vector3d &Pi, Matrix3d &rici, Vector3d &tici,
-                                 Matrix3d &Rj, Vector3d &Pj, Matrix3d &ricj, Vector3d &ticj, 
+                                 Matrix3d &Rj, Vector3d &Pj, Matrix3d &ricj, Vector3d &ticj,
                                  double depth, Vector3d &uvi, Vector3d &uvj, double &reproj_depth)
 {
     Vector3d pts_w = Ri * (rici * (depth * uvi) + tici) + Pi;
@@ -1103,8 +1115,10 @@ double FeatureManager::compensatedParallax2(const FeaturePerId &it_per_id)
     double ans = 0;
     Vector3d p_j = frame_j.point;
 
-    double u_j = p_j(0);
-    double v_j = p_j(1);
+    // double u_j = p_j(0);
+    // double v_j = p_j(1);
+    double u_j = p_j(0) / p_j(2);   // was: p_j(0)
+    double v_j = p_j(1) / p_j(2);   // was: p_j(1)
 
     Vector3d p_i = frame_i.point;
     Vector3d p_i_comp;

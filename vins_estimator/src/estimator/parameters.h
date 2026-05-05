@@ -222,6 +222,7 @@ extern double F_THRESHOLD;
 extern int SHOW_TRACK;
 extern int FLOW_BACK;
 extern int EQUALIZE;
+extern double NEW_FEATURE_RATIO_THRESHOLD;
 extern double DEPTH_MIN;
 extern double DEPTH_MAX;
 

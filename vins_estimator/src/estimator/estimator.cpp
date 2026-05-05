@@ -1221,12 +1221,12 @@ void Estimator::processImage(const deque<State>::iterator img_state_it, const ma
         // }
 
         // prepare output of VINS
-        key_poses_.clear();
+        // key_poses_.clear();
 
-        for (auto frame_it : image_frame_window_.all_image_frame_ptr_)
-        {
-            key_poses_.push_back(frame_it.second->T_);
-        }
+        // for (auto frame_it : image_frame_window_.all_image_frame_ptr_)
+        // {
+        //     key_poses_.push_back(frame_it.second->T_);
+        // }
 
         updateLatestStates(cam_unique_id);
     }
@@ -2216,8 +2216,11 @@ void Estimator::updateLatestStates(const int unique_id)
     {
         pubTF(*this);
         pubOdometry(*this);
-        pubKeyPoses(*this);
-        pubKeyframe(*this);
+
+        // pubKeyPoses(*this);
+        // pubKeyframe(*this);
+
+        pubKeyframes(*this);
 
         latest_image_time_ = image_frame->t_;
     }

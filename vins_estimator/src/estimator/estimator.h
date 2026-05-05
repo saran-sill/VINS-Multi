@@ -320,8 +320,8 @@ class Estimator
 
     enum MarginalizationFlag
     {
-        MARGIN_OLD = 0,
-        MARGIN_SECOND_NEW = 1
+        MARGIN_OLD = 0, // the oldest frame in the window gets marginalized. This happens when the newly inserted frame has enough parallax relative to the second-newest frame, meaning it's a good keyframe worth keeping
+        MARGIN_SECOND_NEW = 1 // the second-newest frame (the previous frame) gets marginalized instead. This happens when the newly inserted frame has too little parallax — it's not informative enough to be a keyframe, so it's discarded and the old frames are kept
     };
 
     std::mutex mProcess_;

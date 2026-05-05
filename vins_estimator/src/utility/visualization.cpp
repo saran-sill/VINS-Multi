@@ -24,6 +24,9 @@ std::vector<ros::Publisher> pub_camera_pose_visual;
 nav_msgs::Path path;
 
 ros::Publisher pub_keyframe_pose;
+ros::Publisher pub_keyframe_path;        // NEW: accumulated path of all keyframes
+ros::Publisher pub_keyframe_poses;       // NEW: pose array of all keyframes (shows orientation)
+
 // ros::Publisher pub_keyframe_point;
 std::vector<ros::Publisher> pub_extrinsic;
 
@@ -47,8 +50,10 @@ void registerPub(ros::NodeHandle &n)
     pub_latest_odometry = n.advertise<nav_msgs::Odometry>("odomimu", 1000);
     pub_path = n.advertise<nav_msgs::Path>("path", 1000);
     pub_odometry = n.advertise<nav_msgs::Odometry>("odomimu_lowhz", 1000);
-    pub_key_poses = n.advertise<visualization_msgs::Marker>("key_poses", 1000);
-    pub_keyframe_pose = n.advertise<nav_msgs::Odometry>("keyframe_pose", 1000);
+    // pub_key_poses = n.advertise<visualization_msgs::Marker>("key_poses", 1000);
+    // pub_keyframe_pose = n.advertise<nav_msgs::Odometry>("keyframe_pose", 1000);
+    pub_keyframe_path  = n.advertise<nav_msgs::Path>("keyframe_path", 1000);
+    pub_keyframe_poses = n.advertise<geometry_msgs::PoseArray>("keyframe_poses", 1000);
     // pub_keyframe_point = n.advertise<sensor_msgs::PointCloud>("keyframe_point", 1000);
     pub_margin_cloud = n.advertise<sensor_msgs::PointCloud>("margin_cloud", 1000);
     for(unsigned int i = 1; i <= CAM_MODULES.size(); i++){
@@ -169,11 +174,14 @@ void pubLatestOdometry(const Estimator &estimator)
 
 void pubTrackImage(const cv::Mat &imgTrack, const double t, const unsigned int cam_unique_id)
 {
-    std_msgs::Header header;
-    header.frame_id = "world";
-    header.stamp = ros::Time(t);
-    sensor_msgs::ImagePtr imgTrackMsg = cv_bridge::CvImage(header, "bgr8", imgTrack).toImageMsg();
-    pub_image_track[cam_unique_id].publish(imgTrackMsg);
+    if (pub_image_track[cam_unique_id].getNumSubscribers() > 0)
+    {
+        std_msgs::Header header;
+        header.frame_id = "world";
+        header.stamp = ros::Time(t);
+        sensor_msgs::ImagePtr imgTrackMsg = cv_bridge::CvImage(header, "bgr8", imgTrack).toImageMsg();
+        pub_image_track[cam_unique_id].publish(imgTrackMsg);
+    }
 }
 
 
@@ -253,32 +261,37 @@ void pubOdometry(const Estimator &estimator)
         odometry.twist.twist.linear.z = tmp_V.z();
         pub_odometry.publish(odometry);
 
-        geometry_msgs::PoseStamped pose_stamped;
-        pose_stamped.header.stamp = time_stamp;
-        pose_stamped.header.frame_id = "world";
-        pose_stamped.pose = odometry.pose.pose;
-        path.header.stamp = time_stamp;
-        path.header.frame_id = "world";
-        path.poses.push_back(pose_stamped);
-        pub_path.publish(path);
+        if (pub_path.getNumSubscribers() > 0)
+        {
+            geometry_msgs::PoseStamped pose_stamped;
+            pose_stamped.header.stamp = time_stamp;
+            pose_stamped.header.frame_id = "world";
+            pose_stamped.pose = odometry.pose.pose;
+            path.header.stamp = time_stamp;
+            path.header.frame_id = "world";
+            path.poses.push_back(pose_stamped);
+            pub_path.publish(path);
+        }
 
         // write result to file
-        ofstream foutC(VINS_RESULT_PATH, ios::app);
-        foutC.setf(ios::fixed, ios::floatfield);
-        foutC.precision(0);
-        foutC << time_stamp.toSec() * 1e9 << ",";
-        foutC.precision(5);
-        foutC << tmp_P.x() << ","
-              << tmp_P.y() << ","
-              << tmp_P.z() << ","
-              << tmp_Q.w() << ","
-              << tmp_Q.x() << ","
-              << tmp_Q.y() << ","
-              << tmp_Q.z() << ","
-              << tmp_V.x() << ","
-              << tmp_V.y() << ","
-              << tmp_V.z() << "," << endl;
-        foutC.close();
+        // ofstream foutC(VINS_RESULT_PATH, ios::app);
+        // foutC.setf(ios::fixed, ios::floatfield);
+        // foutC.precision(0);
+        // foutC << time_stamp.toSec() * 1e9 << ",";
+        // foutC.precision(5);
+        // foutC << tmp_P.x() << ","
+        //       << tmp_P.y() << ","
+        //       << tmp_P.z() << ","
+        //       << tmp_Q.w() << ","
+        //       << tmp_Q.x() << ","
+        //       << tmp_Q.y() << ","
+        //       << tmp_Q.z() << ","
+        //       << tmp_V.x() << ","
+        //       << tmp_V.y() << ","
+        //       << tmp_V.z() << "," << endl;
+        // foutC.close();
+
+
         // Eigen::Vector3d tmp_T = estimator.Ps_[WINDOW_SIZE];
         // printf("time: %f, t: %f %f %f q: %f %f %f %f \n", header.stamp.toSec(), tmp_T.x(), tmp_T.y(), tmp_T.z(),
         //                                                   tmp_Q.w(), tmp_Q.x(), tmp_Q.y(), tmp_Q.z());
@@ -321,7 +334,7 @@ void pubKeyPoses(const Estimator &estimator)
 
 void pubCameraPose(const Estimator &estimator, const unsigned int unique_id)
 {
-    if (estimator.solver_flag_ == Estimator::SolverFlag::NON_LINEAR)
+    if ((pub_camera_pose[unique_id].getNumSubscribers() > 0) && (estimator.solver_flag_ == Estimator::SolverFlag::NON_LINEAR))
     {
         auto& frame_ptr = estimator.image_frame_window_.cam_wise_image_frame_ptr_[unique_id].back();
 
@@ -349,66 +362,70 @@ void pubCameraPose(const Estimator &estimator, const unsigned int unique_id)
 
 void pubPointCloud(const Estimator &estimator, const unsigned int unique_id)
 {
-
     auto stamp = ros::Time{estimator.image_frame_window_.all_image_frame_ptr_.rbegin()->second->t_};
 
-    sensor_msgs::PointCloud point_cloud, loop_point_cloud;
-    point_cloud.header.stamp = stamp;
-    point_cloud.header.frame_id = "world";
-
-    for (auto &it_per_id : estimator.img_trackers_[unique_id]->f_manager_.feature_)
+    if (pub_point_cloud[unique_id].getNumSubscribers() > 0)
     {
-        int used_num;
-        used_num = it_per_id.second.feature_per_frame.size();
-        if (used_num < 2)
-            continue;
-        if (it_per_id.second.solve_flag == FeaturePerId::UNINITIALIZED || it_per_id.second.solve_flag ==FeaturePerId::OUTLIER)
-            continue;
-        int imu_i = it_per_id.second.start_frame;
-        Vector3d pts_i = it_per_id.second.feature_per_frame.front().point * it_per_id.second.estimated_depth;
-        Vector3d w_pts_i = estimator.image_frame_window_.cam_wise_image_frame_ptr_[unique_id][imu_i]->R_ * (estimator.img_trackers_[unique_id]->cam_info_.ric_[0] * pts_i + estimator.img_trackers_[unique_id]->cam_info_.tic_[0]) + estimator.image_frame_window_.cam_wise_image_frame_ptr_[unique_id][imu_i]->T_;
+        sensor_msgs::PointCloud point_cloud, loop_point_cloud;
+        point_cloud.header.stamp = stamp;
+        point_cloud.header.frame_id = "world";
 
-        geometry_msgs::Point32 p;
-        p.x = w_pts_i(0);
-        p.y = w_pts_i(1);
-        p.z = w_pts_i(2);
-        point_cloud.points.push_back(p);
-    }
-    pub_point_cloud[unique_id].publish(point_cloud);
-
-
-    // pub margined potin
-    sensor_msgs::PointCloud margin_cloud;
-    margin_cloud.header.stamp = stamp;
-    margin_cloud.header.frame_id = "world";
-
-    auto& margin_frame_ptr = estimator.image_frame_window_.all_image_frame_ptr_.begin()->second;
-    int margin_cam_unique_id = margin_frame_ptr->cam_module_unique_id_;
-
-    for (auto &it_per_id : estimator.img_trackers_[margin_cam_unique_id]->f_manager_.feature_)
-    {
-        int used_num;
-        used_num = it_per_id.second.feature_per_frame.size();
-        if (used_num < 2)
-            continue;
-        //if (it_per_id->start_frame > WINDOW_SIZE * 3.0 / 4.0 || it_per_id->solve_flag != 1)
-        //        continue;
-
-        if (it_per_id.second.start_frame == 0 && it_per_id.second.feature_per_frame.size() <= 2
-            && it_per_id.second.solve_flag == FeaturePerId::ESTIMATED)
+        for (auto &it_per_id : estimator.img_trackers_[unique_id]->f_manager_.feature_)
         {
+            int used_num;
+            used_num = it_per_id.second.feature_per_frame.size();
+            if (used_num < 2)
+                continue;
+            if (it_per_id.second.solve_flag == FeaturePerId::UNINITIALIZED || it_per_id.second.solve_flag == FeaturePerId::OUTLIER)
+                continue;
             int imu_i = it_per_id.second.start_frame;
             Vector3d pts_i = it_per_id.second.feature_per_frame.front().point * it_per_id.second.estimated_depth;
-            Vector3d w_pts_i = estimator.image_frame_window_.cam_wise_image_frame_ptr_[margin_cam_unique_id][imu_i]->R_ * (estimator.img_trackers_[margin_cam_unique_id]->cam_info_.ric_[0] * pts_i + estimator.img_trackers_[margin_cam_unique_id]->cam_info_.tic_[0]) + estimator.image_frame_window_.cam_wise_image_frame_ptr_[margin_cam_unique_id][imu_i]->T_;
+            Vector3d w_pts_i = estimator.image_frame_window_.cam_wise_image_frame_ptr_[unique_id][imu_i]->R_ * (estimator.img_trackers_[unique_id]->cam_info_.ric_[0] * pts_i + estimator.img_trackers_[unique_id]->cam_info_.tic_[0]) + estimator.image_frame_window_.cam_wise_image_frame_ptr_[unique_id][imu_i]->T_;
 
             geometry_msgs::Point32 p;
             p.x = w_pts_i(0);
             p.y = w_pts_i(1);
             p.z = w_pts_i(2);
-            margin_cloud.points.push_back(p);
+            point_cloud.points.push_back(p);
         }
+
+        pub_point_cloud[unique_id].publish(point_cloud);
     }
-    pub_margin_cloud.publish(margin_cloud);
+
+    // pub margined potin
+    if (pub_margin_cloud.getNumSubscribers() > 0)
+    {
+        sensor_msgs::PointCloud margin_cloud;
+        margin_cloud.header.stamp = stamp;
+        margin_cloud.header.frame_id = "world";
+
+        auto &margin_frame_ptr = estimator.image_frame_window_.all_image_frame_ptr_.begin()->second;
+        int margin_cam_unique_id = margin_frame_ptr->cam_module_unique_id_;
+
+        for (auto &it_per_id : estimator.img_trackers_[margin_cam_unique_id]->f_manager_.feature_)
+        {
+            int used_num;
+            used_num = it_per_id.second.feature_per_frame.size();
+            if (used_num < 2)
+                continue;
+            // if (it_per_id->start_frame > WINDOW_SIZE * 3.0 / 4.0 || it_per_id->solve_flag != 1)
+            //         continue;
+
+            if (it_per_id.second.start_frame == 0 && it_per_id.second.feature_per_frame.size() <= 2 && it_per_id.second.solve_flag == FeaturePerId::ESTIMATED)
+            {
+                int imu_i = it_per_id.second.start_frame;
+                Vector3d pts_i = it_per_id.second.feature_per_frame.front().point * it_per_id.second.estimated_depth;
+                Vector3d w_pts_i = estimator.image_frame_window_.cam_wise_image_frame_ptr_[margin_cam_unique_id][imu_i]->R_ * (estimator.img_trackers_[margin_cam_unique_id]->cam_info_.ric_[0] * pts_i + estimator.img_trackers_[margin_cam_unique_id]->cam_info_.tic_[0]) + estimator.image_frame_window_.cam_wise_image_frame_ptr_[margin_cam_unique_id][imu_i]->T_;
+
+                geometry_msgs::Point32 p;
+                p.x = w_pts_i(0);
+                p.y = w_pts_i(1);
+                p.z = w_pts_i(2);
+                margin_cloud.points.push_back(p);
+            }
+        }
+        pub_margin_cloud.publish(margin_cloud);
+    }
 }
 
 
@@ -489,8 +506,83 @@ void pubKeyframe(const Estimator &estimator)
 
         pub_keyframe_pose.publish(odometry);
 
-
     }
 }
 
+void pubKeyframes(const Estimator &estimator)
+{
+    if (estimator.solver_flag_ != Estimator::SolverFlag::NON_LINEAR)
+        return;
+
+    auto stamp = ros::Time(estimator.image_frame_window_.all_image_frame_ptr_.rbegin()->second->t_);
+
+    // ---- existing single latest-frame odometry (unchanged) ----
+    if ((pub_keyframe_pose.getNumSubscribers() > 0) && (estimator.marginalization_flag_ == estimator.MARGIN_OLD))
+    {
+        auto &P = estimator.image_frame_window_.all_image_frame_ptr_.rbegin()->second->T_;
+        auto &R = estimator.image_frame_window_.all_image_frame_ptr_.rbegin()->second->R_;
+
+        nav_msgs::Odometry odometry;
+        odometry.header.stamp = stamp;
+        odometry.header.frame_id = "world";
+        odometry.pose.pose.position.x = P.x();
+        odometry.pose.pose.position.y = P.y();
+        odometry.pose.pose.position.z = P.z();
+        odometry.pose.pose.orientation.x = R.x();
+        odometry.pose.pose.orientation.y = R.y();
+        odometry.pose.pose.orientation.z = R.z();
+        odometry.pose.pose.orientation.w = R.w();
+        pub_keyframe_pose.publish(odometry);
+    }
+
+    // ---- all in-window keyframes (rebuilt every call) ----
+    uint32_t num_sub_kf_poses = pub_keyframe_poses.getNumSubscribers();
+    uint32_t num_sub_kf_path = pub_keyframe_path.getNumSubscribers();
+
+    if ((num_sub_kf_poses == 0) && (num_sub_kf_path == 0))
+        return;
+
+    nav_msgs::Path keyframe_path;
+    geometry_msgs::PoseArray keyframe_poses;
+    keyframe_path.header.stamp = stamp;
+    keyframe_path.header.frame_id = "world";
+    keyframe_poses.header = keyframe_path.header;
+
+    for (const auto &kv : estimator.image_frame_window_.all_image_frame_ptr_)
+    {
+        if (!kv.second->is_key_frame_)
+            continue;
+
+        const auto &P = kv.second->T_;
+        const auto &R = kv.second->R_;
+
+        geometry_msgs::Pose pose;
+        pose.position.x = P.x();
+        pose.position.y = P.y();
+        pose.position.z = P.z();
+        pose.orientation.x = R.x();
+        pose.orientation.y = R.y();
+        pose.orientation.z = R.z();
+        pose.orientation.w = R.w();
+
+        if (num_sub_kf_path > 0)
+        {
+            geometry_msgs::PoseStamped ps;
+            ps.header.stamp = ros::Time(kv.second->t_);
+            ps.header.frame_id = "world";
+            ps.pose = pose;
+
+            keyframe_path.poses.push_back(ps);
+        }
+
+        if (num_sub_kf_poses > 0)
+            keyframe_poses.poses.push_back(pose);
+    }
+
+    if (num_sub_kf_path > 0)
+        pub_keyframe_path.publish(keyframe_path);
+
+    if (num_sub_kf_poses > 0)
+        pub_keyframe_poses.publish(keyframe_poses);
+}
 }

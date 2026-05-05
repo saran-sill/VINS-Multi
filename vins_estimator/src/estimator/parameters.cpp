@@ -57,6 +57,8 @@ int FLOW_BACK;
 double DEPTH_MIN;
 double DEPTH_MAX;
 
+double NEW_FEATURE_RATIO_THRESHOLD;
+
 double CLAHE_CLIP_LIMIT;
 int CLAHE_GRID_SIZE;
 
@@ -362,6 +364,9 @@ void readParameters(std::string config_file)
     DEPTH_MAX = fsSettings["depth_max"];
     printf("DEPTH_MIN: %lf\n", DEPTH_MIN);
     printf("DEPTH_MAX: %lf\n", DEPTH_MAX);
+
+    NEW_FEATURE_RATIO_THRESHOLD = fsSettings["new_feature_ratio_threshold"];
+    printf("NEW_FEATURE_RATIO_THRESHOLD: %lf\n", NEW_FEATURE_RATIO_THRESHOLD);
 
     GOOD_FEAT_TO_TRACK_QUALITY = fsSettings["good_feat_to_track_quality"];
     printf("GOOD_FEAT_TO_TRACK_QUALITY: %lf\n", GOOD_FEAT_TO_TRACK_QUALITY);
