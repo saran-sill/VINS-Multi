@@ -204,6 +204,12 @@ void VinsNodeBaseClass::camera_module_info_with_sub::imgs_callback(const sensor_
         }
     }
 
+    for (int i = 0; i < module_info_.num_downsamples_; i++)
+    {
+        cv::pyrDown(img_0->image, img_0->image);
+        cv::pyrDown(img_1->image, img_1->image);
+    }
+
     if (module_info_.depth_)
         estimator_ptr_->inputImageToBuffer(unique_id_, img0_msg->header.stamp.toSec(), img_0->image, img_1->image);
 
@@ -255,6 +261,8 @@ void VinsNodeBaseClass::camera_module_info_with_sub::img_callback(const sensor_m
 
     // Use the buffered path — same as stereo. Don't call inputImage directly,
     // because that blocks waiting for IMU and deadlocks the ROS callback thread.
+    for (int i = 0; i < module_info_.num_downsamples_; i++)
+        cv::pyrDown(img_0->image, img_0->image);
     estimator_ptr_->inputImageToBuffer(unique_id_, img0_msg->header.stamp.toSec(), img_0->image);
 }
 

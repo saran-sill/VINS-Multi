@@ -191,6 +191,7 @@ void readParameters(std::string config_file)
 
         CAM_MODULES[cur_cam_module].img_width_ = (*it)["image_width"];
         CAM_MODULES[cur_cam_module].img_height_ = (*it)["image_height"];
+        CAM_MODULES[cur_cam_module].num_downsamples_ = std::max(0, (int)(*it)["num_downsamples"]);
 
         CAM_MODULES[cur_cam_module].td_ = (*it)["td"];
 
@@ -253,6 +254,7 @@ void readParameters(std::string config_file)
         cout << "depth: " << CAM_MODULES[i].depth_ << endl;
         cout << "stereo: " << CAM_MODULES[i].stereo_ << endl;
         cout << "img_dim: " << CAM_MODULES[i].img_width_ << "\t" << CAM_MODULES[i].img_height_ << endl;
+        cout << "num_downsamples: " << CAM_MODULES[i].num_downsamples_ << endl;
         cout << "img_topic_0: " << CAM_MODULES[i].img_topic_[0] << endl;
         cout << "calib_file_0: " << CAM_MODULES[i].calib_file_[0] << endl;
 

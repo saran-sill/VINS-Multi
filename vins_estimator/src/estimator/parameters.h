@@ -67,6 +67,7 @@ struct camera_module_info
     vector<std::string> calib_file_;
     vector<Eigen::Map<Eigen::Quaterniond>> ric_;
     vector<Eigen::Map<Eigen::Vector3d>> tic_;
+    int num_downsamples_ = 0;
 
     vector<double *> para_Ex_Pose_;
 

@@ -36,6 +36,7 @@ cam_module:
         td: -0.0095085386624162629
         rolling_shutter: 0
         rolling_shutter_tr: 0.03333
+        num_downsamples: 0
 
         imu_T_cam0: !!opencv-matrix
             rows: 4
@@ -67,6 +68,7 @@ cam_module:
         td: -0.010322410394738231
         rolling_shutter: 0
         rolling_shutter_tr: 0.03333
+        num_downsamples: 0
 
         imu_T_cam0: !!opencv-matrix
             rows: 4
@@ -98,6 +100,7 @@ cam_module:
       #   td: -0.009257752670192531
       #   rolling_shutter: 0
       #   rolling_shutter_tr: 0.03333
+      #   num_downsamples: 0
 
       #   imu_T_cam0: !!opencv-matrix
       #       rows: 4

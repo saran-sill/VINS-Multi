@@ -180,7 +180,8 @@ class Estimator
             , image_buffer_(MAX_IMG_BUF_SIZE == -1 ? 30U : (unsigned int)(MAX_IMG_BUF_SIZE + 2))
         {
             ROS_WARN("set tracker, id %d", cam_module.module_id_);
-            featureTracker_.readIntrinsicParameter(cam_module.calib_file_);
+            // featureTracker_.readIntrinsicParameter(cam_module.calib_file_);
+            featureTracker_.readIntrinsicParameter(cam_module.calib_file_, cam_module.num_downsamples_);
         }
 
         ~imgTracker()

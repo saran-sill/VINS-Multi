@@ -61,6 +61,7 @@ class FeatureTracker
     void set_max_feature_num(int max_feature_num);
     void setMask();
     void readIntrinsicParameter(const vector<std::string> &calib_file);
+    void readIntrinsicParameter(const vector<std::string>& calib_file, int num_downsamples);
     void showUndistortion(const string &name);
     void rejectWithF();
     void rejectDepth(const cv::Mat &depth_img);

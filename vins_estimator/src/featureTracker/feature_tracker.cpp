@@ -9,6 +9,11 @@
 
 #include "feature_tracker.h"
 #include <Eigen/src/Core/Matrix.h>
+#include "camodocal/camera_models/CataCamera.h"
+#include "camodocal/camera_models/EquidistantCamera.h"
+#include "camodocal/camera_models/PinholeCamera.h"
+#include "camodocal/camera_models/PinholeFullCamera.h"
+#include "camodocal/camera_models/ScaramuzzaCamera.h"
 
 namespace vins_multi
 {
@@ -1011,17 +1016,101 @@ void FeatureTracker::setDepth(const cv::Mat &depth_img)
     }
 }
 
-void FeatureTracker::readIntrinsicParameter(const vector<std::string> &calib_file)
+// Scale the pixel-space intrinsic parameters of a loaded camera model to match
+// an image that has been pyrDown'd `num_downsamples` times (scale = 1/2^n).
+// imageWidth/Height and focal lengths / principal points are scaled accordingly.
+// Distortion coefficients and non-pixel parameters (e.g. Mei's xi, Scaramuzza's
+// polynomial / affine coefficients) are left unchanged.
+static void scaleCameraParams(camodocal::CameraPtr camera, int num_downsamples)
 {
+    if (num_downsamples <= 0)
+        return;
 
+    const double scale = 1.0 / static_cast<double>(1 << num_downsamples);
+
+    switch (camera->modelType())
+    {
+        case camodocal::Camera::PINHOLE:
+        {
+            auto cam = boost::dynamic_pointer_cast<camodocal::PinholeCamera>(camera);
+            auto p = cam->getParameters();
+            p.imageWidth()  = static_cast<int>(std::round(p.imageWidth()  * scale));
+            p.imageHeight() = static_cast<int>(std::round(p.imageHeight() * scale));
+            p.fx() *= scale;
+            p.fy() *= scale;
+            p.cx() *= scale;
+            p.cy() *= scale;
+            cam->setParameters(p);
+            break;
+        }
+        case camodocal::Camera::PINHOLE_FULL:
+        {
+            auto cam = boost::dynamic_pointer_cast<camodocal::PinholeFullCamera>(camera);
+            auto p = cam->getParameters();
+            p.imageWidth()  = static_cast<int>(std::round(p.imageWidth()  * scale));
+            p.imageHeight() = static_cast<int>(std::round(p.imageHeight() * scale));
+            p.fx() *= scale;
+            p.fy() *= scale;
+            p.cx() *= scale;
+            p.cy() *= scale;
+            cam->setParameters(p);
+            break;
+        }
+        case camodocal::Camera::KANNALA_BRANDT:
+        {
+            auto cam = boost::dynamic_pointer_cast<camodocal::EquidistantCamera>(camera);
+            auto p = cam->getParameters();
+            p.imageWidth()  = static_cast<int>(std::round(p.imageWidth()  * scale));
+            p.imageHeight() = static_cast<int>(std::round(p.imageHeight() * scale));
+            p.mu() *= scale;
+            p.mv() *= scale;
+            p.u0() *= scale;
+            p.v0() *= scale;
+            cam->setParameters(p);
+            break;
+        }
+        case camodocal::Camera::MEI:
+        {
+            auto cam = boost::dynamic_pointer_cast<camodocal::CataCamera>(camera);
+            auto p = cam->getParameters();
+            p.imageWidth()  = static_cast<int>(std::round(p.imageWidth()  * scale));
+            p.imageHeight() = static_cast<int>(std::round(p.imageHeight() * scale));
+            // xi is the mirror parameter — dimensionless, do not scale
+            p.gamma1() *= scale;
+            p.gamma2() *= scale;
+            p.u0()     *= scale;
+            p.v0()     *= scale;
+            cam->setParameters(p);
+            break;
+        }
+        case camodocal::Camera::SCARAMUZZA:
+        {
+            auto cam = boost::dynamic_pointer_cast<camodocal::OCAMCamera>(camera);
+            auto p = cam->getParameters();
+            p.imageWidth()  = static_cast<int>(std::round(p.imageWidth()  * scale));
+            p.imageHeight() = static_cast<int>(std::round(p.imageHeight() * scale));
+            // Polynomial coefficients and affine params (C, D, E) are dimensionless;
+            // only the optical centre is in pixel space
+            p.center_x() *= scale;
+            p.center_y() *= scale;
+            cam->setParameters(p);
+            break;
+        }
+    }
+}
+
+void FeatureTracker::readIntrinsicParameter(const vector<std::string> &calib_file, int num_downsamples)
+{
     ROS_INFO("reading paramerter of camera %s", calib_file[0].c_str());
     camodocal::CameraPtr camera = CameraFactory::instance()->generateCameraFromYamlFile(calib_file[0]);
+    scaleCameraParams(camera, num_downsamples);
     m_camera.push_back(camera);
 
     if (stereo)
     {
         ROS_INFO("reading paramerter of camera %s", calib_file[1].c_str());
         camodocal::CameraPtr camera_1 = CameraFactory::instance()->generateCameraFromYamlFile(calib_file[1]);
+        scaleCameraParams(camera_1, num_downsamples);
         m_camera.push_back(camera_1);
     }
 }
