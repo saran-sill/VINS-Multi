@@ -117,7 +117,7 @@ cam_module:
                     0.0019988979005543307, 0.0039284801612761025, -0.99999028567821879, -0.04843171862286743,
                     0, 0, 0, 1 ]
 
-debug_level: "info"
+debug_level: "debug"
 
 estimate_extrinsic: 1
 
@@ -135,6 +135,8 @@ show_track: 1
 flow_back: 1
 equalize: 1
 new_feature_ratio_threshold: 0.75
+
+max_image_buf_size: 5
 
 min_track_frame_for_opt: 3
 min_frame_interval_per_module: 0.05

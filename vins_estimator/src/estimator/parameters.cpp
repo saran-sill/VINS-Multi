@@ -59,6 +59,8 @@ double DEPTH_MAX;
 
 double NEW_FEATURE_RATIO_THRESHOLD;
 
+int MAX_IMG_BUF_SIZE;
+
 double CLAHE_CLIP_LIMIT;
 int CLAHE_GRID_SIZE;
 
@@ -369,6 +371,9 @@ void readParameters(std::string config_file)
 
     NEW_FEATURE_RATIO_THRESHOLD = fsSettings["new_feature_ratio_threshold"];
     printf("NEW_FEATURE_RATIO_THRESHOLD: %lf\n", NEW_FEATURE_RATIO_THRESHOLD);
+
+    MAX_IMG_BUF_SIZE = fsSettings["max_image_buf_size"];
+    printf("MAX_IMG_BUF_SIZE: %d\n", MAX_IMG_BUF_SIZE);
 
     GOOD_FEAT_TO_TRACK_QUALITY = fsSettings["good_feat_to_track_quality"];
     printf("GOOD_FEAT_TO_TRACK_QUALITY: %lf\n", GOOD_FEAT_TO_TRACK_QUALITY);

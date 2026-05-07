@@ -148,12 +148,71 @@ void Estimator::initTrackerGPU(shared_ptr<imgTracker> img_tracker)
 
 #endif
 
+// void Estimator::inputImageToBuffer(const unsigned int unique_id, double t, const cv::Mat &_img, const cv::Mat &_img1)
+// {
+
+//     auto &img_tracker = img_trackers_[unique_id];
+//     img_tracker->image_buffer_mutex_.lock();
+//     img_tracker->image_buffer_.insertImage(t, _img, _img1);
+//     img_tracker->image_buffer_mutex_.unlock();
+// }
+
 void Estimator::inputImageToBuffer(const unsigned int unique_id, double t, const cv::Mat &_img, const cv::Mat &_img1)
 {
-
     auto &img_tracker = img_trackers_[unique_id];
     img_tracker->image_buffer_mutex_.lock();
+
     img_tracker->image_buffer_.insertImage(t, _img, _img1);
+
+    int dropped_count = 0;
+
+    if (MAX_IMG_BUF_SIZE != -1)
+    {
+        while ((int)img_tracker->image_buffer_.size() > MAX_IMG_BUF_SIZE)
+        {
+            if (MAX_IMG_BUF_SIZE == 1)
+            {
+                double t_dropped = img_tracker->image_buffer_.front()->t_;
+                img_tracker->image_buffer_.releaseOldest();
+                ROS_DEBUG("img_buf[%d] dropped oldest t=%.3f", unique_id, t_dropped);
+                dropped_count++;
+                continue;
+            }
+
+            double t_last = img_tracker->last_retrieved_t_ > 0.0
+                                ? img_tracker->last_retrieved_t_
+                                : img_tracker->image_buffer_.front()->t_;
+            double t_newest = img_tracker->image_buffer_.back()->t_;
+            double ideal_interval = (t_newest - t_last) / MAX_IMG_BUF_SIZE;
+
+            int drop_idx = 1;
+            double max_dev = -1.0;
+            for (int i = 1; i < (int)img_tracker->image_buffer_.size() - 1; i++)
+            {
+                double t_ideal = t_last + i * ideal_interval;
+                double t_actual = img_tracker->image_buffer_.at(i)->t_;
+                double dev = std::abs(t_actual - t_ideal);
+                if (dev > max_dev)
+                {
+                    max_dev = dev;
+                    drop_idx = i;
+                }
+            }
+
+            double t_dropped = img_tracker->image_buffer_.at(drop_idx)->t_;
+            img_tracker->image_buffer_.releaseAt(drop_idx);
+            ROS_DEBUG("img_buf[%d] dropped idx=%d t=%.3f (dev=%.3f)",
+                      unique_id, drop_idx, t_dropped, max_dev);
+            dropped_count++;
+        }
+    }
+
+    if (dropped_count > 0)
+    {
+        ROS_DEBUG("img_buf[%d] dropped %d frame(s), final size=%zu",
+                 unique_id, dropped_count, img_tracker->image_buffer_.size());
+    }
+
     img_tracker->image_buffer_mutex_.unlock();
 }
 
@@ -178,6 +237,11 @@ void Estimator::processImageBuffer(const unsigned int unique_id)
 
         if (frame_ptr)
         {
+            img_tracker->last_retrieved_t_ = frame_ptr->t_;
+
+            double lag = ros::Time::now().toSec() - frame_ptr->t_;
+            ROS_DEBUG("img_buf[%d] processing t=%.3f, lag=%.3fms", unique_id, frame_ptr->t_, lag * 1000.0);
+
             inputImage(unique_id, frame_ptr->t_, frame_ptr->img_, frame_ptr->img1_);
 
             img_tracker->image_buffer_mutex_.lock();
@@ -203,6 +267,8 @@ void Estimator::processImageBuffer(const unsigned int unique_id)
 
 void Estimator::inputImage(const unsigned int unique_id, double t, const cv::Mat &_img, const cv::Mat &_img1)
 {
+    ROS_DEBUG("new image coming ------------------------------------------");
+
     // inputImageCnt_++;
     map<int, FeaturePerFrame> featurePts;
     TicToc featureTracker_Time;
@@ -219,6 +285,7 @@ void Estimator::inputImage(const unsigned int unique_id, double t, const cv::Mat
     }
 
     // cout<<"track image time: "<<featureTracker_Time.toc()<<" ms"<<endl;
+    ROS_DEBUG("track image time: %f\n", featureTracker_Time.toc());
 
     updateFeatureTrackerMaxCnt();
 
@@ -312,7 +379,7 @@ void Estimator::inputImage(const unsigned int unique_id, double t, const cv::Mat
     mProcess_.unlock();
 
     mBuf_.unlock();
-    // printf("process time: %f\n", processTime.toc());
+    ROS_DEBUG("process time: %f\n", processTime.toc());
 }
 
 void Estimator::inputIMU(double t, const Vector6d &imu_data)
@@ -897,7 +964,7 @@ void Estimator::addPreintegrationToNextFrame(unsigned int remove_frame_state_idx
 
 void Estimator::processImage(const deque<State>::iterator img_state_it, const map<double, shared_ptr<ImageFrame>>::iterator img_frame_it)
 {
-    ROS_DEBUG("new image coming ------------------------------------------");
+
     ROS_DEBUG("Adding feature points %lu", img_state_it->image_frame_ptr_->points_.size());
 
     int cam_unique_id = img_state_it->image_frame_ptr_->cam_module_unique_id_;

@@ -107,6 +107,47 @@ class Estimator
             free_memory_buffer_.emplace_back(frame_ptr);
         }
 
+        size_t size() const
+        {
+            return image_buffer_.size();
+        }
+
+        shared_ptr<rawImageFrame> front() const
+        {
+            return image_buffer_.front();
+        }
+
+        shared_ptr<rawImageFrame> back() const
+        {
+            return image_buffer_.back();
+        }
+
+        shared_ptr<rawImageFrame> at(int idx) const
+        {
+            auto it = image_buffer_.begin();
+            std::advance(it, idx);
+            return *it;
+        }
+
+        void releaseAt(int idx)
+        {
+            auto it = image_buffer_.begin();
+            std::advance(it, idx);
+            free_memory_buffer_.emplace_back(*it); // return slot to pool
+            image_buffer_.erase(it);
+        }
+
+        void releaseOldest()
+        {
+            releaseAt(0);
+        }
+
+        void clear()
+        {
+            while (!image_buffer_.empty())
+                releaseOldest();
+        }
+
         shared_ptr<rawImageFrame> retrieveFrame()
         {
             if (image_buffer_.empty())
@@ -129,7 +170,14 @@ class Estimator
     class imgTracker
     {
       public:
-        imgTracker(camera_module_info &cam_module, vector<shared_ptr<ImageFrame>> &image_frame_ptr, int max_feature_per_module) : cam_info_{cam_module}, featureTracker_{cam_module.depth_, cam_module.stereo_, max_feature_per_module}, f_manager_(cam_module.depth_, cam_module.stereo_, image_frame_ptr), image_buffer_(5U)
+        imgTracker(camera_module_info &cam_module, vector<shared_ptr<ImageFrame>> &image_frame_ptr, int max_feature_per_module)
+            : cam_info_{cam_module}
+            , featureTracker_{cam_module.depth_
+            , cam_module.stereo_
+            , max_feature_per_module}
+            , f_manager_(cam_module.depth_, cam_module.stereo_, image_frame_ptr)
+            // , image_buffer_(5U)
+            , image_buffer_(MAX_IMG_BUF_SIZE == -1 ? 30U : (unsigned int)(MAX_IMG_BUF_SIZE + 2))
         {
             ROS_WARN("set tracker, id %d", cam_module.module_id_);
             featureTracker_.readIntrinsicParameter(cam_module.calib_file_);
@@ -223,6 +271,7 @@ class Estimator
         double last_frame_time_ = -1.0;
         double last_keep_frame_time_ = -1.0;
         double frame_time_priority_ratio_ = 1.0;
+        double last_retrieved_t_ = -1.0;
 
         double max_frame_time_priority = 1.0;
 

@@ -223,6 +223,9 @@ extern int SHOW_TRACK;
 extern int FLOW_BACK;
 extern int EQUALIZE;
 extern double NEW_FEATURE_RATIO_THRESHOLD;
+
+extern int MAX_IMG_BUF_SIZE;
+
 extern double DEPTH_MIN;
 extern double DEPTH_MAX;
 
