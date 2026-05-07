@@ -285,7 +285,7 @@ void Estimator::inputImage(const unsigned int unique_id, double t, const cv::Mat
     }
 
     // cout<<"track image time: "<<featureTracker_Time.toc()<<" ms"<<endl;
-    ROS_DEBUG("track image time: %f\n", featureTracker_Time.toc());
+    ROS_DEBUG("track image time: %f", featureTracker_Time.toc());
 
     updateFeatureTrackerMaxCnt();
 
@@ -379,7 +379,7 @@ void Estimator::inputImage(const unsigned int unique_id, double t, const cv::Mat
     mProcess_.unlock();
 
     mBuf_.unlock();
-    ROS_DEBUG("process time: %f\n", processTime.toc());
+    ROS_DEBUG("process time: %f", processTime.toc());
 }
 
 void Estimator::inputIMU(double t, const Vector6d &imu_data)
@@ -2272,6 +2272,17 @@ void Estimator::updateLatestStates(const int unique_id)
     //     printf("cam %d frame cnt: %d\n", i, image_frame_window_.cam_wise_image_frame_ptr_[i].size());
     // }
 
+    // distance between IMU propagated position and latest image optimized position
+    const Eigen::Vector3d &imu_P = state_hist_.back().P_;
+    const Eigen::Vector3d &img_P = image_frame->T_;
+    double dist = (imu_P - img_P).norm();
+    double time_lag = state_hist_.back().t_ - image_frame->t_;
+
+    ROS_DEBUG("imu_img_dist: %.3fm, time_lag: %.3fms, imu_t=%.3f, img_t=%.3f",
+             dist, time_lag * 1000.0,
+             state_hist_.back().t_, image_frame->t_);
+
+    // publish infomation
     std_msgs::Header header;
     header.frame_id = "world";
     header.stamp = ros::Time(image_frame_window_.all_image_frame_ptr_.rbegin()->second->t_);
