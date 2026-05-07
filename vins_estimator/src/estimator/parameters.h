@@ -52,7 +52,7 @@ enum NoiseOrder
 const double FOCAL_LENGTH = 460.0;
 const double FRAME_PRIORITY_CONST = 20.0;
 
-// #define UNIT_SPHERE_ERROR
+#define UNIT_SPHERE_ERROR
 
 struct camera_module_info
 {
