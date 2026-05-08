@@ -157,6 +157,7 @@ map<int, FeaturePerFrame> FeatureTracker::trackImage(double _cur_time, const cv:
     }
     */
     cur_pts.clear();
+    cur_un_pts.clear();
 
     if (prev_pts.size() > 0)
     {
@@ -458,6 +459,7 @@ map<int, FeaturePerFrame> FeatureTracker::trackImageGPU(double _cur_time, const 
     }
     */
     cur_pts.clear();
+    cur_un_pts.clear();
 
     if (prev_pts.size() > 0 && cur_time > 0.0)
     {
@@ -908,6 +910,9 @@ void FeatureTracker::rejectWithF()
         ROS_DEBUG("FM ransac begins");
         TicToc t_f;
         vector<cv::Point2f> un_cur_pts(cur_pts.size()), un_prev_pts(prev_pts.size());
+
+        // ROS_DEBUG("cur_pts.size=%ld, prev_pts.size=%ld", cur_pts.size(), prev_pts.size());
+
         for (unsigned int i = 0; i < cur_pts.size(); i++)
         {
             Eigen::Vector3d tmp_p;
