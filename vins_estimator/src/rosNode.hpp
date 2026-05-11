@@ -29,6 +29,8 @@
 #include <vector>
 
 #include "estimator/parameters.h"
+#include "gloc/gloc.h"
+#include "gloc/parameters.h"
 
 using namespace std;
 
@@ -97,6 +99,7 @@ class VinsNodeBaseClass
     vector<imu_info_with_sub> imu_modules_;
 
     Estimator estimator_;
+    gloc::Gloc gloc_;
 
     ros::Subscriber sub_restart_;
 

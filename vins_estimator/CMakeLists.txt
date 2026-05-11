@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 2.8.3)
 project(vins_multi)
 
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
 set(CMAKE_BUILD_TYPE "Release")
 set(CMAKE_CXX_FLAGS "-std=c++17")
 #-DEIGEN_USE_MKL_ALL")
@@ -136,6 +138,17 @@ include_directories(
   ${EIGEN3_INCLUDE_DIR}
 )
 
+#------------- DBow3 library -------------#
+if(NOT DEFINED ENV{DBOW3_FOLDER})
+    MESSAGE(FATAL_ERROR "ERROR : Please set DBOW3_FOLDER in bashrc file.")
+endif()
+
+set(DBOW3_FOLDER "$ENV{DBOW3_FOLDER}/lib/cmake/DBoW3")
+
+find_package(DBoW3 REQUIRED PATHS ${DBOW3_FOLDER} NO_DEFAULT_PATH)
+
+include_directories(${DBoW3_INCLUDE_DIRS})
+
 #------------- ROS-ralated library -------------#
 find_package(roscpp REQUIRED)
 find_package(tf REQUIRED)
@@ -159,6 +172,36 @@ list(APPEND ros_libraries
 
 # catkin_package()
 
+add_library(colmap_util_lib SHARED
+    ${CMAKE_SOURCE_DIR}/colmap/colmap_util.cpp
+)
+target_link_libraries(colmap_util_lib
+    ${OPENCV_FULL_PATH_LIBS}
+)
+
+include_directories(
+        ${CMAKE_SOURCE_DIR}/colmap
+)
+
+add_library(point_features_lib SHARED
+    ${CMAKE_SOURCE_DIR}/point_features/point_features.cpp
+)
+target_link_libraries(point_features_lib
+    ${OPENCV_FULL_PATH_LIBS})
+include_directories(
+        ${CMAKE_SOURCE_DIR}/point_features
+)
+
+add_library(dbow3_util_lib STATIC
+    ${CMAKE_SOURCE_DIR}/dbow3/dbow3_util.cpp
+)
+target_link_libraries(dbow3_util_lib
+    ${DBoW3_LIBS}
+)
+
+include_directories(
+        ${CMAKE_SOURCE_DIR}/dbow3
+)
 
 add_library(parameter_lib_multi SHARED
     src/estimator/parameters.cpp
@@ -208,13 +251,32 @@ target_link_libraries(estimator_lib_multi
     parameter_lib_multi utility_lib_multi init_lib_multi factor_lib_multi
     ${CAMERA_MODELS_LIB} ${ros_libraries} ${OPENCV_FULL_PATH_LIBS} ${CERES_LIBRARIES} ${LIBDW})
 
+add_library(gloc_lib SHARED
+    src/gloc/gloc.cpp
+    src/gloc/parameters.cpp
+)
+target_link_libraries(gloc_lib
+    colmap_util_lib dbow3_util_lib point_features_lib ${ros_libraries}
+)
+
 add_library(rosnode_lib_multi SHARED
     src/rosNode.cpp
 )
 target_link_libraries(rosnode_lib_multi ${ros_libraries} ${OPENCV_FULL_PATH_LIBS} ${LIBDW})
 
 add_executable(${PROJECT_NAME} src/rosNodeMain.cpp)
-target_link_libraries(${PROJECT_NAME} rosnode_lib_multi parameter_lib_multi utility_lib_multi estimator_lib_multi frontend_lib_multi init_lib_multi factor_lib_multi ${LIBDW})
+target_link_libraries(${PROJECT_NAME} rosnode_lib_multi
+                                      parameter_lib_multi
+                                      utility_lib_multi
+                                      estimator_lib_multi
+                                      frontend_lib_multi
+                                      init_lib_multi
+                                      factor_lib_multi
+                                      colmap_util_lib
+                                      point_features_lib
+                                      dbow3_util_lib
+                                      gloc_lib
+                                      ${LIBDW})
 
 # add_library(${PROJECT_NAME}_nodelet_lib src/rosNodelet.cpp)
 # target_link_libraries(${PROJECT_NAME}_nodelet_lib rosnode_lib_multi parameter_lib_multi utility_lib_multi estimator_lib_multi frontend_lib_multi init_lib_multi factor_lib_multi ${LIBDW})
@@ -230,6 +292,10 @@ install(TARGETS
     factor_lib_multi
     estimator_lib_multi
     rosnode_lib_multi
+    colmap_util_lib
+    point_features_lib
+    dbow3_util_lib
+    gloc_lib
     RUNTIME DESTINATION bin
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib
@@ -246,3 +312,10 @@ install(FILES nodelet_plugins.xml
     DESTINATION share/${PROJECT_NAME}
     OPTIONAL
 )
+
+# install(FILES
+#     ${CMAKE_SOURCE_DIR}/colmap/colmap_util.h
+#     ${CMAKE_SOURCE_DIR}/point_features/point_features.h
+#     ${CMAKE_SOURCE_DIR}/gloc/gloc.h
+#     DESTINATION include
+# )

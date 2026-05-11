@@ -292,6 +292,7 @@ void VinsNodeBaseClass::Init(ros::NodeHandle &n, const std::string &config_file)
               << config_file << '\n';
 
     readParameters(config_file);
+
     set_modules();
     ROS_WARN("set module finish");
     registerPub(n);
@@ -306,7 +307,19 @@ void VinsNodeBaseClass::Init(ros::NodeHandle &n, const std::string &config_file)
 
     registerSub(n);
 
+    gloc_.setEstimator(&estimator_);
+
+    if (gloc::GLOC_ENABLED && !gloc_.init())
+    {
+        ROS_FATAL("Failed to initialise global localiser — check paths and files above.");
+        ros::shutdown();
+        exit(EXIT_FAILURE);
+    }
+
     estimator_.start_process_thread();
+
+    if (gloc::GLOC_ENABLED)
+        gloc_.start_process_thread();
 }
 
 void VinsNodeBaseClass::init_node(ros::NodeHandle &n, const std::string &config_file)

@@ -168,3 +168,12 @@ save_image: 0
 
 vis_circle_radius: 7
 vis_arrow_thickness: 4
+
+######################################
+# GLOC
+######################################
+gloc_enabled: 0
+gloc_colmap_folder: ""
+gloc_colmap_img_folder: "/mnt/EXDISK/HiveGround/colmap_ws/SCGP"
+gloc_dbow3_database: "/mnt/EXDISK/HiveGround/colmap_ws/_SCGP_database/database_orb.bin"
+gloc_dbow3_vocab: "/mnt/EXDISK/HiveGround/dbow3/orbvoc.dbow3"
