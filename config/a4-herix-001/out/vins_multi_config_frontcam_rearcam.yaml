@@ -133,7 +133,7 @@ min_dist: 30
 img_freq: 15
 depth_min: 0.2
 depth_max: 20.0
-F_threshold: 5.0
+F_threshold: 3.0
 show_track: 1
 flow_back: 1
 equalize: 1
@@ -160,7 +160,7 @@ max_num_iterations: 20
 
 keyframe_parallax: 20.0
 
-estimate_td: 0
+estimate_td: 1
 
 load_previous_pose_graph: 0
 pose_graph_save_path: "/tmp/vins_multi_pose_graph/"
