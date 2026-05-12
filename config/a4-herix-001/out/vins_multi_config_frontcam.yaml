@@ -24,7 +24,7 @@ imu:
 cam_module:
     num: 1
     modules:
-      - cam_id: front_cam
+      - cam_id: 0
         depth: 0
         stereo: 1
         image_width: 1920
@@ -56,7 +56,7 @@ cam_module:
                     -0.0032249649888749232, -0.99980433738401342, 0.019516314942501806, -0.0061540216119524557,
                     0, 0, 0, 1 ]
 
-      # - cam_id: rear_cam
+      # - cam_id: 1
       #   depth: 0
       #   stereo: 1
       #   image_width: 1280
@@ -88,7 +88,7 @@ cam_module:
       #               -0.01179828359030155, -0.99974119515498194, 0.019451046614811118, -0.0077431454302356699,
       #               0, 0, 0, 1 ]
 
-      # - cam_id: bottom_cam
+      # - cam_id: 2
       #   depth: 0
       #   stereo: 1
       #   image_width: 1280
