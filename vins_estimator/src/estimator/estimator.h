@@ -11,6 +11,7 @@
 
 #include <ceres/ceres.h>
 #include <chrono>
+#include <cstdint>
 #include <eigen3/Eigen/Dense>
 #include <eigen3/Eigen/Geometry>
 #include <list>
@@ -39,6 +40,14 @@
 // #include "../factor/reprojectionDepthFactor.h"
 #include "../factor/projectionTwoFrameOneCamDepthFactor.h"
 #include "../featureTracker/feature_tracker.h"
+
+namespace gloc
+{
+// Forward-declared so the Estimator can hold a non-owning pointer without
+// dragging the full gloc header (Ceres, OpenCV, etc.) into estimator.h.
+// The actual call sites in estimator.cpp include gloc/gloc.h.
+class Gloc;
+} // namespace gloc
 
 namespace vins_multi
 {
@@ -293,6 +302,20 @@ class Estimator
     void setParameter();
     static void initTrackerGPU(shared_ptr<imgTracker> img_tracker);
 
+    // ─────────────────────────────────────────────────────────────────────
+    // setGloc
+    //
+    // Stores a non-owning pointer to Gloc. Called by rosNode after gloc
+    // initialisation succeeds and before start_process_thread(). When
+    // non-null, processWindow() will build a Snapshot and call
+    // gloc_ptr_->onSnapshotChanged(...) at the end of each round.
+    //
+    // Safe to leave unset — processWindow no-ops the snapshot path when
+    // gloc_ptr_ is null. Used both for VINS-only configs (gloc disabled)
+    // and as a defensive check in case wiring order changes.
+    // ─────────────────────────────────────────────────────────────────────
+    void setGloc(gloc::Gloc *gloc);
+
     void start_process_thread();
 
     // interface
@@ -475,6 +498,17 @@ class Estimator
     bool initThreadFlag_;
 
     std::vector<std::thread> image_process_thread_vec_;
+
+    // ── Gloc handoff ─────────────────────────────────────────────────────────
+    //
+    // gloc_ptr_ is non-owning. Set by setGloc() after Gloc is initialised.
+    // Null when gloc is disabled or not yet wired — processWindow skips the
+    // snapshot path entirely in that case.
+    //
+    // snapshot_seq_ is a monotonically increasing id stamped on each Snapshot
+    // for logging / out-of-order detection on the gloc side.
+    gloc::Gloc *gloc_ptr_ = nullptr;
+    uint64_t snapshot_seq_ = 0;
 };
 
 } // namespace vins_multi

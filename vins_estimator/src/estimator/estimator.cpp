@@ -8,6 +8,7 @@
  *******************************************************/
 
 #include "estimator.h"
+#include "../gloc/gloc.h"
 #include "../utility/visualization.h"
 #include "feature_manager.h"
 
@@ -31,6 +32,11 @@ Estimator::~Estimator()
         // processThread_.join();
         // printf("join thread \n");
     }
+}
+
+void Estimator::setGloc(gloc::Gloc *gloc)
+{
+    gloc_ptr_ = gloc;
 }
 
 void Estimator::clearState()
@@ -1365,6 +1371,56 @@ void Estimator::processWindow(const int img_cam_unique_id)
 
         slideWindow(frame_to_margin_);
         // printf("slide window time: %lf ms\n", tt.toc());
+    }
+
+    // ── Gloc snapshot handoff ────────────────────────────────────────────────
+    //
+    // Hand the current keyframe window over to gloc. The call is synchronous
+    // but cheap (~μs): gloc reconciles its state map, runs eager image-lookup
+    // resolution against its ring buffers, and signals its worker thread.
+    // The Ceres optimization on the gloc side runs without holding any lock
+    // that this thread cares about, so the estimator is not stalled.
+    //
+    // Called unconditionally at the end of processWindow whenever gloc is
+    // wired up: optimization may have refreshed keyframe poses, marginalization
+    // may have shifted the window, or both. Gloc figures out what changed by
+    // comparing against its own state map. When neither happened (no opt, no
+    // marginalization), the call is still safe but mostly idempotent — gloc
+    // just refreshes local poses to identical values.
+    //
+    // Skipped when gloc_ptr_ is null (gloc disabled or wiring deferred), and
+    // when no keyframes exist yet (estimator still initialising).
+    if (gloc_ptr_ != nullptr && !image_frame_window_.all_image_frame_ptr_.empty())
+    {
+        gloc::Snapshot snap;
+        snap.snapshot_id = ++snapshot_seq_;
+        snap.keyframes.reserve(image_frame_window_.all_image_frame_ptr_.size());
+
+        // Walk the window in ascending time order (the map is keyed by
+        // t + td, which is exactly the t_kf we want). Filter on
+        // is_key_frame_ — non-keyframes are intermediate frames whose poses
+        // are not stable and shouldn't be used as gloc soft-constraint anchors.
+        for (const auto &kv : image_frame_window_.all_image_frame_ptr_)
+        {
+            const auto &frame_ptr = kv.second;
+            if (!frame_ptr || !frame_ptr->is_key_frame_)
+                continue;
+
+            gloc::Snapshot::KeyframeEntry e;
+            e.t_kf = frame_ptr->t_ + frame_ptr->td_;
+            // Eigen::Map<Eigen::Quaterniond> R_ and Map<Vector3d> T_ implicitly
+            // convert to fresh Quaterniond / Vector3d on copy — a couple of
+            // doubles each, no aliasing back into para_Pose_ memory.
+            e.R_local = frame_ptr->R_;
+            e.P_local = frame_ptr->T_;
+            e.cam_unique_id = static_cast<unsigned int>(frame_ptr->cam_module_unique_id_);
+            snap.keyframes.push_back(e);
+        }
+
+        gloc_ptr_->onSnapshotChanged(snap);
+
+        ROS_DEBUG("[Estimator] handed snapshot id=%lu, %zu keyframes to gloc",
+                  (unsigned long)snap.snapshot_id, snap.keyframes.size());
     }
 }
 

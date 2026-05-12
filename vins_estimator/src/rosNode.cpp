@@ -72,15 +72,68 @@ cv_bridge::CvImagePtr getDepthFromMsg(const sensor_msgs::ImageConstPtr &depth_ms
 
 void VinsNodeBaseClass::set_modules()
 {
+    // ── VINS-side callbacks ──────────────────────────────────────────────────
+    //
+    // One entry per CAM_MODULES module. The constructor receives &gloc_ so
+    // dual-use cameras (use_for_vins:1 + use_for_gloc:1) can push the cam0
+    // image into the gloc ring buffer alongside the estimator dispatch. The
+    // gloc-side index is resolved below.
     for (auto cam_module : CAM_MODULES)
     {
-        camera_modules_.emplace_back(camera_module_info_with_sub(cam_module, &estimator_));
+        camera_modules_.emplace_back(camera_module_info_with_sub(cam_module, &estimator_, &gloc_));
     }
 
     for (unsigned int i = 0; i < camera_modules_.size(); i++)
     {
         camera_modules_[i].unique_id_ = i;
+
+        // Resolve the gloc-side unique_id (index into GLOC_CAM_MODULES) by
+        // matching module_id_. -1 means this camera is not in the gloc list.
+        camera_modules_[i].gloc_unique_id_ = -1;
+        if (camera_modules_[i].module_info_.use_for_gloc_)
+        {
+            for (std::size_t g = 0; g < GLOC_CAM_MODULES.size(); ++g)
+            {
+                if (GLOC_CAM_MODULES[g].module_id_ ==
+                    camera_modules_[i].module_info_.module_id_)
+                {
+                    camera_modules_[i].gloc_unique_id_ = static_cast<int>(g);
+                    break;
+                }
+            }
+            if (camera_modules_[i].gloc_unique_id_ < 0)
+                ROS_ERROR("VINS module cam_id=%d is flagged use_for_gloc but not present in GLOC_CAM_MODULES — bug in parameters.cpp routing.",
+                          camera_modules_[i].module_info_.module_id_);
+        }
     }
+
+    // ── Gloc-only callbacks ──────────────────────────────────────────────────
+    //
+    // For each entry in GLOC_CAM_MODULES that is NOT also in CAM_MODULES,
+    // build a standalone subscriber that routes only to the gloc ring buffer.
+    // Dual-use cameras are handled above and skipped here to avoid a duplicate
+    // subscription on the same topic.
+    for (std::size_t g = 0; g < GLOC_CAM_MODULES.size(); ++g)
+    {
+        bool also_in_vins = false;
+        for (const auto &vm : CAM_MODULES)
+        {
+            if (vm.module_id_ == GLOC_CAM_MODULES[g].module_id_)
+            {
+                also_in_vins = true;
+                break;
+            }
+        }
+        if (also_in_vins)
+            continue;
+
+        gloc_only_camera_modules_.emplace_back(
+            gloc_only_camera_module_info_with_sub(GLOC_CAM_MODULES[g], &gloc_));
+        gloc_only_camera_modules_.back().gloc_unique_id_ = static_cast<unsigned int>(g);
+    }
+
+    ROS_WARN("VINS-side callbacks: %zu, gloc-only callbacks: %zu",
+             camera_modules_.size(), gloc_only_camera_modules_.size());
 
     imu_modules_.emplace_back(imu_info_with_sub(IMU_MODULE, &estimator_));
 }
@@ -107,6 +160,19 @@ void VinsNodeBaseClass::registerSub(ros::NodeHandle &n)
         {
             camera_modules_[i].img_sub_.img0_sub_ = n.subscribe(CAM_MODULES[i].img_topic_[0], 1000, &VinsNodeBaseClass::camera_module_info_with_sub::img_callback, &(this->camera_modules_[i]), ros::TransportHints().tcpNoDelay(true));
         }
+    }
+
+    // Gloc-only subscribers: subscribe cam0 only, dispatch to gloc ring buffer.
+    // Dual-use cameras (in both lists) are NOT here — their callback above
+    // already pushes into gloc via gloc_unique_id_.
+    for (unsigned int i = 0; i < gloc_only_camera_modules_.size(); i++)
+    {
+        gloc_only_camera_modules_[i].img0_sub_ = n.subscribe(
+            gloc_only_camera_modules_[i].module_info_.img_topic_[0],
+            1000,
+            &VinsNodeBaseClass::gloc_only_camera_module_info_with_sub::img_callback,
+            &(this->gloc_only_camera_modules_[i]),
+            ros::TransportHints().tcpNoDelay(true));
     }
 
     sub_restart_ = n.subscribe("/vins_restart", 100, &VinsNodeBaseClass::restart_callback, (VinsNodeBaseClass *)this, ros::TransportHints().tcpNoDelay(true));
@@ -215,6 +281,17 @@ void VinsNodeBaseClass::camera_module_info_with_sub::imgs_callback(const sensor_
 
     else if (module_info_.stereo_)
         estimator_ptr_->inputImageToBuffer(unique_id_, img0_msg->header.stamp.toSec(), img_0->image, img_1->image);
+
+    // Dual-use: this camera is also flagged use_for_gloc. Push the cam0
+    // (left) image into the gloc ring buffer alongside the VINS dispatch.
+    // gloc_unique_id_ < 0 means this camera is VINS-only, in which case
+    // we skip. pushCameraImage is a no-op while gloc is disabled or not
+    // yet initialised.
+    if (gloc_unique_id_ >= 0)
+        gloc_ptr_->pushCameraImage(
+            static_cast<unsigned int>(gloc_unique_id_),
+            img0_msg->header.stamp.toSec(),
+            img_0->image);
 }
 
 void VinsNodeBaseClass::camera_module_info_with_sub::img_callback(const sensor_msgs::ImageConstPtr &img0_msg)
@@ -264,10 +341,73 @@ void VinsNodeBaseClass::camera_module_info_with_sub::img_callback(const sensor_m
     for (int i = 0; i < module_info_.num_downsamples_; i++)
         cv::pyrDown(img_0->image, img_0->image);
     estimator_ptr_->inputImageToBuffer(unique_id_, img0_msg->header.stamp.toSec(), img_0->image);
+
+    // Dual-use: see comment in imgs_callback.
+    if (gloc_unique_id_ >= 0)
+        gloc_ptr_->pushCameraImage(
+            static_cast<unsigned int>(gloc_unique_id_),
+            img0_msg->header.stamp.toSec(),
+            img_0->image);
 }
 
 void VinsNodeBaseClass::camera_module_info_with_sub::comp_imgs_callback(const sensor_msgs::CompressedImageConstPtr &img1_msg, const sensor_msgs::CompressedImageConstPtr &img2_msg)
 {
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// gloc_only_camera_module_info_with_sub::img_callback
+//
+// Receives cam0 frames from a camera flagged use_for_gloc:1 && !use_for_vins:1.
+// Performs the same rate-gate, grayscale conversion, and pyramid downsampling
+// as the VINS path, then pushes the prepared image into the gloc ring buffer.
+// No estimator involvement.
+// ─────────────────────────────────────────────────────────────────────────────
+void VinsNodeBaseClass::gloc_only_camera_module_info_with_sub::img_callback(const sensor_msgs::ImageConstPtr &img0_msg)
+{
+    const double t = img0_msg->header.stamp.toSec();
+    if (last_img_t_ > 0 && t - last_img_t_ < 1.0 / IMG_FREQ)
+        return;
+    last_img_t_ = t;
+
+    cv_bridge::CvImagePtr img_0 = getImageFromMsg(img0_msg);
+
+    if (img0_msg->encoding == sensor_msgs::image_encodings::RGB8)
+    {
+        if (USE_GPU)
+        {
+#ifdef WITH_CUDA
+            cv::cuda::GpuMat img0_gpu, img0_gray_gpu;
+            img0_gpu.upload(img_0->image);
+            cv::cuda::cvtColor(img0_gpu, img0_gray_gpu, cv::COLOR_RGB2GRAY);
+            img0_gray_gpu.download(img_0->image);
+#endif
+        }
+        else
+        {
+            cv::cvtColor(img_0->image, img_0->image, cv::COLOR_RGB2GRAY);
+        }
+    }
+    else if (img0_msg->encoding == sensor_msgs::image_encodings::BGR8)
+    {
+        if (USE_GPU)
+        {
+#ifdef WITH_CUDA
+            cv::cuda::GpuMat img0_gpu, img0_gray_gpu;
+            img0_gpu.upload(img_0->image);
+            cv::cuda::cvtColor(img0_gpu, img0_gray_gpu, cv::COLOR_BGR2GRAY);
+            img0_gray_gpu.download(img_0->image);
+#endif
+        }
+        else
+        {
+            cv::cvtColor(img_0->image, img_0->image, cv::COLOR_BGR2GRAY);
+        }
+    }
+
+    for (int i = 0; i < module_info_.num_downsamples_; i++)
+        cv::pyrDown(img_0->image, img_0->image);
+
+    gloc_ptr_->pushCameraImage(gloc_unique_id_, t, img_0->image);
 }
 
 void VinsNodeBaseClass::imu_info_with_sub::imu_callback(const sensor_msgs::ImuConstPtr &imu_msg)
@@ -315,6 +455,13 @@ void VinsNodeBaseClass::Init(ros::NodeHandle &n, const std::string &config_file)
         ros::shutdown();
         exit(EXIT_FAILURE);
     }
+
+    // Wire the estimator's outbound snapshot pointer. Only set when gloc was
+    // successfully initialised — leaving gloc_ptr_ null in the Estimator
+    // when gloc is disabled keeps the snapshot-handoff branch in
+    // processWindow as a single null-check away from being free.
+    if (gloc::GLOC_ENABLED)
+        estimator_.setGloc(&gloc_);
 
     estimator_.start_process_thread();
 

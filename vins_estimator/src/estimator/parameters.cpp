@@ -19,6 +19,7 @@ double INIT_DEPTH;
 double MIN_PARALLAX;
 
 std::vector<camera_module_info> CAM_MODULES;
+std::vector<camera_module_info> GLOC_CAM_MODULES;
 imu_info IMU_MODULE;
 Eigen::Vector3d G(0.0, 0.0, 9.8);
 map<int, Eigen::Vector3d> pts_gt;
@@ -169,111 +170,195 @@ void readParameters(std::string config_file)
     }
 
     cv::FileNode cam_module_node = fsSettings["cam_module"];
-    int num_cam_module = cam_module_node["num"];
-    printf("camera module number %d\n", num_cam_module);
-    CAM_MODULES.resize(num_cam_module);
-
     cv::FileNode cam_modules_node = cam_module_node["modules"];
-    int cur_cam_module = 0;
-    for (cv::FileNodeIterator it = cam_modules_node.begin(); it != cam_modules_node.end(); it++, cur_cam_module++)
-    {
 
-        if (cur_cam_module >= num_cam_module)
-            break;
+    // The "num" field is intentionally ignored. The number of modules per list
+    // is determined by the use_for_vins / use_for_gloc flags on each entry.
 
-        CAM_MODULES[cur_cam_module].module_id_ = (*it)["cam_id"];
-        int use_depth = (*it)["depth"];
-        CAM_MODULES[cur_cam_module].depth_ = use_depth;
-        int use_stereo = (*it)["stereo"];
-        CAM_MODULES[cur_cam_module].stereo_ = use_stereo;
+    // Parse one <modules> entry into a fully-populated camera_module_info.
+    // Each call allocates its own para_Ex_Pose_ block via set_size(), so the
+    // same physical camera can appear in both CAM_MODULES and GLOC_CAM_MODULES
+    // without sharing memory between them.
+    auto parse_one = [&](const cv::FileNode &it,
+                         bool for_vins,
+                         bool for_gloc) -> camera_module_info {
+        camera_module_info m;
 
-        CAM_MODULES[cur_cam_module].set_size();
+        m.module_id_ = it["cam_id"];
+        m.use_for_vins_ = for_vins;
+        m.use_for_gloc_ = for_gloc;
 
-        CAM_MODULES[cur_cam_module].img_width_ = (*it)["image_width"];
-        CAM_MODULES[cur_cam_module].img_height_ = (*it)["image_height"];
-        CAM_MODULES[cur_cam_module].num_downsamples_ = std::max(0, (int)(*it)["num_downsamples"]);
+        int use_depth = it["depth"];
+        int use_stereo = it["stereo"];
 
-        CAM_MODULES[cur_cam_module].td_ = (*it)["td"];
+        // Gloc only uses cam0 (left). For a gloc-only entry we still honour the
+        // YAML's stereo/depth flags so the same struct is meaningful, but Gloc
+        // itself only reads cam0 fields. For a VINS entry the flags drive
+        // tracker/factor selection as before.
+        m.depth_ = use_depth;
+        m.stereo_ = use_stereo;
 
-        if (ESTIMATE_TD)
+        m.set_size();
+
+        m.img_width_ = (int)it["image_width"];
+        m.img_height_ = (int)it["image_height"];
+        m.num_downsamples_ = std::max(0, (int)it["num_downsamples"]);
+        m.td_ = (double)it["td"];
+
+        // Per-module gloc temporal-match tolerance. Only meaningful when
+        // for_gloc is true; harmless to read for VINS-only entries (the
+        // VINS-side copy of this struct just keeps the field around).
+        // Missing field → keep the struct's default (0.033 s).
+        if (!it["image_match_tol_s"].isNone())
+            it["image_match_tol_s"] >> m.image_match_tol_s_;
+
+        // Per-module gloc ring-buffer capacity. Same caveat as above —
+        // only meaningful when for_gloc is true. Missing → struct default.
+        // Clamp pathological values: a zero-capacity buffer would silently
+        // break gloc image lookups, an obvious warning is better.
+        if (!it["image_ring_buffer_capacity"].isNone())
         {
-            ROS_INFO_STREAM("Unsynchronized sensors, online estimate time offset, initial td: " << CAM_MODULES[cur_cam_module].td_);
-        }
-        else
-        {
-            ROS_INFO_STREAM("Synchronized sensors, fix time offset: " << CAM_MODULES[cur_cam_module].td_);
+            it["image_ring_buffer_capacity"] >> m.image_ring_buffer_capacity_;
+            if (m.image_ring_buffer_capacity_ < 1)
+            {
+                ROS_WARN("cam_id=%d: image_ring_buffer_capacity=%d invalid; "
+                         "falling back to 10",
+                         m.module_id_, m.image_ring_buffer_capacity_);
+                m.image_ring_buffer_capacity_ = 10;
+            }
         }
 
-        int rolling_shutter = (*it)["rolling_shutter"];
-
+        int rolling_shutter = it["rolling_shutter"];
         if (rolling_shutter)
-        {
-            CAM_MODULES[cur_cam_module].tr_ = (*it)["rolling_shutter_tr"];
-            ROS_INFO_STREAM("Rolling shutter camera, read out time per line: " << CAM_MODULES[cur_cam_module].tr_);
-        }
+            m.tr_ = (double)it["rolling_shutter_tr"];
         else
-        {
-            CAM_MODULES[cur_cam_module].tr_ = 0.0;
-            ROS_INFO("Global shutter camera.");
-        }
+            m.tr_ = 0.0;
 
-        (*it)["image0_topic"] >> CAM_MODULES[cur_cam_module].img_topic_[0];
-        (*it)["cam0_calib"] >> CAM_MODULES[cur_cam_module].calib_file_[0];
-        CAM_MODULES[cur_cam_module].calib_file_[0] = configPath + "/" + CAM_MODULES[cur_cam_module].calib_file_[0];
+        it["image0_topic"] >> m.img_topic_[0];
+        it["cam0_calib"] >> m.calib_file_[0];
+        m.calib_file_[0] = configPath + "/" + m.calib_file_[0];
 
         cv::Mat cv_T;
-        (*it)["imu_T_cam0"] >> cv_T; // pt_in_imu = [R, t] * pt_in_cam0
+        it["imu_T_cam0"] >> cv_T; // pt_in_imu = [R, t] * pt_in_cam0
         Eigen::Matrix4d T;
         cv::cv2eigen(cv_T, T);
-        CAM_MODULES[cur_cam_module].ric_[0] = T.block<3, 3>(0, 0);
-        CAM_MODULES[cur_cam_module].tic_[0] = T.block<3, 1>(0, 3);
+        m.ric_[0] = T.block<3, 3>(0, 0);
+        m.tic_[0] = T.block<3, 1>(0, 3);
 
+        // cam1 is loaded for stereo/depth — VINS uses it; Gloc ignores it.
         if (use_depth || use_stereo)
         {
-            (*it)["image1_topic"] >> CAM_MODULES[cur_cam_module].img_topic_[1];
+            it["image1_topic"] >> m.img_topic_[1];
             if (use_stereo)
             {
-                (*it)["cam1_calib"] >> CAM_MODULES[cur_cam_module].calib_file_[1];
-                CAM_MODULES[cur_cam_module].calib_file_[1] = configPath + "/" + CAM_MODULES[cur_cam_module].calib_file_[1];
+                it["cam1_calib"] >> m.calib_file_[1];
+                m.calib_file_[1] = configPath + "/" + m.calib_file_[1];
 
                 cv::Mat cv_T1;
-                (*it)["imu_T_cam1"] >> cv_T1;
+                it["imu_T_cam1"] >> cv_T1;
                 Eigen::Matrix4d T1;
                 cv::cv2eigen(cv_T1, T1);
-                CAM_MODULES[cur_cam_module].ric_[1] = T1.block<3, 3>(0, 0);
-                CAM_MODULES[cur_cam_module].tic_[1] = T1.block<3, 1>(0, 3);
+                m.ric_[1] = T1.block<3, 3>(0, 0);
+                m.tic_[1] = T1.block<3, 1>(0, 3);
             }
         }
-    }
+        return m;
+    };
 
-    ROS_WARN("%d camera modules:", CAM_MODULES.size());
-    for (int i = 0; i < CAM_MODULES.size(); i++)
+    CAM_MODULES.clear();
+    GLOC_CAM_MODULES.clear();
+
+    for (cv::FileNodeIterator it = cam_modules_node.begin();
+         it != cam_modules_node.end(); ++it)
     {
-        cout << "---------------------------" << endl;
-        cout << "Cam id: " << CAM_MODULES[i].module_id_ << endl;
-        cout << "depth: " << CAM_MODULES[i].depth_ << endl;
-        cout << "stereo: " << CAM_MODULES[i].stereo_ << endl;
-        cout << "img_dim: " << CAM_MODULES[i].img_width_ << "\t" << CAM_MODULES[i].img_height_ << endl;
-        cout << "num_downsamples: " << CAM_MODULES[i].num_downsamples_ << endl;
-        cout << "img_topic_0: " << CAM_MODULES[i].img_topic_[0] << endl;
-        cout << "calib_file_0: " << CAM_MODULES[i].calib_file_[0] << endl;
+        // Flags default to 0 if missing in the YAML. An entry with both flags
+        // off is skipped entirely — useful for leaving a placeholder for an
+        // unused calibration block in the file.
+        int for_vins_i = 0;
+        int for_gloc_i = 0;
+        if (!(*it)["use_for_vins"].isNone())
+            (*it)["use_for_vins"] >> for_vins_i;
+        if (!(*it)["use_for_gloc"].isNone())
+            (*it)["use_for_gloc"] >> for_gloc_i;
 
-        cout << "ric0:\n"
-             << CAM_MODULES[i].ric_[0].toRotationMatrix() << endl;
-        cout << "tic0: " << CAM_MODULES[i].tic_[0].transpose() << endl;
+        const bool for_vins = (for_vins_i != 0);
+        const bool for_gloc = (for_gloc_i != 0);
 
-        if (CAM_MODULES[i].depth_ || CAM_MODULES[i].stereo_)
+        if (!for_vins && !for_gloc)
+            continue;
+
+        // Estimate time-offset log is VINS-specific.
+        if (for_vins)
         {
-            cout << "img_topic_1: " << CAM_MODULES[i].img_topic_[1] << endl;
-            if (CAM_MODULES[i].stereo_)
+            double td_dbg = (double)(*it)["td"];
+            if (ESTIMATE_TD)
+                ROS_INFO_STREAM("Unsynchronized sensors, online estimate time offset, initial td: " << td_dbg);
+            else
+                ROS_INFO_STREAM("Synchronized sensors, fix time offset: " << td_dbg);
+        }
+
+        if ((int)(*it)["rolling_shutter"])
+            ROS_INFO_STREAM("Rolling shutter camera, read out time per line: "
+                            << (double)(*it)["rolling_shutter_tr"]);
+        else
+            ROS_INFO("Global shutter camera.");
+
+        if (for_vins)
+            CAM_MODULES.push_back(parse_one(*it, /*for_vins=*/true, /*for_gloc=*/false));
+        if (for_gloc)
+            GLOC_CAM_MODULES.push_back(parse_one(*it, /*for_vins=*/false, /*for_gloc=*/true));
+    }
+
+    ROS_WARN("VINS camera modules: %zu", CAM_MODULES.size());
+    ROS_WARN("Gloc camera modules: %zu", GLOC_CAM_MODULES.size());
+
+    if (CAM_MODULES.empty())
+    {
+        ROS_ERROR("No camera module has use_for_vins:1 — VINS has nothing to track.");
+    }
+
+    auto print_modules = [](const char *label,
+                            const std::vector<camera_module_info> &modules) {
+        ROS_WARN("%s (%zu):", label, modules.size());
+        for (size_t i = 0; i < modules.size(); ++i)
+        {
+            const auto &m = modules[i];
+            cout << "---------------------------" << endl;
+            cout << "[" << label << " idx " << i << "]" << endl;
+            cout << "Cam id: " << m.module_id_ << endl;
+            cout << "use_for_vins: " << m.use_for_vins_
+                 << "  use_for_gloc: " << m.use_for_gloc_ << endl;
+            cout << "depth: " << m.depth_ << endl;
+            cout << "stereo: " << m.stereo_ << endl;
+            cout << "img_dim: " << m.img_width_ << "\t" << m.img_height_ << endl;
+            cout << "num_downsamples: " << m.num_downsamples_ << endl;
+            cout << "img_topic_0: " << m.img_topic_[0] << endl;
+            cout << "calib_file_0: " << m.calib_file_[0] << endl;
+            cout << "ric0:\n"
+                 << m.ric_[0].toRotationMatrix() << endl;
+            cout << "tic0: " << m.tic_[0].transpose() << endl;
+            if (m.use_for_gloc_)
             {
-                cout << "calib_file_1: " << CAM_MODULES[i].calib_file_[1] << endl;
-                cout << "ric1:\n"
-                     << CAM_MODULES[i].ric_[1].toRotationMatrix() << endl;
-                cout << "tic1: " << CAM_MODULES[i].tic_[1].transpose() << endl;
+                cout << "image_match_tol_s:         " << m.image_match_tol_s_ << endl;
+                cout << "image_ring_buffer_capacity: " << m.image_ring_buffer_capacity_ << endl;
+            }
+
+            if (m.depth_ || m.stereo_)
+            {
+                cout << "img_topic_1: " << m.img_topic_[1] << endl;
+                if (m.stereo_)
+                {
+                    cout << "calib_file_1: " << m.calib_file_[1] << endl;
+                    cout << "ric1:\n"
+                         << m.ric_[1].toRotationMatrix() << endl;
+                    cout << "tic1: " << m.tic_[1].transpose() << endl;
+                }
             }
         }
-    }
+    };
+
+    print_modules("VINS", CAM_MODULES);
+    print_modules("Gloc", GLOC_CAM_MODULES);
 
     // DEPTH = fsSettings["depth"];
     // printf("USE_DEPTH: %d\n", DEPTH);
@@ -348,9 +433,19 @@ void readParameters(std::string config_file)
     printf("MIN_TRACK_FRAME_FOR_OPT: %d\n", MIN_TRACK_FRAME_FOR_OPT);
 
     MAX_CNT = fsSettings["max_cnt"];
-    int max_feature_per_module = max(static_cast<int>(ceil(MAX_CNT / static_cast<double>(CAM_MODULES.size()))), MIN_TRACK_NUM_PER_MODULE);
-    MAX_CNT = max_feature_per_module * CAM_MODULES.size();
-    MAX_TRACK_NUM_PER_MODULE = MAX_CNT - (CAM_MODULES.size() - 1) * MIN_TRACK_NUM_PER_MODULE;
+    if (CAM_MODULES.empty())
+    {
+        // No VINS modules — leave MAX_CNT untouched and skip the per-module
+        // normalisation. The estimator won't run without VINS modules anyway;
+        // this just avoids a div-by-zero at startup.
+        MAX_TRACK_NUM_PER_MODULE = MAX_CNT;
+    }
+    else
+    {
+        int max_feature_per_module = max(static_cast<int>(ceil(MAX_CNT / static_cast<double>(CAM_MODULES.size()))), MIN_TRACK_NUM_PER_MODULE);
+        MAX_CNT = max_feature_per_module * CAM_MODULES.size();
+        MAX_TRACK_NUM_PER_MODULE = MAX_CNT - (CAM_MODULES.size() - 1) * MIN_TRACK_NUM_PER_MODULE;
+    }
     printf("MAX_CNT: %d\n", MAX_CNT);
 
     MIN_DIST = fsSettings["min_dist"];

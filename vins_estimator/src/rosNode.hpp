@@ -57,7 +57,10 @@ class VinsNodeBaseClass
     class camera_module_info_with_sub
     {
       public:
-        camera_module_info_with_sub(camera_module_info cam_module, Estimator *est_ptr) : module_info_(cam_module), estimator_ptr_(est_ptr)
+        camera_module_info_with_sub(camera_module_info cam_module,
+                                    Estimator *est_ptr,
+                                    gloc::Gloc *gloc_ptr)
+            : module_info_(cam_module), estimator_ptr_(est_ptr), gloc_ptr_(gloc_ptr)
         {
         }
 
@@ -65,17 +68,64 @@ class VinsNodeBaseClass
 
         camera_module_info module_info_;
 
+        // VINS-side unique_id: the index into CAM_MODULES.
         unsigned int unique_id_;
+
+        // Gloc-side unique_id: the index into GLOC_CAM_MODULES, OR -1 if this
+        // physical camera is not also flagged use_for_gloc. Resolved once at
+        // setup by matching module_id_ against GLOC_CAM_MODULES. Used by the
+        // callback to push the cam0 image into the gloc ring buffer when this
+        // camera is dual-use (use_for_vins:1 + use_for_gloc:1).
+        int gloc_unique_id_ = -1;
 
         double last_img_t_ = -1.0;
 
         Estimator *estimator_ptr_;
+        gloc::Gloc *gloc_ptr_;
 
         void imgs_callback(const sensor_msgs::ImageConstPtr &img0_msg, const sensor_msgs::ImageConstPtr &img1_msg);
 
         void img_callback(const sensor_msgs::ImageConstPtr &img0_msg);
 
         void comp_imgs_callback(const sensor_msgs::CompressedImageConstPtr &img1_msg, const sensor_msgs::CompressedImageConstPtr &img2_msg);
+    };
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // gloc_only_camera_module_info_with_sub
+    //
+    // Subscribes for a camera flagged use_for_gloc:1 but NOT use_for_vins:1.
+    // Its callbacks decode the incoming image identically to the VINS path
+    // (grayscale conversion, downsampling) but route only into the gloc ring
+    // buffer — no estimator dispatch.
+    //
+    // For stereo entries, only cam0 (left) is consumed; cam1 is not even
+    // subscribed (gloc uses the left image).
+    // ─────────────────────────────────────────────────────────────────────────
+    class gloc_only_camera_module_info_with_sub
+    {
+      public:
+        gloc_only_camera_module_info_with_sub(camera_module_info cam_module,
+                                              gloc::Gloc *gloc_ptr)
+            : module_info_(cam_module), gloc_ptr_(gloc_ptr)
+        {
+        }
+
+        // Only cam0 is subscribed — gloc consumes the left image only, so
+        // there is no stereo synchronizer here.
+        ros::Subscriber img0_sub_;
+
+        camera_module_info module_info_;
+
+        // Gloc-side unique_id: the index into GLOC_CAM_MODULES.
+        unsigned int gloc_unique_id_;
+
+        double last_img_t_ = -1.0;
+
+        gloc::Gloc *gloc_ptr_;
+
+        // Same rate-gating, color-conversion, and downsampling as the VINS
+        // callback; result is pushed to gloc only.
+        void img_callback(const sensor_msgs::ImageConstPtr &img0_msg);
     };
 
     class imu_info_with_sub
@@ -96,6 +146,11 @@ class VinsNodeBaseClass
 
   private:
     vector<camera_module_info_with_sub> camera_modules_;
+    // Subscribers for cameras flagged use_for_gloc:1 && !use_for_vins:1.
+    // Cameras in BOTH lists are handled by camera_modules_ above (which also
+    // pushes into gloc when gloc_unique_id_ >= 0), so this vector contains
+    // only the "gloc-only" subset.
+    vector<gloc_only_camera_module_info_with_sub> gloc_only_camera_modules_;
     vector<imu_info_with_sub> imu_modules_;
 
     Estimator estimator_;

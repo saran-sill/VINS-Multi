@@ -59,6 +59,38 @@ struct camera_module_info
     int module_id_;
     bool depth_;
     bool stereo_;
+    // Whether this module participates in VINS feature tracking and back-end
+    // optimization. Only modules with use_for_vins_==true are placed in
+    // CAM_MODULES; the VINS estimator iterates CAM_MODULES directly.
+    bool use_for_vins_ = false;
+    // Whether this module's left (cam0) image is used as a query source for
+    // global localization (DBoW3). Only modules with use_for_gloc_==true are
+    // placed in GLOC_CAM_MODULES; Gloc iterates GLOC_CAM_MODULES directly.
+    // A camera may be in both lists with independent unique_ids per list.
+    bool use_for_gloc_ = false;
+    // Per-gloc-module temporal-match tolerance (seconds). When gloc resolves
+    // a keyframe at time t_kf against this module's ring buffer, it accepts
+    // any image whose timestamp is within ±image_match_tol_s_ of t_kf.
+    // Used only when use_for_gloc_ is true.
+    //
+    // Default 0.05 s — slightly more than half a 15 Hz frame interval
+    // (66.7 ms / 2 = 33.3 ms), with a small margin to avoid borderline
+    // floating-point misses on a perfectly mid-frame query. Tight enough
+    // that the body-motion error during the gap is well below DBoW3+ORB
+    // noise. Override per-camera in YAML for modules with very different
+    // frame rates (e.g. a 5 Hz secondary camera may want 0.1 s).
+    double image_match_tol_s_ = 0.05;
+    // Per-gloc-module image ring-buffer capacity (slots). Gloc allocates
+    // exactly this many slots for the module's image ring; the oldest is
+    // evicted when full. Used only when use_for_gloc_ is true.
+    //
+    // Default 10 — eager resolution drains buffers as soon as a keyframe
+    // resolves, so most of the time only a couple of slots are occupied.
+    // Increase if your gloc camera arrives noticeably later than VINS
+    // keyframes; each extra slot covers one more frame-interval of skew.
+    // For a slow camera (e.g. 5 Hz), 5 is usually enough — at 5 Hz a 10-slot
+    // buffer spans 2 s, which is more than the VINS window depth.
+    int image_ring_buffer_capacity_ = 10;
     int img_width_;
     int img_height_;
     double td_;
@@ -167,6 +199,11 @@ extern double INIT_DEPTH;
 extern double MIN_PARALLAX;
 
 extern std::vector<camera_module_info> CAM_MODULES;
+// Camera modules used for global localization queries (DBoW3). A camera may
+// appear in both CAM_MODULES and GLOC_CAM_MODULES with independent unique_ids.
+// Indices into GLOC_CAM_MODULES are the gloc-side unique_id used by Gloc's
+// per-module image ring buffer.
+extern std::vector<camera_module_info> GLOC_CAM_MODULES;
 extern imu_info IMU_MODULE;
 extern Eigen::Vector3d G;
 extern map<int, Eigen::Vector3d> pts_gt;

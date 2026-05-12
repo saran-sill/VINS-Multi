@@ -1,11 +1,16 @@
 #pragma once
 
+#include <atomic>
 #include <ceres/ceres.h>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
+#include <deque>
 #include <eigen3/Eigen/Dense>
 #include <eigen3/Eigen/Geometry>
+#include <memory>
 #include <mutex>
+#include <opencv2/opencv.hpp>
 #include <queue>
 #include <thread>
 #include <unordered_map>
@@ -18,11 +23,97 @@
 // Forward-declare Estimator so gloc.h does not pull in all estimator headers.
 namespace vins_multi
 {
-    class Estimator;
+class Estimator;
 };
 
 namespace gloc
 {
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CameraRingBuffer
+//
+// Per-module fixed-capacity ring of (timestamp, image) pairs.
+//
+// Producer:  rosNode callback for that module (single producer per buffer).
+// Consumer:  Gloc process thread (single consumer per buffer).
+//
+// The capacity should be large enough to cover the deepest VINS keyframe
+// window plus typical gloc processing latency. For a 21-keyframe window at
+// 15 Hz (~50 ms inter-keyframe minimum), 30 slots = 2 s of history is ample.
+//
+// All entries are kept in ascending timestamp order: push appends at the
+// back, eviction removes from the front. ROS image callbacks deliver frames
+// in arrival order, which is normally monotonic in timestamp, so the
+// invariant is preserved by construction. The push method asserts ordering
+// and drops out-of-order frames (rare; only happens with severely delayed
+// or replayed bags).
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum class LookupVerdict
+{
+    // A frame within tolerance of t_kf was found.
+    Found,
+
+    // No frame within tolerance, but the buffer's newest frame is older than
+    // t_kf + tol — relevant frames may still arrive. The caller should retry
+    // on the next round.
+    NotYet,
+
+    // No frame within tolerance, and the buffer has moved past t_kf + tol.
+    // No future arrival can satisfy this keyframe. Caller should commit.
+    NoneInTolerance,
+
+    // Buffer is empty.
+    Empty,
+};
+
+struct LookupResult
+{
+    LookupVerdict verdict{LookupVerdict::Empty};
+    double t_image{0.0}; // timestamp of the returned image, valid iff Found
+    cv::Mat image;       // valid iff Found
+};
+
+class CameraRingBuffer
+{
+  public:
+    explicit CameraRingBuffer(std::size_t capacity = 10) : capacity_{capacity}
+    {
+    }
+
+    // Append an image with timestamp t. Drops out-of-order frames silently.
+    // Evicts the oldest frame when capacity is exceeded.
+    void push(double t, const cv::Mat &image);
+
+    // Find the frame with timestamp nearest to t_kf within ±tol. See
+    // LookupResult / LookupVerdict for the contract.
+    LookupResult findNearest(double t_kf, double tol) const;
+
+    // Drop all slots whose timestamp is strictly less than t. The slot at
+    // exactly t (if any) is kept. Called by Gloc immediately after a
+    // successful findNearest as a "drop older-than-matched" optimisation:
+    // future state-3 keyframes will have t_kf greater than the just-resolved
+    // one, so anything earlier than the matched slot is dead weight.
+    //
+    // Concurrent push() at the back is safe — push only appends, this only
+    // removes from the front; the back-push is unaffected.
+    void trimOlderThan(double t);
+
+    // Diagnostic helpers.
+    std::size_t size() const;
+    bool empty() const;
+
+  private:
+    struct Slot
+    {
+        double t;
+        cv::Mat image; // cv::Mat is refcounted; storing by value is cheap
+    };
+
+    mutable std::mutex mtx_;
+    std::deque<Slot> slots_;
+    std::size_t capacity_;
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Map
@@ -52,6 +143,90 @@ struct Map
     std::vector<dbow3::ImageFeatures> feats;
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Snapshot
+//
+// What the estimator hands to gloc when the keyframe window changes.
+//
+// Plain-data: copies of the keyframe times + local poses, ordered by time.
+// No pointers into estimator internals — gloc owns this copy.
+//
+// The snapshot is the WHOLE current window, not just newly-added keyframes.
+// Gloc figures out which keyframes are new by comparing against its own
+// state_map_; carried-over keyframes get their local pose refreshed.
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct Snapshot
+{
+    struct KeyframeEntry
+    {
+        // Identity & lookup key for gloc. Real-time timestamp, post time-offset.
+        double t_kf{0.0};
+
+        // Local-frame body pose at t_kf: T_local_body(t_kf).
+        // Gloc holds this as the soft-constraint anchor for the corresponding
+        // optimization variable T_map_body(t_kf).
+        Eigen::Quaterniond R_local{Eigen::Quaterniond::Identity()};
+        Eigen::Vector3d P_local{Eigen::Vector3d::Zero()};
+
+        // VINS camera module that captured this keyframe (index into
+        // CAM_MODULES). Informational only — gloc queries every gloc module's
+        // ring buffer regardless of which VINS camera captured the keyframe.
+        unsigned int cam_unique_id{0};
+    };
+
+    std::vector<KeyframeEntry> keyframes; // ascending by t_kf
+    uint64_t snapshot_id{0};              // monotonic, for logging
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PerModuleResolution
+//
+// One slot per (keyframe, gloc-module) pair. Each slot is independently
+// in state-1 (Found, image cached), state-2 (NoneInTolerance, definitive no),
+// or state-3 (Empty / NotYet, will retry next snapshot).
+//
+// Heavier per-slot artefacts (ORB features, DBoW3 match, 2D-2D
+// correspondences) will be cached here too once that pipeline is wired up.
+// Initially we only store the image.
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct PerModuleResolution
+{
+    LookupVerdict verdict{LookupVerdict::Empty};
+
+    // Valid when verdict == Found.
+    double t_image{0.0};
+    cv::Mat image;
+
+    // TODO (next stage): cached ORB features, DBoW3 match, correspondences.
+
+    bool isTerminal() const
+    {
+        return verdict == LookupVerdict::Found ||
+               verdict == LookupVerdict::NoneInTolerance;
+    }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// KeyframeGlocState
+//
+// Per-keyframe state carried across snapshots. Lives in Gloc::state_map_
+// keyed by t_kf. The local pose is refreshed every snapshot; the per-module
+// resolutions are filled in once per slot and never recomputed.
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct KeyframeGlocState
+{
+    double t_kf{0.0}; // == map key
+    Eigen::Quaterniond R_local{Eigen::Quaterniond::Identity()};
+    Eigen::Vector3d P_local{Eigen::Vector3d::Zero()};
+    unsigned int cam_unique_id{0};
+
+    // One slot per gloc module, sized to GLOC_CAM_MODULES.size() at insertion.
+    std::vector<PerModuleResolution> per_gloc;
+};
+
 class Gloc
 {
   public:
@@ -74,6 +249,10 @@ class Gloc
     // Reads all COLMAP data and loads the DBoW3 database using the paths
     // from the gloc:: parameters (set by readParameters()).
     //
+    // Allocates one CameraRingBuffer per entry in GLOC_CAM_MODULES, so the
+    // gloc-side unique_id (the index into GLOC_CAM_MODULES) maps directly to
+    // the index into ring_buffers_.
+    //
     // Checks that all required paths exist before attempting to load anything.
     //
     // @returns  true  on success — ready to localise.
@@ -89,6 +268,73 @@ class Gloc
     // The loop runs until the destructor signals it to stop.
     // ─────────────────────────────────────────────────────────────────────────
     void start_process_thread();
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // pushCameraImage
+    //
+    // Append an image to the ring buffer for the given gloc-side module
+    // (gloc_unique_id is the index into GLOC_CAM_MODULES). Called from the
+    // rosNode image callback. Non-blocking.
+    //
+    // No-op when init() has not yet succeeded — safe to call before / outside
+    // gloc being enabled. Guards against out-of-bounds gloc_unique_id.
+    // ─────────────────────────────────────────────────────────────────────────
+    void pushCameraImage(unsigned int gloc_unique_id,
+                         double t,
+                         const cv::Mat &image);
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // findNearestImage
+    //
+    // Look up the nearest image in the ring buffer for a given gloc-side
+    // module. Used by the process loop to resolve a keyframe's gloc image
+    // exactly once (state-3 → state-1/2 transition).
+    //
+    // Returns a LookupResult; an out-of-range gloc_unique_id or an
+    // uninitialized Gloc returns {Empty}.
+    // ─────────────────────────────────────────────────────────────────────────
+    LookupResult findNearestImage(unsigned int gloc_unique_id,
+                                  double t_kf,
+                                  double tol) const;
+
+    // Number of gloc-side modules (== GLOC_CAM_MODULES.size()), or 0 if not
+    // initialised. Useful for rosNode to size its parallel-callback array.
+    std::size_t numGlocModules() const
+    {
+        return ring_buffers_.size();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // onSnapshotChanged
+    //
+    // Called by the estimator thread after each keyframe-window change
+    // (typically end of Estimator::processWindow). Synchronous, returns in
+    // ~μs once the eager-resolution path is hot.
+    //
+    // Three things happen under state_mutex_:
+    //
+    //   1. Reconcile state_map_ with the new snapshot:
+    //        * for each keyframe in snapshot: insert if new, refresh local
+    //          pose if existing.
+    //        * remove map entries whose t_kf is no longer in the snapshot
+    //          (marginalised out of the VINS window).
+    //
+    //   2. Eager per-slot resolution: for every (keyframe, gloc-module) slot
+    //      that is not yet terminal (i.e. verdict is Empty or NotYet), call
+    //      ring_buffers_[g]->findNearest(t_kf, tol_g). Update the slot's
+    //      verdict. On Found: cache the image and call ring_buffers_[g]
+    //      ->trimOlderThan(t_image) to free slots that can never serve a
+    //      future (later) keyframe.
+    //
+    //   3. Signal the worker thread that a fresh snapshot exists.
+    //
+    // The Ceres solve runs on the worker thread without holding state_mutex_,
+    // so this call only contends with the worker for brief snapshot-copy ops.
+    // The estimator is not stalled by an in-progress optimisation.
+    //
+    // No-op when gloc is not initialised.
+    // ─────────────────────────────────────────────────────────────────────────
+    void onSnapshotChanged(const Snapshot &snapshot);
 
   private:
     // ── Helpers called by init() ─────────────────────────────────────────────
@@ -122,11 +368,46 @@ class Gloc
 
     Map map_;
 
+    // ── Per-module image ring buffers ────────────────────────────────────────
+    //
+    // Allocated in init(); indexed by gloc-side unique_id (= index into
+    // GLOC_CAM_MODULES). Empty until init() succeeds, so pushCameraImage
+    // safely no-ops when gloc is disabled or not yet initialised.
+    //
+    // unique_ptr is used so the vector can be sized without moving non-movable
+    // CameraRingBuffer instances (each holds a std::mutex).
+    std::vector<std::unique_ptr<CameraRingBuffer>> ring_buffers_;
+
+    // True once init() has populated ring_buffers_ and the map. pushCameraImage
+    // and findNearestImage check this before doing any work.
+    std::atomic<bool> initialized_{false};
+
+    // ── Snapshot / per-keyframe state ────────────────────────────────────────
+    //
+    // state_map_ holds the union of all keyframes that have appeared in any
+    // snapshot since gloc started, minus those marginalised out of the VINS
+    // window. Keyed by t_kf so insertion-by-key is idempotent.
+    //
+    // Guarded by state_mutex_, which is also the cv mutex for work_cv_. The
+    // worker thread takes this mutex briefly to copy out a working set, then
+    // runs the Ceres solve without holding it.
+    //
+    // snapshot_fresh_ is set true by onSnapshotChanged after a successful
+    // update and cleared by the worker when it picks up the work. Coalescing:
+    // multiple notifications during a long solve collapse into a single
+    // "snapshot is fresh, optimize again" signal.
+    //
+    // last_snapshot_id_ tracks the most recent snapshot_id observed by
+    // onSnapshotChanged, mostly for logging.
+    mutable std::mutex state_mutex_;
+    std::map<double, KeyframeGlocState> state_map_;
+    bool snapshot_fresh_{false};
+    uint64_t last_snapshot_id_{0};
+
     // ── Thread state ─────────────────────────────────────────────────────────
 
     std::thread process_thread_;
-    std::mutex process_mutex_;
-    std::condition_variable process_cv_;
+    std::condition_variable work_cv_; // signalled on snapshot_fresh_ change
     bool stop_thread_{false};
 };
 
