@@ -7,6 +7,7 @@
 #include <set>
 #include <stdexcept>
 
+#include "colmap_util.h"
 #include "estimator/parameters.h" // for vins_multi::GLOC_CAM_MODULES
 
 namespace fs = std::filesystem;
@@ -202,6 +203,60 @@ bool Gloc::init()
               << " camera ring buffer(s).\n";
 
     initialized_.store(true, std::memory_order_release);
+
+    // ── Construct shared ORB extractor ───────────────────────────────────────
+    {
+        const int score_type = (GLOC_ORB_SCORE_TYPE == 1)
+                                   ? cv::ORB::FAST_SCORE
+                                   : cv::ORB::HARRIS_SCORE;
+
+        PointFeatureExtractorORB::Parameters p(
+            GLOC_ORB_NFEATURES,
+            GLOC_ORB_SCALE_FACTOR,
+            GLOC_ORB_NLEVELS,
+            GLOC_ORB_EDGE_THRESHOLD,
+            GLOC_ORB_FIRST_LEVEL,
+            GLOC_ORB_WTA_K,
+            score_type,
+            GLOC_ORB_PATCH_SIZE,
+            GLOC_ORB_FAST_THRESHOLD);
+
+        orb_extractor_ = std::make_unique<PointFeatureExtractorORB>(p);
+    }
+
+    // ── Construct BEBLID extractor (optional) ────────────────────────────────
+    if (GLOC_USE_BEBLID)
+    {
+        const int n_bits = (GLOC_BEBLID_N_BITS == 256)
+                               ? cv::xfeatures2d::BEBLID::SIZE_256_BITS
+                               : cv::xfeatures2d::BEBLID::SIZE_512_BITS;
+
+        beblid_extractor_ = cv::xfeatures2d::BEBLID::create(GLOC_BEBLID_SCALE_FACTOR, n_bits);
+
+        std::cout << "[Gloc::init] BEBLID extractor enabled"
+                  << " (scale_factor=" << GLOC_BEBLID_SCALE_FACTOR
+                  << " n_bits=" << GLOC_BEBLID_N_BITS << ").\n";
+    }
+
+    // ── Construct feature matcher ────────────────────────────────────────────
+    if (GLOC_USE_GMS)
+    {
+        feat_matcher_ = std::make_unique<PointFeatureMatcherGMS>(
+            cv::NORM_HAMMING,
+            static_cast<bool>(GLOC_GMS_WITH_ROTATION),
+            static_cast<bool>(GLOC_GMS_WITH_SCALE),
+            static_cast<double>(GLOC_GMS_THRESHOLD));
+        std::cout << "[Gloc::init] Matcher: GMS"
+                  << " (rotation=" << GLOC_GMS_WITH_ROTATION
+                  << " scale=" << GLOC_GMS_WITH_SCALE
+                  << " threshold=" << GLOC_GMS_THRESHOLD << ")\n";
+    }
+    else
+    {
+        feat_matcher_ = std::make_unique<PointFeatureMatcherBruteForce>(
+            cv::NORM_HAMMING);
+        std::cout << "[Gloc::init] Matcher: BruteForce Hamming.\n";
+    }
 
     std::cout << "[Gloc::init] Ready.\n";
     return true;
@@ -421,10 +476,15 @@ void Gloc::processLoop()
         ROS_DEBUG("[Gloc] worker round snapshot_id=%lu, %zu resolved keyframes",
                   (unsigned long)working_snapshot_id, working_set.size());
 
+        if (working_set.empty())
+            continue;
+
+        runOrbAndDbow(working_set);
+        runConsensusVoting(working_set);
+        runCorrespondences(working_set);
+        writeBackToStateMap(working_set);
+
         // TODO (next stage):
-        //   1. For each Found slot in working_set whose ORB/DBoW/correspondences
-        //      have not yet been computed, run that pipeline now and cache the
-        //      results back on state_map_ (under a brief state_mutex_ acquire).
         //   2. Build the Ceres problem: per-keyframe T_map_body variables,
         //      soft-constraint factors between adjacent keyframes, gloc factors
         //      from cached correspondences.
@@ -435,6 +495,411 @@ void Gloc::processLoop()
     }
 
     std::cout << "[Gloc] processLoop exiting.\n";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// runOrbAndDbow
+//
+// Stage 1a: for every Found slot that hasn't been processed yet, convert the
+// cached image to grayscale, extract ORB features, and query DBoW3 to populate
+// dbow_candidates (sorted descending by score, capped at GLOC_DBOW3_MAX_RESULTS).
+// ─────────────────────────────────────────────────────────────────────────────
+
+void Gloc::runOrbAndDbow(std::vector<KeyframeGlocState> &working_set)
+{
+    for (auto &kf_state : working_set)
+    {
+        for (std::size_t g = 0; g < kf_state.per_gloc.size(); ++g)
+        {
+            auto &slot = kf_state.per_gloc[g];
+
+            if (slot.verdict != LookupVerdict::Found)
+                continue;
+            if (slot.pipeline_done)
+                continue;
+            if (slot.image.empty())
+                continue;
+
+            // ── ORB extraction ───────────────────────────────────────────────
+            cv::Mat gray;
+            if (slot.image.channels() == 1)
+                gray = slot.image;
+            else
+                cv::cvtColor(slot.image, gray, cv::COLOR_BGR2GRAY);
+
+            slot.query_feats.image_size = gray.size();
+            orb_extractor_->extract(gray,
+                                    slot.query_feats.keypoints,
+                                    &slot.query_feats.orb_descriptors);
+
+            if (slot.query_feats.orb_descriptors.empty())
+            {
+                ROS_WARN_THROTTLE(2.0,
+                                  "[Gloc] ORB extraction yielded no descriptors "
+                                  "for keyframe t=%.4f module=%zu",
+                                  kf_state.t_kf, g);
+                slot.pipeline_done = true;
+                continue;
+            }
+
+            // Guarantee row-contiguous memory so DBoW3 doesn't read garbage.
+            if (!slot.query_feats.orb_descriptors.isContinuous())
+                slot.query_feats.orb_descriptors =
+                    slot.query_feats.orb_descriptors.clone();
+
+            // ── BEBLID (optional) ────────────────────────────────────────────
+            if (beblid_extractor_ && !slot.query_feats.keypoints.empty())
+            {
+                beblid_extractor_->compute(gray,
+                                           slot.query_feats.keypoints,
+                                           slot.query_feats.beblid_descriptors);
+            }
+
+            // ── DBoW3 query ──────────────────────────────────────────────────
+            DBoW3::QueryResults dbow_ret;
+            map_.db.query(slot.query_feats.orb_descriptors,
+                          dbow_ret,
+                          std::max(GLOC_DBOW3_MAX_RESULTS, 1),
+                          /*max_id=*/-1);
+
+            slot.dbow_candidates.clear();
+            for (const DBoW3::Result &r : dbow_ret)
+            {
+                if (r.Score < GLOC_DBOW3_MIN_SCORE)
+                    continue;
+                const std::size_t train_idx = static_cast<std::size_t>(r.Id);
+                if (train_idx >= map_.images.size())
+                    continue;
+                slot.dbow_candidates.push_back({r.Score, train_idx});
+            }
+
+            std::sort(slot.dbow_candidates.begin(),
+                      slot.dbow_candidates.end(),
+                      [](const auto &a, const auto &b) {
+                          return a.first > b.first;
+                      });
+
+            if (static_cast<int>(slot.dbow_candidates.size()) >
+                GLOC_DBOW3_MAX_RESULTS)
+                slot.dbow_candidates.resize(GLOC_DBOW3_MAX_RESULTS);
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// runConsensusVoting
+//
+// Stage 1b: cross-keyframe magnitude-consistency filter.
+//
+// For every candidate (i, n) check how many distinct other keyframes j have at
+// least one candidate m satisfying:
+//
+//   | ||world_pos(c_in) - world_pos(c_jm)|| - ||P_local_i - P_local_j|| |
+//       < GLOC_VOTE_EPS_M
+//
+// Candidates that agree with fewer than min_votes_threshold other keyframes are
+// rejected. Among survivors the one with the highest DBoW3 score is elected as
+// best_train_idx for that slot.
+// ─────────────────────────────────────────────────────────────────────────────
+
+void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
+{
+    const int X = static_cast<int>(working_set.size());
+    const int min_votes_threshold =
+        (GLOC_VOTE_MIN_VOTES < 0)
+            ? static_cast<int>(std::ceil((X - 1) / 2.0))
+            : GLOC_VOTE_MIN_VOTES;
+
+    const std::size_t n_modules =
+        working_set.empty() ? 0 : working_set[0].per_gloc.size();
+
+    auto train_world_pos = [&](std::size_t train_idx) -> Eigen::Vector3d {
+        const colmap::Image &img = map_.images[train_idx];
+        return -(img.q_c_w.inverse() * img.t_c_w);
+    };
+
+    for (std::size_t g = 0; g < n_modules; ++g)
+    {
+        // votes[i][n] = number of distinct other keyframes that agree with
+        // candidate n of keyframe i.
+        std::vector<std::vector<int>> votes(X);
+        for (int i = 0; i < X; ++i)
+            votes[i].assign(
+                working_set[i].per_gloc[g].dbow_candidates.size(), 0);
+
+        for (int i = 0; i < X; ++i)
+        {
+            const auto &slot_i = working_set[i].per_gloc[g];
+            if (slot_i.dbow_candidates.empty())
+                continue;
+
+            for (int ni = 0;
+                 ni < static_cast<int>(slot_i.dbow_candidates.size()); ++ni)
+            {
+                const Eigen::Vector3d pos_in =
+                    train_world_pos(slot_i.dbow_candidates[ni].second);
+
+                std::set<int> agreeing_kfs;
+                for (int j = 0; j < X; ++j)
+                {
+                    if (j == i)
+                        continue;
+
+                    const auto &slot_j = working_set[j].per_gloc[g];
+                    if (slot_j.dbow_candidates.empty())
+                        continue;
+
+                    const double local_dist =
+                        (working_set[i].P_local - working_set[j].P_local)
+                            .norm();
+
+                    for (const auto &[score_jm, train_jm] : slot_j.dbow_candidates)
+                    {
+                        const double world_dist =
+                            (pos_in - train_world_pos(train_jm)).norm();
+
+                        if (std::abs(world_dist - local_dist) < GLOC_VOTE_EPS_M)
+                        {
+                            agreeing_kfs.insert(j);
+                            break; // one agreement per other keyframe is enough
+                        }
+                    }
+                }
+
+                votes[i][ni] = static_cast<int>(agreeing_kfs.size());
+            }
+        }
+
+        // Elect the highest-score surviving candidate per keyframe.
+        for (int i = 0; i < X; ++i)
+        {
+            auto &slot = working_set[i].per_gloc[g];
+
+            int best_ni = -1;
+            double best_score = -1.0;
+
+            for (int ni = 0;
+                 ni < static_cast<int>(slot.dbow_candidates.size()); ++ni)
+            {
+                if (votes[i][ni] < min_votes_threshold)
+                    continue;
+
+                const double score = slot.dbow_candidates[ni].first;
+                if (score > best_score)
+                {
+                    best_score = score;
+                    best_ni = ni;
+                }
+            }
+
+            if (best_ni >= 0)
+            {
+                slot.best_train_idx =
+                    static_cast<int>(slot.dbow_candidates[best_ni].second);
+                ROS_DEBUG("[Gloc] kf t=%.4f module=%zu → train_idx=%d "
+                          "(votes=%d score=%.4f)",
+                          working_set[i].t_kf, g, slot.best_train_idx,
+                          votes[i][best_ni], best_score);
+            }
+            else
+            {
+                slot.best_train_idx = -1;
+                ROS_DEBUG("[Gloc] kf t=%.4f module=%zu → rejected by voting",
+                          working_set[i].t_kf, g);
+            }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// runCorrespondences
+//
+// Stage 1c: for each slot with a valid best_train_idx, match query ORB
+// descriptors against the pre-cached train features, apply geometric
+// verification (RANSAC fundamental matrix), and store the surviving 2D-2D
+// point pairs (both distorted and undistorted).  Slots that fail any check
+// have best_train_idx reset to -1 and are marked pipeline_done.
+// ─────────────────────────────────────────────────────────────────────────────
+
+void Gloc::runCorrespondences(std::vector<KeyframeGlocState> &working_set)
+{
+    // No-op query calibration: gloc images are assumed to come in already
+    // undistorted (or rectified). Wire in real distortion params here if needed.
+    colmap::CameraCalib query_cal;
+    query_cal.fx = 1.0;
+    query_cal.fy = 1.0;
+    query_cal.cx = 0.0;
+    query_cal.cy = 0.0;
+    query_cal.K = Eigen::Matrix3d::Identity();
+
+    for (auto &kf_state : working_set)
+    {
+        for (std::size_t g = 0; g < kf_state.per_gloc.size(); ++g)
+        {
+            auto &slot = kf_state.per_gloc[g];
+
+            if (slot.pipeline_done)
+                continue;
+            if (slot.verdict != LookupVerdict::Found)
+                continue;
+            if (slot.best_train_idx < 0)
+            {
+                slot.pipeline_done = true;
+                continue;
+            }
+
+            const std::size_t ti = static_cast<std::size_t>(slot.best_train_idx);
+
+            if (ti >= map_.feats.size() ||
+                map_.feats[ti].orb_descriptors.empty())
+            {
+                ROS_WARN_THROTTLE(2.0,
+                                  "[Gloc] train_idx=%zu has no cached features "
+                                  "— skipping",
+                                  ti);
+                slot.pipeline_done = true;
+                continue;
+            }
+
+            const dbow3::ImageFeatures &train_feats = map_.feats[ti];
+
+            // ── Raw descriptor matching ──────────────────────────────────────
+            //
+            // Pick descriptor type based on config. Fall back to ORB if BEBLID
+            // was requested but the train image has no beblid_descriptors cached
+            // (e.g. the feature cache was built without BEBLID).
+            const bool use_beblid =
+                GLOC_USE_BEBLID &&
+                !slot.query_feats.beblid_descriptors.empty() &&
+                !train_feats.beblid_descriptors.empty();
+
+            const cv::Mat &desc0 = use_beblid
+                                       ? slot.query_feats.beblid_descriptors
+                                       : slot.query_feats.orb_descriptors;
+            const cv::Mat &desc1 = use_beblid
+                                       ? train_feats.beblid_descriptors
+                                       : train_feats.orb_descriptors;
+
+            std::vector<cv::DMatch> matches;
+            auto *gms = dynamic_cast<PointFeatureMatcherGMS *>(feat_matcher_.get());
+            if (gms)
+            {
+                gms->matchGMS(slot.query_feats.image_size,
+                              train_feats.image_size,
+                              slot.query_feats.keypoints,
+                              train_feats.keypoints,
+                              desc0, desc1,
+                              matches,
+                              GLOC_MATCH_MAX_DIST);
+            }
+            else
+            {
+                feat_matcher_->robustMatch(desc0, desc1, matches,
+                                           GLOC_MATCH_LOWE_RATIO,
+                                           GLOC_MATCH_MAX_DIST);
+            }
+
+            if (matches.empty())
+            {
+                slot.pipeline_done = true;
+                continue;
+            }
+
+            // ── Undistort matched keypoints ──────────────────────────────────
+            auto tcal_it = map_.calibs.find(map_.images[ti].camera_id);
+            if (tcal_it == map_.calibs.end())
+            {
+                ROS_WARN_THROTTLE(2.0,
+                                  "[Gloc] no calibration for train camera_id=%u",
+                                  map_.images[ti].camera_id);
+                slot.pipeline_done = true;
+                continue;
+            }
+            const colmap::CameraCalib &train_cal = tcal_it->second;
+
+            const auto &kp0 = slot.query_feats.keypoints;
+            const auto &kp1 = train_feats.keypoints;
+            std::vector<cv::KeyPoint> undist_kp0(kp0.size());
+            std::vector<cv::KeyPoint> undist_kp1(kp1.size());
+
+            for (const auto &m : matches)
+            {
+                const Eigen::Vector2d u0 = colmap::undistort_point(
+                    {kp0[m.queryIdx].pt.x, kp0[m.queryIdx].pt.y}, query_cal);
+                const Eigen::Vector2d u1 = colmap::undistort_point(
+                    {kp1[m.trainIdx].pt.x, kp1[m.trainIdx].pt.y}, train_cal);
+
+                undist_kp0[m.queryIdx].pt = {(float)u0.x(), (float)u0.y()};
+                undist_kp1[m.trainIdx].pt = {(float)u1.x(), (float)u1.y()};
+            }
+
+            // ── Geometric verification ───────────────────────────────────────
+            PointFeatureMatcher::geometricTest(
+                undist_kp0, undist_kp1, matches,
+                GLOC_MATCH_GEOM_REPROJ_TH,
+                GLOC_MATCH_GEOM_CONFIDENCE,
+                GLOC_MATCH_GEOM_SAMPSON_SQ);
+
+            if (static_cast<int>(matches.size()) < GLOC_MATCH_MIN_INLIERS)
+            {
+                ROS_DEBUG("[Gloc] kf t=%.4f module=%zu train_idx=%zu: "
+                          "only %zu inliers after geom test (need %d) — rejecting",
+                          kf_state.t_kf, g, ti,
+                          matches.size(), GLOC_MATCH_MIN_INLIERS);
+                slot.best_train_idx = -1;
+                slot.pipeline_done = true;
+                continue;
+            }
+
+            // ── Store correspondences ────────────────────────────────────────
+            PointFeatureMatcher::matchesToPointCorrespondences(
+                kp0, kp1, matches, slot.pt_pairs_distorted, 1.0f);
+            PointFeatureMatcher::matchesToPointCorrespondences(
+                undist_kp0, undist_kp1, matches, slot.pt_pairs_undistorted, 1.0f);
+
+            slot.pipeline_done = true;
+
+            ROS_DEBUG("[Gloc] kf t=%.4f module=%zu → %zu correspondences "
+                      "with train_idx=%zu",
+                      kf_state.t_kf, g, slot.pt_pairs_distorted.size(), ti);
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// writeBackToStateMap
+//
+// Stage 1d: re-acquire state_mutex_ briefly and flush pipeline_done slots from
+// the working_set copy back into state_map_. Keyframes that were marginalised
+// by the estimator between the working_set copy and this write-back are silently
+// skipped (they're no longer in state_map_).
+// ─────────────────────────────────────────────────────────────────────────────
+
+void Gloc::writeBackToStateMap(const std::vector<KeyframeGlocState> &working_set)
+{
+    std::lock_guard<std::mutex> lk(state_mutex_);
+
+    for (const auto &kf_state : working_set)
+    {
+        auto it = state_map_.find(kf_state.t_kf);
+        if (it == state_map_.end())
+            continue; // marginalised between copy and write-back
+
+        for (std::size_t g = 0; g < kf_state.per_gloc.size(); ++g)
+        {
+            const auto &src = kf_state.per_gloc[g];
+            if (!src.pipeline_done)
+                continue;
+
+            auto &dst = it->second.per_gloc[g];
+            dst.query_feats = src.query_feats;
+            dst.dbow_candidates = src.dbow_candidates;
+            dst.best_train_idx = src.best_train_idx;
+            dst.pt_pairs_distorted = src.pt_pairs_distorted;
+            dst.pt_pairs_undistorted = src.pt_pairs_undistorted;
+            dst.pipeline_done = true;
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

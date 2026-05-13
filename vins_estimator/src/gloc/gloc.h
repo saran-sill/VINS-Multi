@@ -199,7 +199,29 @@ struct PerModuleResolution
     double t_image{0.0};
     cv::Mat image;
 
-    // TODO (next stage): cached ORB features, DBoW3 match, correspondences.
+    // ── Pipeline cache (filled by processLoop, stage 1) ───────────────────
+
+    // True once ORB extraction + DBoW query + correspondence have been run
+    // for this slot. Guards against reprocessing on subsequent rounds.
+    bool pipeline_done{false};
+
+    // ORB features extracted from `image`.
+    dbow3::ImageFeatures query_feats;
+
+    // DBoW3 top-N candidates: (score, train_image_index into map_.images).
+    // Populated during ORB/DBoW stage; entries are sorted descending by score.
+    std::vector<std::pair<double, size_t>> dbow_candidates;
+
+    // Index into map_.images of the winning train image after consensus
+    // voting.  -1 means this slot was rejected by the vote filter.
+    int best_train_idx{-1};
+
+    // 2D-2D point correspondences between this query image and the winning
+    // train image.  In original (distorted) pixel coordinates.
+    std::vector<std::pair<Eigen::Vector2f, Eigen::Vector2f>> pt_pairs_distorted;
+
+    // Same correspondences with lens distortion removed.
+    std::vector<std::pair<Eigen::Vector2f, Eigen::Vector2f>> pt_pairs_undistorted;
 
     bool isTerminal() const
     {
@@ -354,10 +376,36 @@ class Gloc
     // Returns false on any error.
     bool loadDatabase();
 
+    // ── ORB extractor and feature matcher (constructed once in init()) ───────
+    //
+    // Shared across all processLoop rounds. Both are used only on the worker
+    // thread so no locking is needed.
+    std::unique_ptr<PointFeatureExtractor> orb_extractor_;
+    cv::Ptr<cv::DescriptorExtractor> beblid_extractor_; // null if GLOC_USE_BEBLID==0
+    std::unique_ptr<PointFeatureMatcher> feat_matcher_;
+
     // ── Process loop ─────────────────────────────────────────────────────────
 
     // Entry point for process_thread_.
     void processLoop();
+
+    // Stage 1a: for every Found slot that hasn't been processed, extract ORB
+    // features from the cached image and query DBoW3 to populate dbow_candidates.
+    void runOrbAndDbow(std::vector<KeyframeGlocState> &working_set);
+
+    // Stage 1b: cross-keyframe magnitude-consistency voting. For each candidate
+    // (i,n), count how many other keyframes have a candidate whose world-distance
+    // matches the local-pose distance. Sets best_train_idx per slot.
+    void runConsensusVoting(std::vector<KeyframeGlocState> &working_set);
+
+    // Stage 1c: for each slot with a valid best_train_idx, match ORB descriptors
+    // against the cached train features, run geometric verification, and store
+    // the surviving 2D-2D correspondences.
+    void runCorrespondences(std::vector<KeyframeGlocState> &working_set);
+
+    // Stage 1d: re-acquire state_mutex_ briefly and flush pipeline results from
+    // the working_set copy back into state_map_.
+    void writeBackToStateMap(const std::vector<KeyframeGlocState> &working_set);
 
     // ── Estimator (non-owning) ───────────────────────────────────────────────
 
