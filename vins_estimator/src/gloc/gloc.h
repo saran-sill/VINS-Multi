@@ -15,6 +15,7 @@
 #include <thread>
 #include <unordered_map>
 
+#include "camodocal/camera_models/CameraFactory.h"
 #include "colmap_util.h"
 #include "dbow3_util.h"
 #include "parameters.h"
@@ -383,6 +384,10 @@ class Gloc
     std::unique_ptr<PointFeatureExtractor> orb_extractor_;
     cv::Ptr<cv::DescriptorExtractor> beblid_extractor_; // null if GLOC_USE_BEBLID==0
     std::unique_ptr<PointFeatureMatcher> feat_matcher_;
+
+    // One camera model per gloc module, loaded from GLOC_CAM_MODULES[g].calib_file_[0].
+    // Used in runCorrespondences to undistort query keypoints.
+    std::vector<camodocal::CameraPtr> query_cameras_;
 
     // ── Process loop ─────────────────────────────────────────────────────────
 

@@ -251,8 +251,8 @@ gloc_gms_with_rotation: 1
 gloc_gms_with_scale: 0
 gloc_match_lowe_ratio: 0.7          # used only when gloc_use_gms: 0
 gloc_match_max_dist: 64
-gloc_match_geom_reproj_th: 5.0
-gloc_match_geom_confidence: 0.995
+gloc_match_geom_reproj_th: 3.0
+gloc_match_geom_confidence: 0.99
 gloc_match_geom_sampson_sq: -1.0    # negative = disabled
 gloc_match_min_inliers: 50
 gloc_subsample_min_dist_px: 10.0    # 0 = disabled;

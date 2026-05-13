@@ -204,6 +204,24 @@ bool Gloc::init()
 
     initialized_.store(true, std::memory_order_release);
 
+    // ── Load query camera models from GLOC_CAM_MODULES ───────────────────────
+    // One model per gloc module, loaded from calib_file_[0] (cam0 = gloc cam).
+    // Used in runCorrespondences to undistort query keypoints via liftProjective.
+    query_cameras_.clear();
+    for (const auto &mod : vins_multi::GLOC_CAM_MODULES)
+    {
+        camodocal::CameraPtr cam = camodocal::CameraFactory::instance()->generateCameraFromYamlFile(mod.calib_file_[0]);
+        if (!cam)
+        {
+            ROS_ERROR("[Gloc::init] Failed to load camera model from %s",
+                      mod.calib_file_[0].c_str());
+            return false;
+        }
+        query_cameras_.push_back(cam);
+        std::cout << "[Gloc::init] Loaded query camera model from "
+                  << mod.calib_file_[0] << "\n";
+    }
+
     // ── Construct shared ORB extractor ───────────────────────────────────────
     {
         const int score_type = (GLOC_ORB_SCORE_TYPE == 1)
@@ -699,6 +717,56 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// subsampleMatchesMinDist  (file-local helper)
+//
+// Greedy spatial subsampling: sorts matches by descriptor distance (best
+// first) then keeps a match only if its query keypoint is at least
+// min_dist_px pixels away from every already-kept keypoint.  This spreads
+// correspondences across the image and removes redundant clustered matches
+// before geometric verification.
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void subsampleMatchesMinDist(const std::vector<cv::KeyPoint> &keypoints0,
+                                    const std::vector<cv::DMatch> &matches_in,
+                                    std::vector<cv::DMatch> &matches_out,
+                                    const float min_dist_px)
+{
+    matches_out.clear();
+
+    std::vector<cv::DMatch> sorted = matches_in;
+    std::sort(sorted.begin(), sorted.end(),
+              [](const cv::DMatch &a, const cv::DMatch &b) {
+                  return a.distance < b.distance;
+              });
+
+    std::vector<cv::Point2f> kept;
+    kept.reserve(sorted.size());
+
+    for (const auto &m : sorted)
+    {
+        const cv::Point2f &pt = keypoints0[m.queryIdx].pt;
+
+        bool too_close = false;
+        for (const auto &k : kept)
+        {
+            const float dx = pt.x - k.x;
+            const float dy = pt.y - k.y;
+            if (dx * dx + dy * dy < min_dist_px * min_dist_px)
+            {
+                too_close = true;
+                break;
+            }
+        }
+
+        if (!too_close)
+        {
+            matches_out.push_back(m);
+            kept.push_back(pt);
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // runCorrespondences
 //
 // Stage 1c: for each slot with a valid best_train_idx, match query ORB
@@ -710,15 +778,6 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
 
 void Gloc::runCorrespondences(std::vector<KeyframeGlocState> &working_set)
 {
-    // No-op query calibration: gloc images are assumed to come in already
-    // undistorted (or rectified). Wire in real distortion params here if needed.
-    colmap::CameraCalib query_cal;
-    query_cal.fx = 1.0;
-    query_cal.fy = 1.0;
-    query_cal.cx = 0.0;
-    query_cal.cy = 0.0;
-    query_cal.K = Eigen::Matrix3d::Identity();
-
     for (auto &kf_state : working_set)
     {
         for (std::size_t g = 0; g < kf_state.per_gloc.size(); ++g)
@@ -789,7 +848,28 @@ void Gloc::runCorrespondences(std::vector<KeyframeGlocState> &working_set)
                 continue;
             }
 
+            // ── Spatial subsampling (optional) ───────────────────────────────
+            if (GLOC_SUBSAMPLE_MIN_DIST_PX > 0.0f)
+            {
+                std::vector<cv::DMatch> spread;
+                subsampleMatchesMinDist(slot.query_feats.keypoints,
+                                        matches, spread,
+                                        GLOC_SUBSAMPLE_MIN_DIST_PX);
+                matches.swap(spread);
+            }
+
+            if (matches.empty())
+            {
+                slot.pipeline_done = true;
+                continue;
+            }
+
             // ── Undistort matched keypoints ──────────────────────────────────
+            //
+            // Query: liftProjective via the camodocal model loaded from
+            //        GLOC_CAM_MODULES[g].calib_file_[0] — handles any distortion
+            //        model (pinhole, equidistant, scaramuzza, etc.).
+            // Train: colmap::undistort_point with the COLMAP map calibration.
             auto tcal_it = map_.calibs.find(map_.images[ti].camera_id);
             if (tcal_it == map_.calibs.end())
             {
@@ -801,20 +881,45 @@ void Gloc::runCorrespondences(std::vector<KeyframeGlocState> &working_set)
             }
             const colmap::CameraCalib &train_cal = tcal_it->second;
 
+            if (g >= query_cameras_.size() || !query_cameras_[g])
+            {
+                ROS_WARN_THROTTLE(2.0,
+                                  "[Gloc] no query camera model for module=%zu", g);
+                slot.pipeline_done = true;
+                continue;
+            }
+            const camodocal::CameraPtr &query_cam = query_cameras_[g];
+
             const auto &kp0 = slot.query_feats.keypoints;
             const auto &kp1 = train_feats.keypoints;
             std::vector<cv::KeyPoint> undist_kp0(kp0.size());
             std::vector<cv::KeyPoint> undist_kp1(kp1.size());
 
+            // Virtual-camera principal point for each side.
+            // Following the same convention as FeatureTracker::rejectWithF,
+            // both sides are projected into a synthetic camera with
+            // fx=fy=FOCAL_LENGTH and principal point at image centre.
+            // This puts query and train in the same consistent pixel space
+            // regardless of their actual intrinsics.
+            const double query_cx = slot.query_feats.image_size.width / 2.0;
+            const double query_cy = slot.query_feats.image_size.height / 2.0;
+            const double train_cx = train_cal.width / 2.0;
+            const double train_cy = train_cal.height / 2.0;
+
             for (const auto &m : matches)
             {
-                const Eigen::Vector2d u0 = colmap::undistort_point(
-                    {kp0[m.queryIdx].pt.x, kp0[m.queryIdx].pt.y}, query_cal);
-                const Eigen::Vector2d u1 = colmap::undistort_point(
-                    {kp1[m.trainIdx].pt.x, kp1[m.trainIdx].pt.y}, train_cal);
+                // ── Query: liftProjective → virtual camera ───────────────────
+                Eigen::Vector3d ray;
+                query_cam->liftProjective(Eigen::Vector2d(kp0[m.queryIdx].pt.x, kp0[m.queryIdx].pt.y), ray);
+                undist_kp0[m.queryIdx].pt = cv::Point2f((float)(vins_multi::FOCAL_LENGTH * ray.x() / ray.z() + query_cx),
+                                                        (float)(vins_multi::FOCAL_LENGTH * ray.y() / ray.z() + query_cy));
 
-                undist_kp0[m.queryIdx].pt = {(float)u0.x(), (float)u0.y()};
-                undist_kp1[m.trainIdx].pt = {(float)u1.x(), (float)u1.y()};
+                // ── Train: colmap undistort → normalised → virtual camera ────
+                const Eigen::Vector2d u1 = colmap::undistort_point(Eigen::Vector2d(kp1[m.trainIdx].pt.x, kp1[m.trainIdx].pt.y), train_cal);
+                const double xn = (u1.x() - train_cal.cx) / train_cal.fx;
+                const double yn = (u1.y() - train_cal.cy) / train_cal.fy;
+                undist_kp1[m.trainIdx].pt = cv::Point2f((float)(vins_multi::FOCAL_LENGTH * xn + train_cx),
+                                                        (float)(vins_multi::FOCAL_LENGTH * yn + train_cy));
             }
 
             // ── Geometric verification ───────────────────────────────────────
@@ -835,10 +940,8 @@ void Gloc::runCorrespondences(std::vector<KeyframeGlocState> &working_set)
             }
 
             // ── Store correspondences ────────────────────────────────────────
-            PointFeatureMatcher::matchesToPointCorrespondences(
-                kp0, kp1, matches, slot.pt_pairs_distorted, 1.0f);
-            PointFeatureMatcher::matchesToPointCorrespondences(
-                undist_kp0, undist_kp1, matches, slot.pt_pairs_undistorted, 1.0f);
+            PointFeatureMatcher::matchesToPointCorrespondences(kp0, kp1, matches, slot.pt_pairs_distorted, 1.0f);
+            PointFeatureMatcher::matchesToPointCorrespondences(undist_kp0, undist_kp1, matches, slot.pt_pairs_undistorted, 1.0f);
 
             slot.pipeline_done = true;
 
