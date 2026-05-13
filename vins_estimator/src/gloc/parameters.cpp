@@ -46,6 +46,7 @@ float GLOC_MATCH_GEOM_REPROJ_TH = 3.0f;
 float GLOC_MATCH_GEOM_CONFIDENCE = 0.99f;
 float GLOC_MATCH_GEOM_SAMPSON_SQ = 4.0f;
 int GLOC_MATCH_MIN_INLIERS = 10;
+float GLOC_SUBSAMPLE_MIN_DIST_PX = 0.0f;
 
 // Helper: read a value only when the node is non-empty/non-null.
 template <typename T>
@@ -112,6 +113,7 @@ void readParameters(std::string config_file)
     read_if(fsSettings, "gloc_match_geom_confidence", gloc::GLOC_MATCH_GEOM_CONFIDENCE);
     read_if(fsSettings, "gloc_match_geom_sampson_sq", gloc::GLOC_MATCH_GEOM_SAMPSON_SQ);
     read_if(fsSettings, "gloc_match_min_inliers", gloc::GLOC_MATCH_MIN_INLIERS);
+    read_if(fsSettings, "gloc_subsample_min_dist_px", gloc::GLOC_SUBSAMPLE_MIN_DIST_PX);
 
     printf("GLOC_ENABLED            : %d\n", gloc::GLOC_ENABLED);
     printf("GLOC_COLMAP_FOLDER      : %s\n", gloc::GLOC_COLMAP_FOLDER.c_str());
@@ -131,6 +133,7 @@ void readParameters(std::string config_file)
     printf("GLOC_GMS_WITH_SCALE     : %d\n", gloc::GLOC_GMS_WITH_SCALE);
     printf("GLOC_ORB_NFEATURES      : %d\n", gloc::GLOC_ORB_NFEATURES);
     printf("GLOC_MATCH_MIN_INLIERS  : %d\n", gloc::GLOC_MATCH_MIN_INLIERS);
+    printf("GLOC_SUBSAMPLE_MIN_DIST : %.1f\n", gloc::GLOC_SUBSAMPLE_MIN_DIST_PX);
 }
 
 }; // namespace gloc

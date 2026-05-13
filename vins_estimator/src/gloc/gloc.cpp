@@ -241,11 +241,10 @@ bool Gloc::init()
     // ── Construct feature matcher ────────────────────────────────────────────
     if (GLOC_USE_GMS)
     {
-        feat_matcher_ = std::make_unique<PointFeatureMatcherGMS>(
-            cv::NORM_HAMMING,
-            static_cast<bool>(GLOC_GMS_WITH_ROTATION),
-            static_cast<bool>(GLOC_GMS_WITH_SCALE),
-            static_cast<double>(GLOC_GMS_THRESHOLD));
+        feat_matcher_ = std::make_unique<PointFeatureMatcherGMS>(cv::NORM_HAMMING,
+                                                                 static_cast<bool>(GLOC_GMS_WITH_ROTATION),
+                                                                 static_cast<bool>(GLOC_GMS_WITH_SCALE),
+                                                                 static_cast<double>(GLOC_GMS_THRESHOLD));
         std::cout << "[Gloc::init] Matcher: GMS"
                   << " (rotation=" << GLOC_GMS_WITH_ROTATION
                   << " scale=" << GLOC_GMS_WITH_SCALE
@@ -544,8 +543,7 @@ void Gloc::runOrbAndDbow(std::vector<KeyframeGlocState> &working_set)
 
             // Guarantee row-contiguous memory so DBoW3 doesn't read garbage.
             if (!slot.query_feats.orb_descriptors.isContinuous())
-                slot.query_feats.orb_descriptors =
-                    slot.query_feats.orb_descriptors.clone();
+                slot.query_feats.orb_descriptors = slot.query_feats.orb_descriptors.clone();
 
             // ── BEBLID (optional) ────────────────────────────────────────────
             if (beblid_extractor_ && !slot.query_feats.keypoints.empty())
@@ -579,8 +577,7 @@ void Gloc::runOrbAndDbow(std::vector<KeyframeGlocState> &working_set)
                           return a.first > b.first;
                       });
 
-            if (static_cast<int>(slot.dbow_candidates.size()) >
-                GLOC_DBOW3_MAX_RESULTS)
+            if (static_cast<int>(slot.dbow_candidates.size()) > GLOC_DBOW3_MAX_RESULTS)
                 slot.dbow_candidates.resize(GLOC_DBOW3_MAX_RESULTS);
         }
     }
@@ -605,13 +602,10 @@ void Gloc::runOrbAndDbow(std::vector<KeyframeGlocState> &working_set)
 void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
 {
     const int X = static_cast<int>(working_set.size());
-    const int min_votes_threshold =
-        (GLOC_VOTE_MIN_VOTES < 0)
-            ? static_cast<int>(std::ceil((X - 1) / 2.0))
-            : GLOC_VOTE_MIN_VOTES;
+    const int min_votes_threshold = (GLOC_VOTE_MIN_VOTES < 0) ? static_cast<int>(std::ceil((X - 1) / 2.0))
+                                                              : GLOC_VOTE_MIN_VOTES;
 
-    const std::size_t n_modules =
-        working_set.empty() ? 0 : working_set[0].per_gloc.size();
+    const std::size_t n_modules = working_set.empty() ? 0 : working_set[0].per_gloc.size();
 
     auto train_world_pos = [&](std::size_t train_idx) -> Eigen::Vector3d {
         const colmap::Image &img = map_.images[train_idx];
@@ -633,11 +627,9 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
             if (slot_i.dbow_candidates.empty())
                 continue;
 
-            for (int ni = 0;
-                 ni < static_cast<int>(slot_i.dbow_candidates.size()); ++ni)
+            for (int ni = 0; ni < static_cast<int>(slot_i.dbow_candidates.size()); ++ni)
             {
-                const Eigen::Vector3d pos_in =
-                    train_world_pos(slot_i.dbow_candidates[ni].second);
+                const Eigen::Vector3d pos_in = train_world_pos(slot_i.dbow_candidates[ni].second);
 
                 std::set<int> agreeing_kfs;
                 for (int j = 0; j < X; ++j)
@@ -649,14 +641,11 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
                     if (slot_j.dbow_candidates.empty())
                         continue;
 
-                    const double local_dist =
-                        (working_set[i].P_local - working_set[j].P_local)
-                            .norm();
+                    const double local_dist = (working_set[i].P_local - working_set[j].P_local).norm();
 
                     for (const auto &[score_jm, train_jm] : slot_j.dbow_candidates)
                     {
-                        const double world_dist =
-                            (pos_in - train_world_pos(train_jm)).norm();
+                        const double world_dist = (pos_in - train_world_pos(train_jm)).norm();
 
                         if (std::abs(world_dist - local_dist) < GLOC_VOTE_EPS_M)
                         {
@@ -678,8 +667,7 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
             int best_ni = -1;
             double best_score = -1.0;
 
-            for (int ni = 0;
-                 ni < static_cast<int>(slot.dbow_candidates.size()); ++ni)
+            for (int ni = 0; ni < static_cast<int>(slot.dbow_candidates.size()); ++ni)
             {
                 if (votes[i][ni] < min_votes_threshold)
                     continue;
@@ -694,8 +682,7 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
 
             if (best_ni >= 0)
             {
-                slot.best_train_idx =
-                    static_cast<int>(slot.dbow_candidates[best_ni].second);
+                slot.best_train_idx = static_cast<int>(slot.dbow_candidates[best_ni].second);
                 ROS_DEBUG("[Gloc] kf t=%.4f module=%zu → train_idx=%d "
                           "(votes=%d score=%.4f)",
                           working_set[i].t_kf, g, slot.best_train_idx,
@@ -768,17 +755,14 @@ void Gloc::runCorrespondences(std::vector<KeyframeGlocState> &working_set)
             // Pick descriptor type based on config. Fall back to ORB if BEBLID
             // was requested but the train image has no beblid_descriptors cached
             // (e.g. the feature cache was built without BEBLID).
-            const bool use_beblid =
-                GLOC_USE_BEBLID &&
-                !slot.query_feats.beblid_descriptors.empty() &&
-                !train_feats.beblid_descriptors.empty();
+            const bool use_beblid = GLOC_USE_BEBLID &&
+                                    !slot.query_feats.beblid_descriptors.empty() &&
+                                    !train_feats.beblid_descriptors.empty();
 
-            const cv::Mat &desc0 = use_beblid
-                                       ? slot.query_feats.beblid_descriptors
-                                       : slot.query_feats.orb_descriptors;
-            const cv::Mat &desc1 = use_beblid
-                                       ? train_feats.beblid_descriptors
-                                       : train_feats.orb_descriptors;
+            const cv::Mat &desc0 = use_beblid ? slot.query_feats.beblid_descriptors
+                                              : slot.query_feats.orb_descriptors;
+            const cv::Mat &desc1 = use_beblid ? train_feats.beblid_descriptors
+                                              : train_feats.orb_descriptors;
 
             std::vector<cv::DMatch> matches;
             auto *gms = dynamic_cast<PointFeatureMatcherGMS *>(feat_matcher_.get());
@@ -834,11 +818,10 @@ void Gloc::runCorrespondences(std::vector<KeyframeGlocState> &working_set)
             }
 
             // ── Geometric verification ───────────────────────────────────────
-            PointFeatureMatcher::geometricTest(
-                undist_kp0, undist_kp1, matches,
-                GLOC_MATCH_GEOM_REPROJ_TH,
-                GLOC_MATCH_GEOM_CONFIDENCE,
-                GLOC_MATCH_GEOM_SAMPSON_SQ);
+            PointFeatureMatcher::geometricTest(undist_kp0, undist_kp1, matches,
+                                               GLOC_MATCH_GEOM_REPROJ_TH,
+                                               GLOC_MATCH_GEOM_CONFIDENCE,
+                                               GLOC_MATCH_GEOM_SAMPSON_SQ);
 
             if (static_cast<int>(matches.size()) < GLOC_MATCH_MIN_INLIERS)
             {

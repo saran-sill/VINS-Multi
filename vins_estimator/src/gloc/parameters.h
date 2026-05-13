@@ -69,6 +69,7 @@ extern float GLOC_MATCH_GEOM_REPROJ_TH;
 extern float GLOC_MATCH_GEOM_CONFIDENCE;
 extern float GLOC_MATCH_GEOM_SAMPSON_SQ;
 extern int GLOC_MATCH_MIN_INLIERS;
+extern float GLOC_SUBSAMPLE_MIN_DIST_PX; // 0 = disabled
 
 void readParameters(std::string config_file);
 
