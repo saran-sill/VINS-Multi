@@ -393,6 +393,121 @@ void Gloc::onSnapshotChanged(const Snapshot &snapshot)
             s.P_local = kf.P_local;
         }
 
+        // ── Phase 1b: update T_map_local for VINS local pose changes ─────────
+        //
+        // When VINS re-optimizes keyframe local poses, T_map_local becomes
+        // stale. We correct it using the delta between the local poses at
+        // solve time (last_snap_poses_) and the fresh ones just received.
+        //
+        // For each common keyframe i (exists in both old snap and new snapshot):
+        //   ΔT[i] = T_local_new[i] ⊕ T_local_old[i]^-1
+        //         applied as: T_map_local_new = T_map_local_old ⊕ ΔT_mean
+        //
+        // If no common keyframes exist, T_map_local is left unchanged — the
+        // next successful gloc solve will produce a fresh estimate.
+        {
+            std::lock_guard<std::mutex> snap_lk(snap_mutex_);
+
+            if (snapped_ && !last_snap_poses_.empty())
+            {
+                using Mat3d = Eigen::Matrix3d;
+                using Vec3d = Eigen::Vector3d;
+                using Quat = Eigen::Quaterniond;
+
+                // Build a lookup of new local poses by t_kf
+                std::map<double, const Snapshot::KeyframeEntry *> new_pose_map;
+                for (const auto &kf : snapshot.keyframes)
+                    new_pose_map[kf.t_kf] = &kf;
+
+                // Accumulate weighted ΔT over common keyframes
+                Vec3d dt_acc = Vec3d::Zero();
+                Vec3d dq_acc_v = Vec3d::Zero();
+                double dq_acc_w = 0.0;
+                double w_total = 0.0;
+
+                for (const auto &[t_kf, snap] : last_snap_poses_)
+                {
+                    auto it = new_pose_map.find(t_kf);
+                    if (it == new_pose_map.end())
+                        continue; // keyframe marginalized — skip
+
+                    const auto &new_kf = *it->second;
+                    const double w = snap.weight;
+
+                    // ΔR = R_local_new * R_local_old^T
+                    const Mat3d R_old = snap.R_local.toRotationMatrix();
+                    const Mat3d R_new = new_kf.R_local.toRotationMatrix();
+                    const Mat3d dR = R_new * R_old.transpose();
+
+                    // Δt = P_local_new - dR * P_local_old
+                    // (difference in local frame after rotation alignment)
+                    const Vec3d dt = new_kf.P_local - dR * snap.P_local;
+
+                    dt_acc += w * dt;
+                    w_total += w;
+
+                    Quat dq(dR);
+                    if (w_total > w)
+                    {
+                        const Quat q_so_far(dq_acc_w / (w_total - w),
+                                            dq_acc_v.x() / (w_total - w),
+                                            dq_acc_v.y() / (w_total - w),
+                                            dq_acc_v.z() / (w_total - w));
+                        if (dq.dot(q_so_far) < 0.0)
+                            dq.coeffs() = -dq.coeffs();
+                    }
+                    dq_acc_v += w * dq.vec();
+                    dq_acc_w += w * dq.w();
+                }
+
+                if (w_total > 0.0)
+                {
+                    Quat dq_mean(dq_acc_w / w_total,
+                                 dq_acc_v.x() / w_total,
+                                 dq_acc_v.y() / w_total,
+                                 dq_acc_v.z() / w_total);
+                    dq_mean.normalize();
+                    const Mat3d dR_mean = dq_mean.toRotationMatrix();
+                    const Vec3d dt_mean = dt_acc / w_total;
+
+                    // T_map_local_new = T_map_local_old ⊕ ΔT_mean
+                    // X_world = R_map * X_local + t_map
+                    // After delta: X_world = R_map * (dR * X_local_old + dt) + t_map
+                    //            = R_map * dR * X_local_new_approx
+                    // Simplified: just right-compose the delta
+                    T_map_local_t_ = T_map_local_t_ + T_map_local_R_ * dt_mean;
+                    T_map_local_R_ = T_map_local_R_ * dR_mean;
+
+                    // Update common keyframes to new local poses;
+                    // erase marginalized ones (no longer in window).
+                    for (auto it = last_snap_poses_.begin();
+                         it != last_snap_poses_.end();)
+                    {
+                        auto nit = new_pose_map.find(it->first);
+                        if (nit == new_pose_map.end())
+                        {
+                            it = last_snap_poses_.erase(it); // marginalized
+                        }
+                        else
+                        {
+                            it->second.R_local = nit->second->R_local;
+                            it->second.P_local = nit->second->P_local;
+                            ++it;
+                        }
+                    }
+
+                    // Fire callback with updated T_map_local
+                    TMapLocalCallback cb_copy;
+                    {
+                        std::lock_guard<std::mutex> cb_lk(cb_mutex_);
+                        cb_copy = callback_;
+                    }
+                    if (cb_copy)
+                        cb_copy(T_map_local_R_, T_map_local_t_);
+                }
+            }
+        }
+
         // ── Phase 2: eager per-slot resolution ──────────────────────────────
         //
         // For each (keyframe, gloc-module) slot that is still non-terminal
@@ -1034,14 +1149,25 @@ bool Gloc::runOptimization(std::vector<KeyframeGlocState> &working_set)
     for (int i = 0; i < X; ++i)
     {
         const auto &kf = working_set[i];
-        if (snapped_)
+
+        bool snapped_local;
+        Mat3d R_map_local;
+        Vec3d t_map_local;
+        {
+            std::lock_guard<std::mutex> lk(snap_mutex_);
+            snapped_local = snapped_;
+            R_map_local = T_map_local_R_;
+            t_map_local = T_map_local_t_;
+        }
+
+        if (snapped_local)
         {
             // Derive T_map_body[i] from last known T_map_local:
             //   R_world_body[i] = T_map_local_R_ * R_local_body[i]
             //   t_world_body[i] = T_map_local_R_ * P_local[i] + T_map_local_t_
             const Mat3d R_local_body = kf.R_local.toRotationMatrix();
-            const Mat3d R_world_body = T_map_local_R_ * R_local_body;
-            const Vec3d t_world_body = T_map_local_R_ * kf.P_local + T_map_local_t_;
+            const Mat3d R_world_body = R_map_local * R_local_body;
+            const Vec3d t_world_body = R_map_local * kf.P_local + t_map_local;
 
             const Eigen::AngleAxisd aa(R_world_body);
             const Vec3d ov = aa.axis() * aa.angle();
@@ -1277,8 +1403,12 @@ bool Gloc::runOptimization(std::vector<KeyframeGlocState> &working_set)
         }
 
         // World prior from last snapped T_map_local
-        if (add_prior && snapped_ && GLOC_W_WORLD_PRIOR > 0.0)
+        if (add_prior && GLOC_W_WORLD_PRIOR > 0.0)
         {
+            std::lock_guard<std::mutex> lk(snap_mutex_);
+            if (!snapped_)
+                return;
+
             for (int i = 0; i < X; ++i)
             {
                 const auto &kf = working_set[i];
@@ -1476,14 +1606,50 @@ bool Gloc::runOptimization(std::vector<KeyframeGlocState> &working_set)
                 q_acc_v.z() / w_total);
     q_mean.normalize();
 
-    T_map_local_R_ = q_mean.toRotationMatrix();
-    T_map_local_t_ = t_acc / w_total;
-    snapped_ = true;
+    {
+        std::lock_guard<std::mutex> lk(snap_mutex_);
+
+        T_map_local_R_ = q_mean.toRotationMatrix();
+        T_map_local_t_ = t_acc / w_total;
+        snapped_ = true;
+
+        // Persist local poses used in this solve for delta tracking
+        last_snap_poses_.clear();
+        for (int i = 0; i < X; ++i)
+        {
+            const auto &kf = working_set[i];
+            double w = 0.0;
+            for (const auto &slot : kf.per_gloc)
+                if (slot.pipeline_done && slot.best_train_idx >= 0)
+                    w += static_cast<double>(slot.pt_pairs_undistorted.size());
+            if (w < 1.0)
+                continue;
+            last_snap_poses_[kf.t_kf] = {kf.R_local, kf.P_local, w};
+        }
+    }
 
     ROS_INFO("[Gloc] Snapped! T_map_local t=[%.2f %.2f %.2f]",
              T_map_local_t_.x(), T_map_local_t_.y(), T_map_local_t_.z());
 
+    // Notify registered consumer (e.g. estimator) on the gloc worker thread.
+    // The callback must be lightweight — store and return.
+    {
+        std::lock_guard<std::mutex> lk(cb_mutex_);
+        if (callback_)
+            callback_(T_map_local_R_, T_map_local_t_);
+    }
+
     return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// setTMapLocalCallback
+// ─────────────────────────────────────────────────────────────────────────────
+
+void Gloc::setTMapLocalCallback(TMapLocalCallback cb)
+{
+    std::lock_guard<std::mutex> lk(cb_mutex_);
+    callback_ = std::move(cb);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

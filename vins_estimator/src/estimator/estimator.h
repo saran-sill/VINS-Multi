@@ -180,13 +180,10 @@ class Estimator
     {
       public:
         imgTracker(camera_module_info &cam_module, vector<shared_ptr<ImageFrame>> &image_frame_ptr, int max_feature_per_module)
-            : cam_info_{cam_module}
-            , featureTracker_{cam_module.depth_
-            , cam_module.stereo_
-            , max_feature_per_module}
-            , f_manager_(cam_module.depth_, cam_module.stereo_, image_frame_ptr)
-            // , image_buffer_(5U)
-            , image_buffer_(MAX_IMG_BUF_SIZE == -1 ? 30U : (unsigned int)(MAX_IMG_BUF_SIZE + 2))
+            : cam_info_{cam_module}, featureTracker_{cam_module.depth_, cam_module.stereo_, max_feature_per_module}, f_manager_(cam_module.depth_, cam_module.stereo_, image_frame_ptr)
+              // , image_buffer_(5U)
+              ,
+              image_buffer_(MAX_IMG_BUF_SIZE == -1 ? 30U : (unsigned int)(MAX_IMG_BUF_SIZE + 2))
         {
             ROS_WARN("set tracker, id %d", cam_module.module_id_);
             // featureTracker_.readIntrinsicParameter(cam_module.calib_file_);
@@ -393,7 +390,7 @@ class Estimator
 
     enum MarginalizationFlag
     {
-        MARGIN_OLD = 0, // the oldest frame in the window gets marginalized. This happens when the newly inserted frame has enough parallax relative to the second-newest frame, meaning it's a good keyframe worth keeping
+        MARGIN_OLD = 0,       // the oldest frame in the window gets marginalized. This happens when the newly inserted frame has enough parallax relative to the second-newest frame, meaning it's a good keyframe worth keeping
         MARGIN_SECOND_NEW = 1 // the second-newest frame (the previous frame) gets marginalized instead. This happens when the newly inserted frame has too little parallax — it's not informative enough to be a keyframe, so it's discarded and the old frames are kept
     };
 
@@ -509,6 +506,22 @@ class Estimator
     // for logging / out-of-order detection on the gloc side.
     gloc::Gloc *gloc_ptr_ = nullptr;
     uint64_t snapshot_seq_ = 0;
+
+    // ── T_map_local from gloc ─────────────────────────────────────────────────
+    //
+    // Updated by the gloc callback (gloc worker thread).
+    // Read by pubLatestOdometry via inputIMU (estimator thread).
+    // Protected by t_map_mutex_ — separate from mBuf_ to avoid any
+    // interaction with the estimator's main processing locks.
+    //
+    // Convention:  X_world = t_map_local_R_ * X_local + t_map_local_t_
+    mutable std::mutex t_map_mutex_;
+    bool t_map_snapped_{false};
+    Eigen::Matrix3d t_map_local_R_{Eigen::Matrix3d::Identity()};
+    Eigen::Vector3d t_map_local_t_{Eigen::Vector3d::Zero()};
+
+    // Called by the gloc callback to atomically update T_map_local.
+    void setTMapLocal(const Eigen::Matrix3d &R, const Eigen::Vector3d &t);
 };
 
 } // namespace vins_multi

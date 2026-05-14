@@ -9,29 +9,29 @@
 
 #pragma once
 
-#include <ros/ros.h>
-#include <std_msgs/Header.h>
-#include <std_msgs/Float32.h>
-#include <std_msgs/Bool.h>
-#include <sensor_msgs/Imu.h>
-#include <sensor_msgs/PointCloud.h>
-#include <sensor_msgs/Image.h>
-#include <sensor_msgs/image_encodings.h>
-#include <geometry_msgs/PoseArray.h>
-#include <cv_bridge/cv_bridge.h>
-#include <nav_msgs/Path.h>
-#include <nav_msgs/Odometry.h>
-#include <geometry_msgs/PointStamped.h>
-#include <visualization_msgs/Marker.h>
-#include <tf/transform_broadcaster.h>
-#include "CameraPoseVisualization.h"
-#include <eigen3/Eigen/Dense>
 #include "../estimator/estimator.h"
 #include "../estimator/parameters.h"
+#include "CameraPoseVisualization.h"
+#include <cv_bridge/cv_bridge.h>
+#include <eigen3/Eigen/Dense>
 #include <fstream>
+#include <geometry_msgs/PointStamped.h>
+#include <geometry_msgs/PoseArray.h>
+#include <nav_msgs/Odometry.h>
+#include <nav_msgs/Path.h>
+#include <ros/ros.h>
+#include <sensor_msgs/Image.h>
+#include <sensor_msgs/Imu.h>
+#include <sensor_msgs/PointCloud.h>
+#include <sensor_msgs/image_encodings.h>
+#include <std_msgs/Bool.h>
+#include <std_msgs/Float32.h>
+#include <std_msgs/Header.h>
+#include <tf/transform_broadcaster.h>
+#include <visualization_msgs/Marker.h>
 
-
-namespace vins_multi{
+namespace vins_multi
+{
 
 void registerPub(ros::NodeHandle &n);
 
@@ -59,6 +59,6 @@ void pubKeyframes(const Estimator &estimator);
 
 void pubRelocalization(const Estimator &estimator);
 
-void pubCar(const Estimator & estimator, const std_msgs::Header &header);
+void pubCar(const Estimator &estimator, const std_msgs::Header &header);
 
-}
+} // namespace vins_multi

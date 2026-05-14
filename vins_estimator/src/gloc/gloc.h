@@ -285,6 +285,22 @@ class Gloc
     bool init();
 
     // ─────────────────────────────────────────────────────────────────────────
+    // setTMapLocalCallback
+    //
+    // Register a callback fired on the gloc worker thread whenever a new
+    // T_map_local is accepted by runOptimization.
+    //
+    // Convention:  X_world = R * X_local + t
+    //
+    // The callback must be lightweight (e.g. store under a mutex and return).
+    // It runs on the gloc worker thread — do NOT acquire any lock that the
+    // caller's thread also holds, to avoid deadlock.
+    // ─────────────────────────────────────────────────────────────────────────
+    using TMapLocalCallback = std::function<void(const Eigen::Matrix3d &R,
+                                                 const Eigen::Vector3d &t)>;
+    void setTMapLocalCallback(TMapLocalCallback cb);
+
+    // ─────────────────────────────────────────────────────────────────────────
     // start_process_thread
     //
     // Starts the background processing loop.
@@ -395,7 +411,15 @@ class Gloc
     // Entry point for process_thread_.
     void processLoop();
 
-    // ── Snapped state ─────────────────────────────────────────────────────────
+    // ── T_map_local callback ──────────────────────────────────────────────────
+    mutable std::mutex cb_mutex_;
+    TMapLocalCallback callback_;
+
+    // ── Snapped state + snap poses ────────────────────────────────────────────
+    // Protected by snap_mutex_.
+    // Written by runOptimization (worker thread).
+    // Read by onSnapshotChanged (estimator thread) and init (main thread).
+    mutable std::mutex snap_mutex_;
     //
     // snapped_ becomes true after the first successful optimization round.
     // Once snapped, T_map_local_R_ and T_map_local_t_ hold the last accepted
@@ -407,6 +431,17 @@ class Gloc
     bool snapped_{false};
     Eigen::Matrix3d T_map_local_R_{Eigen::Matrix3d::Identity()};
     Eigen::Vector3d T_map_local_t_{Eigen::Vector3d::Zero()};
+
+    // Snapshot of local poses used in the last successful solve.
+    // Keyed by t_kf so we can match against new snapshots by timestamp.
+    // Used to compute ΔT_map_local when VINS re-adjusts local poses.
+    struct SnapPose
+    {
+        Eigen::Quaterniond R_local; // R_local_body at solve time
+        Eigen::Vector3d P_local;    // P_local_body at solve time
+        double weight;              // correspondence count (for weighted mean)
+    };
+    std::map<double, SnapPose> last_snap_poses_; // t_kf → SnapPose
 
     // Stage 2: build and solve the Ceres problem on working_set.
     // Returns true if the solution was accepted (inlier ratio ≥ threshold)
