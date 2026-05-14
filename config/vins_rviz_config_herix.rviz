@@ -38,7 +38,6 @@ Panels:
         - /VIO1/OdomHigh1/Shape1
         - /VIO1/OdomLow1/Shape1
         - /GLOC1
-        - /GLOC1/CamFrustums1/Status1
       Splitter Ratio: 0.5
     Tree Height: 582
 Preferences:
@@ -456,9 +455,9 @@ Visualization Manager:
         - Class: rviz/MarkerArray
           Enabled: true
           Marker Topic: /herix/gloc/map_frustums
-          Name: CamFrustums
+          Name: MapCamFrustums
           Namespaces:
-            {}
+            gloc_map_frustums: true
           Queue Size: 100
           Value: true
         - Alpha: 1
@@ -484,6 +483,55 @@ Visualization Manager:
           Shaft Length: 0.10000000149011612
           Topic: /herix/gloc/map_path
           Unreliable: false
+          Value: true
+        - Alpha: 1
+          Arrow Length: 0.30000001192092896
+          Axes Length: 0.30000001192092896
+          Axes Radius: 0.009999999776482582
+          Class: rviz/PoseArray
+          Color: 255; 25; 0
+          Enabled: true
+          Head Length: 0.07000000029802322
+          Head Radius: 0.029999999329447746
+          Name: OptPoses
+          Queue Size: 10
+          Shaft Length: 0.23000000417232513
+          Shaft Radius: 0.009999999776482582
+          Shape: Arrow (Flat)
+          Topic: /herix/gloc/opt_poses
+          Unreliable: false
+          Value: true
+        - Alpha: 1
+          Buffer Length: 1
+          Class: rviz/Path
+          Color: 25; 255; 0
+          Enabled: true
+          Head Diameter: 0.30000001192092896
+          Head Length: 0.20000000298023224
+          Length: 0.30000001192092896
+          Line Style: Lines
+          Line Width: 0.029999999329447746
+          Name: OptPath
+          Offset:
+            X: 0
+            Y: 0
+            Z: 0
+          Pose Color: 255; 85; 255
+          Pose Style: None
+          Queue Size: 10
+          Radius: 0.029999999329447746
+          Shaft Diameter: 0.10000000149011612
+          Shaft Length: 0.10000000149011612
+          Topic: /herix/gloc/opt_path
+          Unreliable: false
+          Value: true
+        - Class: rviz/MarkerArray
+          Enabled: true
+          Marker Topic: /herix/gloc/kf_status
+          Name: OptKfStatus
+          Namespaces:
+            {}
+          Queue Size: 100
           Value: true
       Enabled: true
       Name: GLOC
@@ -513,7 +561,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz/Orbit
-      Distance: 21.659589767456055
+      Distance: 33.089927673339844
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
@@ -521,17 +569,17 @@ Visualization Manager:
         Value: false
       Field of View: 0.7853981852531433
       Focal Point:
-        X: 0.49928316473960876
-        Y: -0.3357473313808441
-        Z: 0.4367910623550415
+        X: 1.802467942237854
+        Y: 8.660972595214844
+        Z: 2.686610221862793
       Focal Shape Fixed Size: false
       Focal Shape Size: 0.0010000000474974513
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.48979800939559937
+      Pitch: 0.8097978830337524
       Target Frame: <Fixed Frame>
-      Yaw: 5.962677478790283
+      Yaw: 3.117677688598633
     Saved: ~
 Window Geometry:
   Displays:

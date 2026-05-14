@@ -71,4 +71,22 @@ void pubGlocMap(const gloc::Gloc &gloc);
 // Convention: X_world = R * X_odom + t
 void broadcastWorldOdomTF(const Eigen::Matrix3d &R, const Eigen::Vector3d &t);
 
+// Publish optimized keyframe rig poses and path in world frame.
+// Called from the gloc worker thread after each successful runOptimization.
+//   poses     — one pose per keyframe: position = rig centre, orientation = rig rotation
+//   path_pts  — same positions in keyframe order for the path
+void pubGlocOptimized(const std::vector<geometry_msgs::Pose> &poses,
+                      const std::vector<geometry_msgs::Point> &path_pts);
+
+// Returns true if at least one subscriber is listening on either
+// gloc/opt_poses or gloc/opt_path. Use to skip message building entirely.
+bool hasGlocOptimizedSubscribers();
+
+// Publish keyframe status spheres in world frame.
+//   status 2 = green  (valid gloc match)
+//   status 1 = red    (pipeline done, no valid match)
+//   status 0 = yellow (not yet processed)
+void pubGlocKeyframeStatus(
+    const std::vector<std::pair<Eigen::Vector3d, int>> &kf_status_vec);
+
 } // namespace vins_multi

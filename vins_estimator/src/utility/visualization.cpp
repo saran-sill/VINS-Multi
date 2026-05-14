@@ -17,6 +17,7 @@ namespace vins_multi
 
 ros::Publisher pub_odometry, pub_latest_odometry, pub_latest_odometry_world;
 ros::Publisher pub_gloc_map_frustums, pub_gloc_map_path;
+ros::Publisher pub_gloc_opt_poses, pub_gloc_opt_path, pub_gloc_kf_status;
 ros::Publisher pub_path;
 std::vector<ros::Publisher> pub_point_cloud;
 ros::Publisher pub_margin_cloud;
@@ -57,6 +58,12 @@ void registerPub(ros::NodeHandle &n)
         "gloc/map_frustums", 1, /*latch=*/true);
     pub_gloc_map_path = n.advertise<nav_msgs::Path>(
         "gloc/map_path", 1, /*latch=*/true);
+    pub_gloc_opt_poses = n.advertise<geometry_msgs::PoseArray>(
+        "gloc/opt_poses", 10);
+    pub_gloc_opt_path = n.advertise<nav_msgs::Path>(
+        "gloc/opt_path", 10);
+    pub_gloc_kf_status = n.advertise<visualization_msgs::MarkerArray>(
+        "gloc/kf_status", 10);
     pub_path = n.advertise<nav_msgs::Path>("path", 1000);
     pub_odometry = n.advertise<nav_msgs::Odometry>("odomimu_lowhz", 1000);
     // pub_key_poses = n.advertise<visualization_msgs::Marker>("key_poses", 1000);
@@ -846,6 +853,136 @@ void pubKeyframes(const Estimator &estimator)
 
     if (num_sub_kf_poses > 0)
         pub_keyframe_poses.publish(keyframe_poses);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// pubGlocOptimized
+//
+// Publishes optimized keyframe rig poses and path in world frame.
+// Called from the gloc worker thread after each successful runOptimization.
+//
+// Topics:
+//   gloc/opt_poses  — geometry_msgs/PoseArray  (one pose per keyframe)
+//   gloc/opt_path   — nav_msgs/Path, cyan       (keyframe rig centres in order)
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool hasGlocOptimizedSubscribers()
+{
+    return pub_gloc_opt_poses.getNumSubscribers() > 0 || pub_gloc_opt_path.getNumSubscribers() > 0 || pub_gloc_kf_status.getNumSubscribers() > 0;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// pubGlocKeyframeStatus
+//
+// Publishes one sphere marker per keyframe coloured by gloc status:
+//   Green  — at least one valid gloc match  (best_train_idx >= 0, pipeline_done)
+//   Red    — pipeline done but no valid match (voted out / too few inliers)
+//   Yellow — not yet processed               (pipeline_done == false)
+//
+// Topic: gloc/kf_status  (MarkerArray)
+// ─────────────────────────────────────────────────────────────────────────────
+
+void pubGlocKeyframeStatus(
+    const std::vector<std::pair<Eigen::Vector3d, int>> &kf_status_vec)
+{
+    if (pub_gloc_kf_status.getNumSubscribers() == 0)
+        return;
+
+    visualization_msgs::MarkerArray ma;
+    ma.markers.reserve(kf_status_vec.size() + 1);
+
+    // First add a DELETE_ALL marker to clear stale spheres from last round
+    visualization_msgs::Marker del;
+    del.header.frame_id = "world";
+    del.header.stamp = ros::Time::now();
+    del.ns = "gloc_kf_status";
+    del.action = visualization_msgs::Marker::DELETEALL;
+    ma.markers.push_back(del);
+
+    int id = 0;
+    for (const auto &[pos, status] : kf_status_vec)
+    {
+        visualization_msgs::Marker m;
+        m.header.frame_id = "world";
+        m.header.stamp = ros::Time::now();
+        m.ns = "gloc_kf_status";
+        m.id = id++;
+        m.type = visualization_msgs::Marker::SPHERE;
+        m.action = visualization_msgs::Marker::ADD;
+
+        m.pose.position.x = pos.x();
+        m.pose.position.y = pos.y();
+        m.pose.position.z = pos.z();
+        m.pose.orientation.w = 1.0;
+
+        m.scale.x = m.scale.y = m.scale.z = 0.5;
+
+        // status: 2=valid(green), 1=no match(red), 0=not processed(yellow)
+        if (status == 2) // green — valid gloc match
+        {
+            m.color.r = 0.0f;
+            m.color.g = 1.0f;
+            m.color.b = 0.0f;
+        }
+        else if (status == 1) // red — pipeline done, no valid match
+        {
+            m.color.r = 1.0f;
+            m.color.g = 0.0f;
+            m.color.b = 0.0f;
+        }
+        else // yellow — not processed
+        {
+            m.color.r = 1.0f;
+            m.color.g = 1.0f;
+            m.color.b = 0.0f;
+        }
+        m.color.a = 1.0f;
+
+        ma.markers.push_back(m);
+    }
+
+    pub_gloc_kf_status.publish(ma);
+}
+
+void pubGlocOptimized(const std::vector<geometry_msgs::Pose> &poses,
+                      const std::vector<geometry_msgs::Point> &path_pts)
+{
+    const bool has_pose_sub = pub_gloc_opt_poses.getNumSubscribers() > 0;
+    const bool has_path_sub = pub_gloc_opt_path.getNumSubscribers() > 0;
+
+    if (!has_pose_sub && !has_path_sub)
+        return;
+
+    const ros::Time now = ros::Time::now();
+
+    // ── PoseArray ─────────────────────────────────────────────────────────────
+    if (has_pose_sub)
+    {
+        geometry_msgs::PoseArray pose_array;
+        pose_array.header.stamp = now;
+        pose_array.header.frame_id = "world";
+        pose_array.poses = poses;
+        pub_gloc_opt_poses.publish(pose_array);
+    }
+
+    // ── Path (cyan — set in RViz display settings) ────────────────────────────
+    if (has_path_sub)
+    {
+        nav_msgs::Path path;
+        path.header.stamp = now;
+        path.header.frame_id = "world";
+        path.poses.reserve(path_pts.size());
+
+        for (const auto &pt : path_pts)
+        {
+            geometry_msgs::PoseStamped ps;
+            ps.header = path.header;
+            ps.pose.position = pt;
+            ps.pose.orientation.w = 1.0;
+            path.poses.push_back(ps);
+        }
+        pub_gloc_opt_path.publish(path);
+    }
 }
 
 } // namespace vins_multi

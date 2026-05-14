@@ -8,8 +8,11 @@
 #include <sstream>
 #include <stdexcept>
 
+#include "../utility/visualization.h"
 #include "colmap_util.h"
 #include "estimator/parameters.h" // for vins_multi::GLOC_CAM_MODULES
+#include <geometry_msgs/Point.h>
+#include <geometry_msgs/Pose.h>
 
 namespace fs = std::filesystem;
 
@@ -1631,6 +1634,85 @@ bool Gloc::runOptimization(std::vector<KeyframeGlocState> &working_set)
 
     ROS_INFO("[Gloc] Snapped! T_map_local t=[%.2f %.2f %.2f]",
              T_map_local_t_.x(), T_map_local_t_.y(), T_map_local_t_.z());
+
+    // ── Publish optimized poses and path ─────────────────────────────────────
+    // For each keyframe, compute the average rig centre across all valid
+    // gloc modules (multiple cameras on the same rig → average position).
+    if (vins_multi::hasGlocOptimizedSubscribers())
+    {
+        std::vector<geometry_msgs::Pose> opt_poses;
+        std::vector<geometry_msgs::Point> opt_path_pts;
+        opt_poses.reserve(X);
+        opt_path_pts.reserve(X);
+
+        for (int i = 0; i < X; ++i)
+        {
+            const Eigen::Map<const Vec3d> ov(omega_kf[i].data());
+            const double norm = ov.norm();
+            const Mat3d R_world_body = Eigen::AngleAxisd(
+                                           norm, norm > 1e-8 ? (ov / norm).eval() : Vec3d::UnitZ())
+                                           .toRotationMatrix();
+            const Vec3d t_world_body(t_kf[i][0], t_kf[i][1], t_kf[i][2]);
+
+            // All keyframes have optimized poses — publish regardless of
+            // whether they had valid gloc observations (they're still
+            // constrained via relative pose and world prior terms).
+            const Quat q_world_body(R_world_body);
+
+            geometry_msgs::Pose pose;
+            pose.position.x = t_world_body.x();
+            pose.position.y = t_world_body.y();
+            pose.position.z = t_world_body.z();
+            pose.orientation.x = q_world_body.x();
+            pose.orientation.y = q_world_body.y();
+            pose.orientation.z = q_world_body.z();
+            pose.orientation.w = q_world_body.w();
+            opt_poses.push_back(pose);
+
+            geometry_msgs::Point pt;
+            pt.x = t_world_body.x();
+            pt.y = t_world_body.y();
+            pt.z = t_world_body.z();
+            opt_path_pts.push_back(pt);
+        }
+
+        vins_multi::pubGlocOptimized(opt_poses, opt_path_pts);
+
+        // ── Keyframe status markers ───────────────────────────────────────────
+        std::vector<std::pair<Eigen::Vector3d, int>> kf_status_vec;
+        kf_status_vec.reserve(X);
+        for (int i = 0; i < X; ++i)
+        {
+            const Eigen::Map<const Vec3d> ov(omega_kf[i].data());
+            const double norm = ov.norm();
+            const Mat3d R_wb = Eigen::AngleAxisd(
+                                   norm, norm > 1e-8 ? (ov / norm).eval() : Vec3d::UnitZ())
+                                   .toRotationMatrix();
+            (void)R_wb;
+            const Vec3d pos(t_kf[i][0], t_kf[i][1], t_kf[i][2]);
+
+            // Determine status from per_gloc slots
+            int status = 0; // not processed
+            bool any_done = false;
+            for (const auto &slot : working_set[i].per_gloc)
+            {
+                if (slot.pipeline_done)
+                {
+                    any_done = true;
+                    if (slot.best_train_idx >= 0)
+                    {
+                        status = 2; // valid match — green
+                        break;
+                    }
+                }
+            }
+            if (status == 0 && any_done)
+                status = 1; // pipeline done but no valid match — red
+
+            kf_status_vec.push_back({pos, status});
+        }
+        vins_multi::pubGlocKeyframeStatus(kf_status_vec);
+    }
 
     // Notify registered consumer (e.g. estimator) on the gloc worker thread.
     // The callback must be lightweight — store and return.
