@@ -16,6 +16,7 @@ namespace vins_multi
 {
 
 ros::Publisher pub_odometry, pub_latest_odometry, pub_latest_odometry_world;
+ros::Publisher pub_gloc_map_frustums, pub_gloc_map_path;
 ros::Publisher pub_path;
 std::vector<ros::Publisher> pub_point_cloud;
 ros::Publisher pub_margin_cloud;
@@ -50,6 +51,12 @@ void registerPub(ros::NodeHandle &n)
 {
     pub_latest_odometry = n.advertise<nav_msgs::Odometry>("odomimu", 1000);
     pub_latest_odometry_world = n.advertise<nav_msgs::Odometry>("odomimu_world", 1000);
+
+    // Latched — published once after map load, any late subscriber still receives.
+    pub_gloc_map_frustums = n.advertise<visualization_msgs::MarkerArray>(
+        "gloc/map_frustums", 1, /*latch=*/true);
+    pub_gloc_map_path = n.advertise<nav_msgs::Path>(
+        "gloc/map_path", 1, /*latch=*/true);
     pub_path = n.advertise<nav_msgs::Path>("path", 1000);
     pub_odometry = n.advertise<nav_msgs::Odometry>("odomimu_lowhz", 1000);
     // pub_key_poses = n.advertise<visualization_msgs::Marker>("key_poses", 1000);
@@ -73,6 +80,142 @@ void registerPub(ros::NodeHandle &n)
     cameraposevisual.setLineWidth(0.01);
 }
 
+void pubGlocMap(const gloc::Gloc &gloc)
+{
+    const gloc::Map &map = gloc.getMap();
+
+    if (map.images.empty())
+    {
+        ROS_WARN("[pubGlocMap] Map has no images — nothing to publish.");
+        return;
+    }
+
+    const ros::Time now = ros::Time::now();
+    const std::string frame_id = "world";
+
+    // Helper: compute rig centre and orientation in world frame for an image.
+    //
+    // Camera centre in world:   o_cam = -R_cw^T * t_cw
+    // Rig centre in world:      o_rig = o_cam - R_cw^T * R_cam_rig^T * t_cam_rig
+    // Rig orientation in world: q_w_rig = q_wc * q_cam_rig^{-1}
+    //
+    // If no cam_rig_map entry exists, treat as identity extrinsic (R=I, t=0)
+    // and fall back to camera pose.
+    auto rig_pose = [&](const colmap::Image &img)
+        -> std::pair<Eigen::Vector3d, Eigen::Quaterniond> {
+        const Eigen::Matrix3d R_cw = img.q_c_w.toRotationMatrix();
+        const Eigen::Vector3d o_cam = -(R_cw.transpose() * img.t_c_w);
+        const Eigen::Quaterniond q_wc(R_cw.transpose());
+
+        auto it = map.cam_rig_map.find(img.camera_id);
+        if (it == map.cam_rig_map.end())
+            return {o_cam, q_wc};
+
+        const colmap::CamRigTransform &cr = it->second;
+        const Eigen::Vector3d o_rig =
+            o_cam - R_cw.transpose() * cr.R_cam_rig.transpose() * cr.t_cam_rig;
+        const Eigen::Quaterniond q_w_rig =
+            q_wc * Eigen::Quaterniond(cr.R_cam_rig).inverse();
+
+        return {o_rig, q_w_rig};
+    };
+
+    // ── Camera frustums (MarkerArray, latched) ────────────────────────────────
+    // One frustum per image, positioned and oriented at the rig centre.
+
+    CameraPoseVisualization cam_vis(1.0f, 0.0f, 0.0f, 1.0f); // red, alpha=1
+    cam_vis.setScale(0.3);
+    cam_vis.setLineWidth(0.02);
+
+    for (const auto &img : map.images)
+    {
+        const auto [o_rig, q_w_rig] = rig_pose(img);
+        cam_vis.add_pose(o_rig, q_w_rig);
+    }
+
+    std_msgs::Header hdr;
+    hdr.stamp = now;
+    hdr.frame_id = frame_id;
+    cam_vis.publish_by(pub_gloc_map_frustums, hdr);
+
+    ROS_INFO("[pubGlocMap] Published %zu camera frustums on gloc/map_frustums",
+             map.images.size());
+
+    // ── Rig path (nav_msgs/Path, latched) ─────────────────────────────────────
+    // Connect rig centres in ascending image_id order.
+
+    std::vector<const colmap::Image *> sorted_imgs;
+    sorted_imgs.reserve(map.images.size());
+    for (const auto &img : map.images)
+        sorted_imgs.push_back(&img);
+    std::sort(sorted_imgs.begin(), sorted_imgs.end(),
+              [](const colmap::Image *a, const colmap::Image *b) {
+                  return a->image_id < b->image_id;
+              });
+
+    // ── Rig path (nav_msgs/Path, latched) ─────────────────────────────────────
+    // One pose per unique rig position, sorted by image_id of the representative.
+    // Multiple cameras on the same rig share the same rig centre — we keep only
+    // one path pose per rig to avoid duplicate/overlapping points.
+    //
+    // Grouping key: cam_rig_map[camera_id].rig_id if available,
+    //               otherwise camera_id (each camera is its own "rig").
+    //
+    // Representative: lowest image_id within the group (deterministic).
+
+    // Build a map: rig_key → representative image (lowest image_id)
+    std::map<uint32_t, const colmap::Image *> rig_rep; // rig_key → image*
+
+    for (const auto *img : sorted_imgs) // already sorted ascending by image_id
+    {
+        uint32_t rig_key;
+        auto cr_it = map.cam_rig_map.find(img->camera_id);
+        if (cr_it != map.cam_rig_map.end())
+            rig_key = cr_it->second.rig_id;
+        else
+            rig_key = img->camera_id; // no rig — treat camera as its own rig
+
+        // try_emplace only inserts if key is new → keeps lowest image_id
+        rig_rep.try_emplace(rig_key, img);
+    }
+
+    nav_msgs::Path map_path;
+    map_path.header.stamp = now;
+    map_path.header.frame_id = frame_id;
+    map_path.poses.reserve(rig_rep.size());
+
+    // Sort representatives by image_id for a clean chronological path
+    std::vector<const colmap::Image *> rep_imgs;
+    rep_imgs.reserve(rig_rep.size());
+    for (const auto &[key, img] : rig_rep)
+        rep_imgs.push_back(img);
+    std::sort(rep_imgs.begin(), rep_imgs.end(),
+              [](const colmap::Image *a, const colmap::Image *b) {
+                  return a->image_id < b->image_id;
+              });
+
+    for (const auto *img : rep_imgs)
+    {
+        const auto [o_rig, q_w_rig] = rig_pose(*img);
+
+        geometry_msgs::PoseStamped ps;
+        ps.header = map_path.header;
+        ps.pose.position.x = o_rig.x();
+        ps.pose.position.y = o_rig.y();
+        ps.pose.position.z = o_rig.z();
+        ps.pose.orientation.x = q_w_rig.x();
+        ps.pose.orientation.y = q_w_rig.y();
+        ps.pose.orientation.z = q_w_rig.z();
+        ps.pose.orientation.w = q_w_rig.w();
+        map_path.poses.push_back(ps);
+    }
+
+    pub_gloc_map_path.publish(map_path);
+
+    ROS_INFO("[pubGlocMap] Published map path with %zu poses on gloc/map_path",
+             map_path.poses.size());
+}
+
 void pubLatestOdometry(const Estimator &estimator)
 {
 
@@ -89,7 +232,7 @@ void pubLatestOdometry(const Estimator &estimator)
 
     nav_msgs::Odometry odometry;
     odometry.header.stamp = ros::Time(t);
-    odometry.header.frame_id = "world";
+    odometry.header.frame_id = "odom";
 
     Eigen::Vector3d w_T_center, v_center, a_center, omega_center;
     Eigen::Matrix3d w_R_center;
@@ -140,10 +283,9 @@ void pubLatestOdometry(const Estimator &estimator)
             const Eigen::Matrix3d &Rm = estimator.t_map_local_R_;
             const Eigen::Vector3d &tm = estimator.t_map_local_t_;
 
-            nav_msgs::Odometry odom_world = odometry; // copy header, twist
-            odom_world.header.frame_id = "map";
+            nav_msgs::Odometry odom_world = odometry;
+            odom_world.header.frame_id = "world";
 
-            // Transform position and rotation into world frame
             const Eigen::Vector3d t_world = Rm * w_T_center + tm;
             const Eigen::Matrix3d R_world = Rm * w_R_center;
             const Eigen::Quaterniond q_world(R_world);
@@ -156,7 +298,6 @@ void pubLatestOdometry(const Estimator &estimator)
             odom_world.pose.pose.orientation.z = q_world.z();
             odom_world.pose.pose.orientation.w = q_world.w();
 
-            // Velocity and angular rate are expressed in body frame — no change needed
             pub_latest_odometry_world.publish(odom_world);
         }
     }
@@ -209,7 +350,7 @@ void pubTrackImage(const cv::Mat &imgTrack, const double t, const unsigned int c
     if (pub_image_track[cam_unique_id].getNumSubscribers() > 0)
     {
         std_msgs::Header header;
-        header.frame_id = "world";
+        header.frame_id = "odom";
         header.stamp = ros::Time(t);
         sensor_msgs::ImagePtr imgTrackMsg = cv_bridge::CvImage(header, "bgr8", imgTrack).toImageMsg();
         pub_image_track[cam_unique_id].publish(imgTrackMsg);
@@ -275,8 +416,8 @@ void pubOdometry(const Estimator &estimator)
         auto time_stamp = ros::Time(estimator.image_frame_window_.all_image_frame_ptr_.rbegin()->second->t_);
         nav_msgs::Odometry odometry;
         odometry.header.stamp = time_stamp;
-        odometry.header.frame_id = "world";
-        odometry.child_frame_id = "world";
+        odometry.header.frame_id = "odom";
+        odometry.child_frame_id = "odom";
         Quaterniond tmp_Q(estimator.image_frame_window_.all_image_frame_ptr_.rbegin()->second->R_);
         Vector3d tmp_P = estimator.image_frame_window_.all_image_frame_ptr_.rbegin()->second->T_;
         Vector3d tmp_V = estimator.image_frame_window_.all_image_frame_ptr_.rbegin()->second->V_;
@@ -296,10 +437,10 @@ void pubOdometry(const Estimator &estimator)
         {
             geometry_msgs::PoseStamped pose_stamped;
             pose_stamped.header.stamp = time_stamp;
-            pose_stamped.header.frame_id = "world";
+            pose_stamped.header.frame_id = "odom";
             pose_stamped.pose = odometry.pose.pose;
             path.header.stamp = time_stamp;
-            path.header.frame_id = "world";
+            path.header.frame_id = "odom";
             path.poses.push_back(pose_stamped);
             pub_path.publish(path);
         }
@@ -334,7 +475,7 @@ void pubKeyPoses(const Estimator &estimator)
         return;
     visualization_msgs::Marker key_poses;
     key_poses.header.stamp = ros::Time(estimator.image_frame_window_.all_image_frame_ptr_.rbegin()->second->t_);
-    key_poses.header.frame_id = "world";
+    key_poses.header.frame_id = "odom";
     key_poses.ns = "key_poses";
     key_poses.type = visualization_msgs::Marker::SPHERE_LIST;
     key_poses.action = visualization_msgs::Marker::ADD;
@@ -374,7 +515,7 @@ void pubCameraPose(const Estimator &estimator, const unsigned int unique_id)
 
         geometry_msgs::PoseStamped odometry;
         odometry.header.stamp = stamp;
-        odometry.header.frame_id = "world";
+        odometry.header.frame_id = "odom";
         odometry.pose.position.x = P.x();
         odometry.pose.position.y = P.y();
         odometry.pose.position.z = P.z();
@@ -395,7 +536,7 @@ void pubPointCloud(const Estimator &estimator, const unsigned int unique_id)
     {
         sensor_msgs::PointCloud point_cloud, loop_point_cloud;
         point_cloud.header.stamp = stamp;
-        point_cloud.header.frame_id = "world";
+        point_cloud.header.frame_id = "odom";
 
         for (auto &it_per_id : estimator.img_trackers_[unique_id]->f_manager_.feature_)
         {
@@ -424,7 +565,7 @@ void pubPointCloud(const Estimator &estimator, const unsigned int unique_id)
     {
         sensor_msgs::PointCloud margin_cloud;
         margin_cloud.header.stamp = stamp;
-        margin_cloud.header.frame_id = "world";
+        margin_cloud.header.frame_id = "odom";
 
         auto &margin_frame_ptr = estimator.image_frame_window_.all_image_frame_ptr_.begin()->second;
         int margin_cam_unique_id = margin_frame_ptr->cam_module_unique_id_;
@@ -455,6 +596,30 @@ void pubPointCloud(const Estimator &estimator, const unsigned int unique_id)
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// broadcastWorldOdomTF
+//
+// Broadcasts the world → odom TF transform from T_map_local.
+// Called only when T_map_local changes (from the gloc callback via rosNode),
+// not at the full estimator rate.
+//
+// Convention:  X_world = R * X_odom + t
+// ─────────────────────────────────────────────────────────────────────────────
+
+void broadcastWorldOdomTF(const Eigen::Matrix3d &R, const Eigen::Vector3d &t)
+{
+    static tf::TransformBroadcaster br;
+
+    tf::Transform transform;
+    transform.setOrigin(tf::Vector3(t.x(), t.y(), t.z()));
+
+    const Eigen::Quaterniond q(R);
+    transform.setRotation(tf::Quaternion(q.x(), q.y(), q.z(), q.w()));
+
+    br.sendTransform(tf::StampedTransform(
+        transform, ros::Time::now(), "world", "odom"));
+}
+
 void pubTF(const Estimator &estimator)
 {
     if (estimator.solver_flag_ != Estimator::SolverFlag::NON_LINEAR)
@@ -478,7 +643,7 @@ void pubTF(const Estimator &estimator)
     q.setY(correct_q.y());
     q.setZ(correct_q.z());
     transform.setRotation(q);
-    br.sendTransform(tf::StampedTransform(transform, stamp, "world", "body"));
+    br.sendTransform(tf::StampedTransform(transform, stamp, "odom", "body"));
 
     // camera frame
     for (unsigned int i = 0; i < estimator.img_trackers_.size(); i++)
@@ -498,7 +663,7 @@ void pubTF(const Estimator &estimator)
 
         nav_msgs::Odometry odometry;
         odometry.header.stamp = stamp;
-        odometry.header.frame_id = "world";
+        odometry.header.frame_id = "odom";
         odometry.pose.pose.position.x = tic.x();
         odometry.pose.pose.position.y = tic.y();
         odometry.pose.pose.position.z = tic.z();
@@ -520,7 +685,7 @@ void pubKeyframe(const Estimator &estimator)
 
         nav_msgs::Odometry odometry;
         odometry.header.stamp = ros::Time(estimator.image_frame_window_.all_image_frame_ptr_.rbegin()->second->t_);
-        odometry.header.frame_id = "world";
+        odometry.header.frame_id = "odom";
         odometry.pose.pose.position.x = P.x();
         odometry.pose.pose.position.y = P.y();
         odometry.pose.pose.position.z = P.z();
@@ -549,7 +714,7 @@ void pubKeyframes(const Estimator &estimator)
 
         nav_msgs::Odometry odometry;
         odometry.header.stamp = stamp;
-        odometry.header.frame_id = "world";
+        odometry.header.frame_id = "odom";
         odometry.pose.pose.position.x = P.x();
         odometry.pose.pose.position.y = P.y();
         odometry.pose.pose.position.z = P.z();
@@ -570,7 +735,7 @@ void pubKeyframes(const Estimator &estimator)
     nav_msgs::Path keyframe_path;
     geometry_msgs::PoseArray keyframe_poses;
     keyframe_path.header.stamp = stamp;
-    keyframe_path.header.frame_id = "world";
+    keyframe_path.header.frame_id = "odom";
     keyframe_poses.header = keyframe_path.header;
 
     for (const auto &kv : estimator.image_frame_window_.all_image_frame_ptr_)
@@ -594,7 +759,7 @@ void pubKeyframes(const Estimator &estimator)
         {
             geometry_msgs::PoseStamped ps;
             ps.header.stamp = ros::Time(kv.second->t_);
-            ps.header.frame_id = "world";
+            ps.header.frame_id = "odom";
             ps.pose = pose;
 
             keyframe_path.poses.push_back(ps);
@@ -610,4 +775,5 @@ void pubKeyframes(const Estimator &estimator)
     if (num_sub_kf_poses > 0)
         pub_keyframe_poses.publish(keyframe_poses);
 }
+
 } // namespace vins_multi

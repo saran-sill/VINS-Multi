@@ -461,7 +461,20 @@ void VinsNodeBaseClass::Init(ros::NodeHandle &n, const std::string &config_file)
     // when gloc is disabled keeps the snapshot-handoff branch in
     // processWindow as a single null-check away from being free.
     if (gloc::GLOC_ENABLED)
+    {
         estimator_.setGloc(&gloc_);
+
+        // Register callback: fired on the gloc worker thread whenever
+        // T_map_local changes (new solve or local-pose delta correction).
+        // Updates the estimator and broadcasts world → odom TF.
+        gloc_.setTMapLocalCallback(
+            [this](const Eigen::Matrix3d &R, const Eigen::Vector3d &t) {
+                estimator_.setTMapLocal(R, t);
+                vins_multi::broadcastWorldOdomTF(R, t);
+            });
+
+        pubGlocMap(gloc_);
+    }
 
     estimator_.start_process_thread();
 

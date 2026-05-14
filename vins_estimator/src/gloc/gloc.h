@@ -284,6 +284,12 @@ class Gloc
     // ─────────────────────────────────────────────────────────────────────────
     bool init();
 
+    // Returns the loaded COLMAP map. Valid after init() succeeds.
+    const Map &getMap() const
+    {
+        return map_;
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // setTMapLocalCallback
     //
