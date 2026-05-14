@@ -115,6 +115,20 @@ void readParameters(std::string config_file)
     read_if(fsSettings, "gloc_match_min_inliers", gloc::GLOC_MATCH_MIN_INLIERS);
     read_if(fsSettings, "gloc_subsample_min_dist_px", gloc::GLOC_SUBSAMPLE_MIN_DIST_PX);
 
+    // ── Stage 2 — optimization ───────────────────────────────────────────────
+    read_if(fsSettings, "gloc_min_pairs", gloc::GLOC_MIN_PAIRS);
+    read_if(fsSettings, "gloc_rel_pose_k", gloc::GLOC_REL_POSE_K);
+    read_if(fsSettings, "gloc_w_epipolar", gloc::GLOC_W_EPIPOLAR);
+    read_if(fsSettings, "gloc_w_reproj", gloc::GLOC_W_REPROJ);
+    read_if(fsSettings, "gloc_w_rel_pose", gloc::GLOC_W_REL_POSE);
+    read_if(fsSettings, "gloc_w_world_prior", gloc::GLOC_W_WORLD_PRIOR);
+    read_if(fsSettings, "gloc_huber_delta", gloc::GLOC_HUBER_DELTA);
+    read_if(fsSettings, "gloc_inlier_thresh_px", gloc::GLOC_INLIER_THRESH_PX);
+    read_if(fsSettings, "gloc_max_iters", gloc::GLOC_MAX_ITERS);
+    read_if(fsSettings, "gloc_init_iters", gloc::GLOC_INIT_ITERS);
+    read_if(fsSettings, "gloc_min_inlier_ratio", gloc::GLOC_MIN_INLIER_RATIO);
+    read_if(fsSettings, "gloc_max_depth_m", gloc::GLOC_MAX_DEPTH_M);
+
     printf("GLOC_ENABLED            : %d\n", gloc::GLOC_ENABLED);
     printf("GLOC_COLMAP_FOLDER      : %s\n", gloc::GLOC_COLMAP_FOLDER.c_str());
     printf("GLOC_COLMAP_IMG_FOLDER  : %s\n", gloc::GLOC_COLMAP_IMG_FOLDER.c_str());
@@ -134,6 +148,32 @@ void readParameters(std::string config_file)
     printf("GLOC_ORB_NFEATURES      : %d\n", gloc::GLOC_ORB_NFEATURES);
     printf("GLOC_MATCH_MIN_INLIERS  : %d\n", gloc::GLOC_MATCH_MIN_INLIERS);
     printf("GLOC_SUBSAMPLE_MIN_DIST : %.1f\n", gloc::GLOC_SUBSAMPLE_MIN_DIST_PX);
+    printf("GLOC_MIN_PAIRS          : %d\n", gloc::GLOC_MIN_PAIRS);
+    printf("GLOC_REL_POSE_K         : %d\n", gloc::GLOC_REL_POSE_K);
+    printf("GLOC_W_EPIPOLAR         : %.2f\n", gloc::GLOC_W_EPIPOLAR);
+    printf("GLOC_W_REPROJ           : %.2f\n", gloc::GLOC_W_REPROJ);
+    printf("GLOC_W_REL_POSE         : %.2f\n", gloc::GLOC_W_REL_POSE);
+    printf("GLOC_W_WORLD_PRIOR      : %.2f\n", gloc::GLOC_W_WORLD_PRIOR);
+    printf("GLOC_HUBER_DELTA        : %.2f\n", gloc::GLOC_HUBER_DELTA);
+    printf("GLOC_INLIER_THRESH_PX   : %.2f\n", gloc::GLOC_INLIER_THRESH_PX);
+    printf("GLOC_MAX_ITERS          : %d\n", gloc::GLOC_MAX_ITERS);
+    printf("GLOC_INIT_ITERS      : %d\n", gloc::GLOC_INIT_ITERS);
+    printf("GLOC_MIN_INLIER_RATIO   : %.2f\n", gloc::GLOC_MIN_INLIER_RATIO);
+    printf("GLOC_MAX_DEPTH_M        : %.1f\n", gloc::GLOC_MAX_DEPTH_M);
 }
+
+// ── Stage 2 — Ceres optimization ─────────────────────────────────────────────
+int GLOC_MIN_PAIRS = 3;
+int GLOC_REL_POSE_K = 1;
+double GLOC_W_EPIPOLAR = 1.0;
+double GLOC_W_REPROJ = 1.0;
+double GLOC_W_REL_POSE = 1.0;
+double GLOC_W_WORLD_PRIOR = 10.0;
+double GLOC_HUBER_DELTA = 5.0;
+double GLOC_INLIER_THRESH_PX = 10.0;
+int GLOC_MAX_ITERS = 150;
+int GLOC_INIT_ITERS = 20;
+double GLOC_MIN_INLIER_RATIO = 0.3;
+double GLOC_MAX_DEPTH_M = 200.0;
 
 }; // namespace gloc

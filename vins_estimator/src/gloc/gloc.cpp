@@ -501,14 +501,7 @@ void Gloc::processLoop()
         runCorrespondences(working_set);
         writeBackToStateMap(working_set);
 
-        // TODO (next stage):
-        //   2. Build the Ceres problem: per-keyframe T_map_body variables,
-        //      soft-constraint factors between adjacent keyframes, gloc factors
-        //      from cached correspondences.
-        //   3. Solve.
-        //   4. Collapse optimised T_map_body's into a weighted SE(3) mean
-        //      T_map_local.
-        //   5. Atomically publish T_map_local for consumers.
+        runOptimization(working_set);
     }
 
     std::cout << "[Gloc] processLoop exiting.\n";
@@ -986,6 +979,511 @@ void Gloc::writeBackToStateMap(const std::vector<KeyframeGlocState> &working_set
             dst.pipeline_done = true;
         }
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// runOptimization
+//
+// Stage 2: joint Ceres optimization over all keyframes in working_set.
+//
+// Coordinate conventions (see also gloc_cost_functors.h):
+//
+//   R_local, P_local  represent  T_local_body:
+//     X_local = R_local * X_body + P_local
+//     R_local ≡ R_local_body  (rotation body → local)
+//     P_local ≡ t_local_body  (position of body origin in local frame)
+//
+//   Optimisation variable per keyframe i:
+//     omega_i[3]  axis-angle of R_body_world[i]  (world → body)
+//     t_i[3]      t_world_body[i]  (position of body in world frame)
+//
+//   T_map_local convention (output):
+//     X_world = R_map_local * X_local + t_map_local
+//
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool Gloc::runOptimization(std::vector<KeyframeGlocState> &working_set)
+{
+    using Mat3d = Eigen::Matrix3d;
+    using Vec3d = Eigen::Vector3d;
+    using Quat = Eigen::Quaterniond;
+
+    const int X = static_cast<int>(working_set.size());
+
+    // ── 1. Guard: count valid slots ───────────────────────────────────────────
+    int valid_slot_count = 0;
+    for (const auto &kf : working_set)
+        for (const auto &slot : kf.per_gloc)
+            if (slot.pipeline_done && slot.best_train_idx >= 0 &&
+                !slot.pt_pairs_undistorted.empty())
+                ++valid_slot_count;
+
+    if (valid_slot_count < GLOC_MIN_PAIRS)
+    {
+        ROS_DEBUG("[Gloc::runOptimization] Only %d valid slots (need %d) — skip",
+                  valid_slot_count, GLOC_MIN_PAIRS);
+        return false;
+    }
+
+    // ── 2. Init variables ─────────────────────────────────────────────────────
+    // omega_kf[i][3]: axis-angle R_body_world[i]  (world → body)
+    // t_kf[i][3]:     t_world_body[i]
+    std::vector<std::array<double, 3>> omega_kf(X);
+    std::vector<std::array<double, 3>> t_kf(X);
+
+    for (int i = 0; i < X; ++i)
+    {
+        const auto &kf = working_set[i];
+        if (snapped_)
+        {
+            // Derive T_map_body[i] from last known T_map_local:
+            //   R_world_body[i] = T_map_local_R_ * R_local_body[i]
+            //   t_world_body[i] = T_map_local_R_ * P_local[i] + T_map_local_t_
+            const Mat3d R_local_body = kf.R_local.toRotationMatrix();
+            const Mat3d R_world_body = T_map_local_R_ * R_local_body;
+            const Vec3d t_world_body = T_map_local_R_ * kf.P_local + T_map_local_t_;
+
+            const Eigen::AngleAxisd aa(R_world_body);
+            const Vec3d ov = aa.axis() * aa.angle();
+            omega_kf[i] = {ov.x(), ov.y(), ov.z()};
+            t_kf[i] = {t_world_body.x(), t_world_body.y(), t_world_body.z()};
+        }
+        else
+        {
+            // No prior — use train image rotation as rough seed, VINS position
+            // as translation seed. Yaw candidates in init pass will correct rotation.
+            const auto &slot0 = kf.per_gloc[0];
+            if (slot0.best_train_idx >= 0)
+            {
+                const colmap::Image &train_img =
+                    map_.images[static_cast<size_t>(slot0.best_train_idx)];
+                const Eigen::AngleAxisd aa(train_img.q_c_w.toRotationMatrix());
+                const Vec3d ov = aa.axis() * aa.angle();
+                omega_kf[i] = {ov.x(), ov.y(), ov.z()};
+            }
+            else
+            {
+                omega_kf[i] = {0.0, 0.0, 0.0};
+            }
+            t_kf[i] = {kf.P_local.x(), kf.P_local.y(), kf.P_local.z()};
+        }
+    }
+
+    // ── 3. Flatten observations ───────────────────────────────────────────────
+    struct FlatObs
+    {
+        GlocReprojCost rep;
+        GlocEpipolarCost epi;
+        int kf_idx;
+        int mod_idx;
+    };
+
+    std::vector<FlatObs> flat_obs;
+    flat_obs.reserve(4096);
+    std::vector<double> rhos;
+    rhos.reserve(4096);
+
+    const double kMaxDepthM = GLOC_MAX_DEPTH_M;
+
+    for (int i = 0; i < X; ++i)
+    {
+        const auto &kf = working_set[i];
+        for (std::size_t g = 0; g < kf.per_gloc.size(); ++g)
+        {
+            const auto &slot = kf.per_gloc[g];
+            if (!slot.pipeline_done || slot.best_train_idx < 0 ||
+                slot.pt_pairs_undistorted.empty())
+                continue;
+
+            const std::size_t ti = static_cast<std::size_t>(slot.best_train_idx);
+            const colmap::Image &train_img = map_.images[ti];
+            const colmap::CameraCalib &train_cal = map_.calibs.at(train_img.camera_id);
+
+            const Mat3d R_j = train_img.q_c_w.toRotationMatrix();
+            const Vec3d t_j = train_img.t_c_w;
+            const Vec3d o_j = -(R_j.transpose() * t_j); // train centre in world
+
+            // Cam extrinsic: R_cam_body, t_cam_body from imu_T_cam
+            const Mat3d R_cb = vins_multi::GLOC_CAM_MODULES[g].ric_[0].toRotationMatrix();
+            const Vec3d t_cb = vins_multi::GLOC_CAM_MODULES[g].tic_[0];
+
+            // Virtual camera intrinsics
+            const double fx_q = vins_multi::FOCAL_LENGTH;
+            const double fy_q = vins_multi::FOCAL_LENGTH;
+            const double cx_q = slot.query_feats.image_size.width / 2.0;
+            const double cy_q = slot.query_feats.image_size.height / 2.0;
+
+            // Flatten to row-major arrays
+            double R_j_arr[9], Rcr_arr[9], t_j_arr[3], tcr_arr[3];
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c)
+                {
+                    R_j_arr[r * 3 + c] = R_j(r, c);
+                    Rcr_arr[r * 3 + c] = R_cb(r, c);
+                }
+            t_j_arr[0] = t_j.x();
+            t_j_arr[1] = t_j.y();
+            t_j_arr[2] = t_j.z();
+            tcr_arr[0] = t_cb.x();
+            tcr_arr[1] = t_cb.y();
+            tcr_arr[2] = t_cb.z();
+
+            for (const auto &[pq, pt] : slot.pt_pairs_undistorted)
+            {
+                // Train normalised bearing from COLMAP calibration
+                const Vec3d m_t((pt.x() - train_cal.cx) / train_cal.fx,
+                                (pt.y() - train_cal.cy) / train_cal.fy,
+                                1.0);
+                const Vec3d Rtm = R_j.transpose() * m_t;
+
+                // ── Reprojection functor ─────────────────────────────────────
+                GlocReprojCost rep{};
+                rep.Rtm[0] = Rtm.x();
+                rep.Rtm[1] = Rtm.y();
+                rep.Rtm[2] = Rtm.z();
+                rep.oj[0] = o_j.x();
+                rep.oj[1] = o_j.y();
+                rep.oj[2] = o_j.z();
+                rep.pq[0] = pq.x();
+                rep.pq[1] = pq.y();
+                std::memcpy(rep.Rcr, Rcr_arr, sizeof(Rcr_arr));
+                std::memcpy(rep.tcr, tcr_arr, sizeof(tcr_arr));
+                rep.fx = fx_q;
+                rep.fy = fy_q;
+                rep.cx_ = cx_q;
+                rep.cy_ = cy_q;
+
+                // ── Epipolar functor ─────────────────────────────────────────
+                GlocEpipolarCost epi{};
+                epi.x_q[0] = (pq.x() - cx_q) / fx_q;
+                epi.x_q[1] = (pq.y() - cy_q) / fy_q;
+                epi.x_q[2] = 1.0;
+                epi.x_t[0] = m_t.x();
+                epi.x_t[1] = m_t.y();
+                epi.x_t[2] = m_t.z();
+                std::memcpy(epi.R_j, R_j_arr, sizeof(R_j_arr));
+                epi.t_j[0] = t_j_arr[0];
+                epi.t_j[1] = t_j_arr[1];
+                epi.t_j[2] = t_j_arr[2];
+                std::memcpy(epi.Rcr, Rcr_arr, sizeof(Rcr_arr));
+                std::memcpy(epi.tcr, tcr_arr, sizeof(tcr_arr));
+                epi.scale = std::sqrt(fx_q * fy_q);
+
+                flat_obs.push_back({rep, epi, i, static_cast<int>(g)});
+                rhos.push_back(0.1);
+            }
+        }
+    }
+
+    const int N = static_cast<int>(flat_obs.size());
+    if (N < GLOC_MIN_PAIRS)
+    {
+        ROS_DEBUG("[Gloc::runOptimization] Too few observations (%d) — skip", N);
+        return false;
+    }
+
+    ROS_DEBUG("[Gloc::runOptimization] X=%d keyframes, N=%d observations", X, N);
+
+    // ── Solver base options ───────────────────────────────────────────────────
+    ceres::Solver::Options solver_opts;
+    solver_opts.minimizer_type = ceres::TRUST_REGION;
+    solver_opts.trust_region_strategy_type = ceres::LEVENBERG_MARQUARDT;
+    solver_opts.linear_solver_type = (N <= 2000) ? ceres::DENSE_SCHUR
+                                                 : ceres::ITERATIVE_SCHUR;
+    solver_opts.preconditioner_type = (N <= 2000) ? ceres::JACOBI
+                                                  : ceres::SCHUR_JACOBI;
+    solver_opts.function_tolerance = 1e-8;
+    solver_opts.gradient_tolerance = 1e-10;
+    solver_opts.parameter_tolerance = 1e-8;
+    solver_opts.minimizer_progress_to_stdout = false;
+    solver_opts.num_threads = 1;
+
+    ceres::HuberLoss huber_loss(GLOC_HUBER_DELTA);
+    ceres::Problem::Options prob_opts;
+    prob_opts.loss_function_ownership = ceres::DO_NOT_TAKE_OWNERSHIP;
+
+    // ── Problem builder ───────────────────────────────────────────────────────
+    auto build_problem = [&](ceres::Problem &prob,
+                             ceres::ParameterBlockOrdering *ord,
+                             bool add_epi,
+                             bool add_rel,
+                             bool add_prior) {
+        for (int k = 0; k < N; ++k)
+        {
+            const int i = flat_obs[k].kf_idx;
+            double *om = omega_kf[i].data();
+            double *ti = t_kf[i].data();
+
+            if (GLOC_W_REPROJ > 0.0)
+            {
+                auto *cost = new ceres::AutoDiffCostFunction<GlocReprojCost, 2, 3, 3, 1>(
+                    new GlocReprojCost(flat_obs[k].rep));
+                auto *scaled = new ceres::ScaledLoss(
+                    &huber_loss, GLOC_W_REPROJ, ceres::DO_NOT_TAKE_OWNERSHIP);
+                prob.AddResidualBlock(cost, scaled, om, ti, &rhos[k]);
+                prob.SetParameterLowerBound(&rhos[k], 0, 1.0 / kMaxDepthM);
+                ord->AddElementToGroup(&rhos[k], 0); // group 0: eliminated first (Schur)
+            }
+
+            if (add_epi && GLOC_W_EPIPOLAR > 0.0)
+            {
+                auto *cost = new ceres::AutoDiffCostFunction<GlocEpipolarCost, 1, 3, 3>(
+                    new GlocEpipolarCost(flat_obs[k].epi));
+                auto *scaled = new ceres::ScaledLoss(
+                    &huber_loss, GLOC_W_EPIPOLAR, ceres::DO_NOT_TAKE_OWNERSHIP);
+                prob.AddResidualBlock(cost, scaled, om, ti);
+            }
+
+            ord->AddElementToGroup(om, 1); // group 1: pose variables
+            ord->AddElementToGroup(ti, 1);
+        }
+
+        // Relative local pose between adjacent keyframes
+        if (add_rel && GLOC_W_REL_POSE > 0.0)
+        {
+            for (int i = 0; i < X; ++i)
+            {
+                const int k_max = std::min(i + GLOC_REL_POSE_K, X - 1);
+                for (int j = i + 1; j <= k_max; ++j)
+                {
+                    const auto &kf_i = working_set[i];
+                    const auto &kf_j = working_set[j];
+
+                    // Relative pose from VINS local frame:
+                    //   R_rel = R_local_body[i]^T * R_local_body[j]
+                    //   t_rel = R_local_body[i]^T * (P_local[j] - P_local[i])
+                    const Mat3d R_li = kf_i.R_local.toRotationMatrix();
+                    const Mat3d R_lj = kf_j.R_local.toRotationMatrix();
+                    const Mat3d R_rel = R_li.transpose() * R_lj;
+                    const Vec3d t_rel = R_li.transpose() * (kf_j.P_local - kf_i.P_local);
+
+                    GlocRelPoseCost c{};
+                    for (int r = 0; r < 3; ++r)
+                        for (int col = 0; col < 3; ++col)
+                            c.R_rel_local[r * 3 + col] = R_rel(r, col);
+                    c.t_rel_local[0] = t_rel.x();
+                    c.t_rel_local[1] = t_rel.y();
+                    c.t_rel_local[2] = t_rel.z();
+
+                    auto *cost = new ceres::AutoDiffCostFunction<GlocRelPoseCost, 6, 3, 3, 3, 3>(
+                        new GlocRelPoseCost(c));
+                    auto *scaled = new ceres::ScaledLoss(
+                        nullptr, GLOC_W_REL_POSE, ceres::DO_NOT_TAKE_OWNERSHIP);
+                    prob.AddResidualBlock(cost, scaled,
+                                          omega_kf[i].data(), t_kf[i].data(),
+                                          omega_kf[j].data(), t_kf[j].data());
+                }
+            }
+        }
+
+        // World prior from last snapped T_map_local
+        if (add_prior && snapped_ && GLOC_W_WORLD_PRIOR > 0.0)
+        {
+            for (int i = 0; i < X; ++i)
+            {
+                const auto &kf = working_set[i];
+                const Mat3d R_local_body = kf.R_local.toRotationMatrix();
+
+                // T_map_body_prior[i]:
+                //   R_prior = R_map_local * R_local_body[i]
+                //   t_prior = R_map_local * P_local[i] + t_map_local
+                const Mat3d R_prior = T_map_local_R_ * R_local_body;
+                const Vec3d t_prior = T_map_local_R_ * kf.P_local + T_map_local_t_;
+
+                GlocWorldPriorCost c{};
+                for (int r = 0; r < 3; ++r)
+                    for (int col = 0; col < 3; ++col)
+                        c.R_prior[r * 3 + col] = R_prior(r, col);
+                c.t_prior[0] = t_prior.x();
+                c.t_prior[1] = t_prior.y();
+                c.t_prior[2] = t_prior.z();
+
+                auto *cost = new ceres::AutoDiffCostFunction<GlocWorldPriorCost, 6, 3, 3>(
+                    new GlocWorldPriorCost(c));
+                auto *scaled = new ceres::ScaledLoss(
+                    nullptr, GLOC_W_WORLD_PRIOR, ceres::DO_NOT_TAKE_OWNERSHIP);
+                prob.AddResidualBlock(cost, scaled,
+                                      omega_kf[i].data(), t_kf[i].data());
+            }
+        }
+    };
+
+    // ── 4. Init pass: yaw candidates (only when not snapped) ─────────────────
+    if (!snapped_)
+    {
+        constexpr int kNumYaw = 12;
+        const double kYawStep = 2.0 * M_PI / kNumYaw;
+
+        double best_cost = std::numeric_limits<double>::max();
+        std::vector<std::array<double, 3>> best_omega = omega_kf;
+        std::vector<std::array<double, 3>> best_t = t_kf;
+        std::vector<double> best_rhos = rhos;
+
+        for (int yk = 0; yk < kNumYaw; ++yk)
+        {
+            auto cand_omega = omega_kf;
+            auto cand_t = t_kf;
+            auto cand_rhos = rhos;
+
+            // Apply yaw offset to all keyframes
+            const Mat3d Rz = Eigen::AngleAxisd(yk * kYawStep, Vec3d::UnitZ())
+                                 .toRotationMatrix();
+            for (int i = 0; i < X; ++i)
+            {
+                const Eigen::Map<const Vec3d> ov(cand_omega[i].data());
+                const double norm = ov.norm();
+                const Mat3d R_orig = Eigen::AngleAxisd(
+                                         norm, norm > 1e-8 ? (ov / norm).eval() : Vec3d::UnitZ())
+                                         .toRotationMatrix();
+                const Eigen::AngleAxisd aa_new(Rz * R_orig);
+                const Vec3d ov_new = aa_new.axis() * aa_new.angle();
+                cand_omega[i] = {ov_new.x(), ov_new.y(), ov_new.z()};
+            }
+
+            ceres::Problem init_prob(prob_opts);
+            auto *init_ord = new ceres::ParameterBlockOrdering;
+            build_problem(init_prob, init_ord,
+                          /*add_epi=*/true, /*add_rel=*/true, /*add_prior=*/false);
+
+            ceres::Solver::Options init_opts = solver_opts;
+            init_opts.linear_solver_ordering.reset(init_ord);
+            init_opts.max_num_iterations = GLOC_INIT_ITERS;
+            init_opts.function_tolerance = 1e-3;
+            init_opts.parameter_tolerance = 1e-3;
+            init_opts.gradient_tolerance = 1e-3;
+            init_opts.linear_solver_type = ceres::DENSE_SCHUR;
+            init_opts.preconditioner_type = ceres::JACOBI;
+
+            ceres::Solver::Summary init_summary;
+            ceres::Solve(init_opts, &init_prob, &init_summary);
+
+            if (init_summary.final_cost < best_cost)
+            {
+                best_cost = init_summary.final_cost;
+                best_omega = cand_omega;
+                best_t = cand_t;
+                best_rhos = cand_rhos;
+            }
+        }
+
+        omega_kf = best_omega;
+        t_kf = best_t;
+        rhos = best_rhos;
+    }
+
+    // ── 5. Main solve ─────────────────────────────────────────────────────────
+    ceres::Problem main_prob(prob_opts);
+    auto *main_ord = new ceres::ParameterBlockOrdering;
+    build_problem(main_prob, main_ord,
+                  /*add_epi=*/true, /*add_rel=*/true, /*add_prior=*/true);
+
+    ceres::Solver::Options main_opts = solver_opts;
+    main_opts.linear_solver_ordering.reset(main_ord);
+    main_opts.max_num_iterations = GLOC_MAX_ITERS;
+
+    ceres::Solver::Summary main_summary;
+    ceres::Solve(main_opts, &main_prob, &main_summary);
+
+    ROS_DEBUG("[Gloc::runOptimization] %s", main_summary.BriefReport().c_str());
+
+    // ── 6. Inlier check ───────────────────────────────────────────────────────
+    int inliers = 0;
+    for (int k = 0; k < N; ++k)
+    {
+        const int i = flat_obs[k].kf_idx;
+        double res[2];
+        flat_obs[k].rep(omega_kf[i].data(), t_kf[i].data(), &rhos[k], res);
+        const double err = std::sqrt(res[0] * res[0] + res[1] * res[1]);
+        if (err < GLOC_INLIER_THRESH_PX)
+            ++inliers;
+    }
+
+    const double inlier_ratio = static_cast<double>(inliers) / N;
+    ROS_DEBUG("[Gloc::runOptimization] inliers=%d/%d (%.1f%%)",
+              inliers, N, inlier_ratio * 100.0);
+
+    if (inlier_ratio < GLOC_MIN_INLIER_RATIO)
+    {
+        ROS_WARN_THROTTLE(2.0,
+                          "[Gloc::runOptimization] Rejected: inlier ratio %.2f < %.2f",
+                          inlier_ratio, GLOC_MIN_INLIER_RATIO);
+        return false;
+    }
+
+    // ── 7. Compute T_map_local as weighted mean over keyframes ────────────────
+    //
+    // Each optimised T_map_body[i] gives an estimate of T_map_local:
+    //   R_map_local[i] = R_world_body[i] * R_local_body[i]^T
+    //                  = R_world_body[i] * R_body_local[i]
+    //   t_map_local[i] = t_world_body[i] - R_map_local[i] * P_local[i]
+    //
+    // Weight = correspondence count for keyframe i (across all valid slots).
+    Vec3d t_acc = Vec3d::Zero();
+    Vec3d q_acc_v = Vec3d::Zero();
+    double q_acc_w = 0.0;
+    double w_total = 0.0;
+
+    for (int i = 0; i < X; ++i)
+    {
+        const auto &kf = working_set[i];
+
+        double w = 0.0;
+        for (const auto &slot : kf.per_gloc)
+            if (slot.pipeline_done && slot.best_train_idx >= 0)
+                w += static_cast<double>(slot.pt_pairs_undistorted.size());
+        if (w < 1.0)
+            continue;
+
+        const Eigen::Map<const Vec3d> ov(omega_kf[i].data());
+        const double norm = ov.norm();
+        const Mat3d R_world_body = Eigen::AngleAxisd(
+                                       norm, norm > 1e-8 ? (ov / norm).eval() : Vec3d::UnitZ())
+                                       .toRotationMatrix();
+
+        // R_local_body = kf.R_local  (rotation body → local)
+        const Mat3d R_local_body = kf.R_local.toRotationMatrix();
+        const Mat3d R_map_local_i = R_world_body * R_local_body.transpose();
+        const Vec3d t_map_local_i = Vec3d(t_kf[i][0], t_kf[i][1], t_kf[i][2]) - R_map_local_i * kf.P_local;
+
+        t_acc += w * t_map_local_i;
+        w_total += w;
+
+        // Weighted quaternion accumulation (ensure consistent hemisphere)
+        Quat q_i(R_map_local_i);
+        if (w_total > w) // not first iteration
+        {
+            const Quat q_acc_so_far(q_acc_w / (w_total - w),
+                                    q_acc_v.x() / (w_total - w),
+                                    q_acc_v.y() / (w_total - w),
+                                    q_acc_v.z() / (w_total - w));
+            if (q_i.dot(q_acc_so_far) < 0.0)
+                q_i.coeffs() = -q_i.coeffs();
+        }
+        q_acc_v += w * q_i.vec();
+        q_acc_w += w * q_i.w();
+    }
+
+    if (w_total < 1.0)
+    {
+        ROS_WARN_THROTTLE(2.0, "[Gloc::runOptimization] Zero weight — skip");
+        return false;
+    }
+
+    // ── 8. Update snapped state ───────────────────────────────────────────────
+    Quat q_mean(q_acc_w / w_total,
+                q_acc_v.x() / w_total,
+                q_acc_v.y() / w_total,
+                q_acc_v.z() / w_total);
+    q_mean.normalize();
+
+    T_map_local_R_ = q_mean.toRotationMatrix();
+    T_map_local_t_ = t_acc / w_total;
+    snapped_ = true;
+
+    ROS_INFO("[Gloc] Snapped! T_map_local t=[%.2f %.2f %.2f]",
+             T_map_local_t_.x(), T_map_local_t_.y(), T_map_local_t_.z());
+
+    return true;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

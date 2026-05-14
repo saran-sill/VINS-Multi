@@ -73,4 +73,39 @@ extern float GLOC_SUBSAMPLE_MIN_DIST_PX; // 0 = disabled
 
 void readParameters(std::string config_file);
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Stage 2 — Ceres optimization
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Minimum number of valid keyframe-slots (pipeline_done && best_train_idx>=0)
+// required before the optimizer is called.
+extern int GLOC_MIN_PAIRS;
+
+// Relative-pose chain half-width: keyframe i is connected to i+1 .. i+k_rel.
+// 1 = adjacent only, 2 = i+1 and i+2, etc.
+extern int GLOC_REL_POSE_K;
+
+// Weights for each energy term.
+extern double GLOC_W_EPIPOLAR;    // Sampson epipolar
+extern double GLOC_W_REPROJ;      // inverse-depth reprojection
+extern double GLOC_W_REL_POSE;    // relative local pose
+extern double GLOC_W_WORLD_PRIOR; // world prior (only when snapped)
+
+// Huber loss delta (virtual pixels) applied to epipolar and reprojection terms.
+extern double GLOC_HUBER_DELTA;
+
+// Reprojection inlier threshold (virtual pixels) used for post-solve inlier
+// counting and for deciding whether to accept the solution.
+extern double GLOC_INLIER_THRESH_PX;
+
+// Solver iteration limits.
+extern int GLOC_MAX_ITERS;
+extern int GLOC_INIT_ITERS; // fast burn-in pass before main solve
+
+// Minimum inlier fraction required to accept the solution and set snapped.
+extern double GLOC_MIN_INLIER_RATIO;
+
+// Maximum depth (metres) for inverse-depth lower bound: rho >= 1/GLOC_MAX_DEPTH_M.
+extern double GLOC_MAX_DEPTH_M;
+
 }; // namespace gloc

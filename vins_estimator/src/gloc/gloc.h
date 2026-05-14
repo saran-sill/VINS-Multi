@@ -18,6 +18,7 @@
 #include "camodocal/camera_models/CameraFactory.h"
 #include "colmap_util.h"
 #include "dbow3_util.h"
+#include "gloc_cost_functors.h"
 #include "parameters.h"
 #include "point_features.h"
 
@@ -394,7 +395,23 @@ class Gloc
     // Entry point for process_thread_.
     void processLoop();
 
-    // Stage 1a: for every Found slot that hasn't been processed, extract ORB
+    // ── Snapped state ─────────────────────────────────────────────────────────
+    //
+    // snapped_ becomes true after the first successful optimization round.
+    // Once snapped, T_map_local_R_ and T_map_local_t_ hold the last accepted
+    // estimate of T_map_local (world ← local) and are used as a prior in
+    // subsequent rounds.
+    //
+    // T_map_local convention:
+    //   X_world = T_map_local_R_ * X_local + T_map_local_t_
+    bool snapped_{false};
+    Eigen::Matrix3d T_map_local_R_{Eigen::Matrix3d::Identity()};
+    Eigen::Vector3d T_map_local_t_{Eigen::Vector3d::Zero()};
+
+    // Stage 2: build and solve the Ceres problem on working_set.
+    // Returns true if the solution was accepted (inlier ratio ≥ threshold)
+    // and updates snapped_ / T_map_local_R_ / T_map_local_t_ on success.
+    bool runOptimization(std::vector<KeyframeGlocState> &working_set);
     // features from the cached image and query DBoW3 to populate dbow_candidates.
     void runOrbAndDbow(std::vector<KeyframeGlocState> &working_set);
 

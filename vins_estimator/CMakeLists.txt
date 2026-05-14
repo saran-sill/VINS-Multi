@@ -258,7 +258,11 @@ add_library(gloc_lib SHARED
     src/gloc/parameters.cpp
 )
 target_link_libraries(gloc_lib
-    colmap_util_lib dbow3_util_lib point_features_lib ${ros_libraries}
+    colmap_util_lib dbow3_util_lib point_features_lib
+    parameter_lib_multi
+    ${CAMERA_MODELS_LIB}
+    ${CERES_LIBRARIES}
+    ${ros_libraries}
 )
 
 add_library(rosnode_lib_multi SHARED
