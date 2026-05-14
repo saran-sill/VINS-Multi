@@ -12,7 +12,7 @@ namespace gloc
 {
 
 extern int GLOC_ENABLED;
-extern std::string GLOC_COLMAP_FOLDER;
+extern std::string GLOC_COLMAP_SPARSE_FOLDER;
 extern std::string GLOC_COLMAP_IMG_FOLDER;
 extern std::string GLOC_DBOW3_DATABASE;
 extern std::string GLOC_DBOW3_VOCAB;

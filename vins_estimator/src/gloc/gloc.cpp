@@ -1667,7 +1667,7 @@ bool Gloc::checkPaths() const
     };
     for (const auto &f : colmap_files)
     {
-        const fs::path p = fs::path(GLOC_COLMAP_FOLDER) / f;
+        const fs::path p = fs::path(GLOC_COLMAP_SPARSE_FOLDER) / f;
         if (!fs::exists(p))
         {
             std::cerr << "[Gloc] ERROR: missing COLMAP file: " << p << "\n";
@@ -1705,7 +1705,7 @@ bool Gloc::checkPaths() const
 
 bool Gloc::loadColmapData()
 {
-    const std::string &colmap_dir = GLOC_COLMAP_FOLDER;
+    const std::string &colmap_dir = GLOC_COLMAP_SPARSE_FOLDER;
     const std::string &img_folder = GLOC_COLMAP_IMG_FOLDER;
 
     std::cout << "[Gloc] Loading COLMAP data from: " << colmap_dir << "\n";
