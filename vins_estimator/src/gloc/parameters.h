@@ -17,6 +17,11 @@ extern std::string GLOC_COLMAP_IMG_FOLDER;
 extern std::string GLOC_DBOW3_DATABASE;
 extern std::string GLOC_DBOW3_VOCAB;
 
+// Optional: explicit path to world_transform.txt.
+// When empty, gloc falls back to looking for the file inside
+// GLOC_COLMAP_SPARSE_FOLDER. Set via gloc_world_tmat_file in yaml.
+extern std::string GLOC_WORLD_TMAT_FILE;
+
 // ── DBoW3 query ──────────────────────────────────────────────────────────────
 
 // Number of top candidates returned by DBoW3 per query image (N in the plan).

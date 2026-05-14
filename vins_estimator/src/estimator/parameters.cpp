@@ -9,6 +9,8 @@
 
 #include "parameters.h"
 
+#include "../gloc/parameters.h"
+
 namespace vins_multi
 {
 
@@ -593,6 +595,8 @@ void readParameters(std::string config_file)
     // }
 
     fsSettings.release();
+
+    gloc::readParameters(config_file);
 }
 
 } // namespace vins_multi

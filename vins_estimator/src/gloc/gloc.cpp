@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <iostream>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 
 #include "colmap_util.h"
@@ -1719,8 +1720,44 @@ bool Gloc::loadColmapData()
 
         map_.calibs = colmap::read_cameras_bin(colmap_dir + "/cameras.bin");
 
-        const Eigen::Matrix4d world_transform =
-            colmap::load_world_transform(colmap_dir);
+        // Load world transform: use explicit file path if given,
+        // otherwise look for world_transform.txt inside colmap_dir.
+        Eigen::Matrix4d world_transform = Eigen::Matrix4d::Identity();
+        if (!GLOC_WORLD_TMAT_FILE.empty())
+        {
+            // Read the 4×4 matrix directly from the specified file.
+            std::ifstream f(GLOC_WORLD_TMAT_FILE);
+            if (!f)
+            {
+                ROS_WARN("[Gloc] Cannot open world transform file: %s — using identity.",
+                         GLOC_WORLD_TMAT_FILE.c_str());
+            }
+            else
+            {
+                int row = 0;
+                std::string line;
+                while (std::getline(f, line) && row < 4)
+                {
+                    // Strip inline comments (# ...)
+                    const auto hash = line.find('#');
+                    if (hash != std::string::npos)
+                        line = line.substr(0, hash);
+                    std::istringstream ss(line);
+                    double v;
+                    int col = 0;
+                    while (ss >> v && col < 4)
+                        world_transform(row, col++) = v;
+                    if (col > 0)
+                        ++row;
+                }
+                std::cout << "[Gloc] Loaded world transform from: "
+                          << GLOC_WORLD_TMAT_FILE << "\n";
+            }
+        }
+        else
+        {
+            world_transform = colmap::load_world_transform(colmap_dir);
+        }
 
         map_.images.clear();
         map_.images.reserve(img_map.size());

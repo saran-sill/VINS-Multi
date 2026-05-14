@@ -120,25 +120,84 @@ void pubGlocMap(const gloc::Gloc &gloc)
         return {o_rig, q_w_rig};
     };
 
-    // ── Camera frustums (MarkerArray, latched) ────────────────────────────────
-    // One frustum per image, positioned and oriented at the rig centre.
+    // ── Camera frustum mesh (single TRIANGLE_LIST marker, latched) ───────────
+    // All frustums packed into one marker — avoids RViz per-marker overhead
+    // and the 2334-marker array limit.
 
-    CameraPoseVisualization cam_vis(1.0f, 0.0f, 0.0f, 1.0f); // red, alpha=1
-    cam_vis.setScale(0.3);
-    cam_vis.setLineWidth(0.02);
+    constexpr float kDepth = 0.15f;
+    constexpr float kHalfW = 0.10f;
+    constexpr float kHalfH = 0.07f;
+
+    const Eigen::Vector3d tl_c(-kHalfW, -kHalfH, kDepth);
+    const Eigen::Vector3d tr_c(kHalfW, -kHalfH, kDepth);
+    const Eigen::Vector3d bl_c(-kHalfW, kHalfH, kDepth);
+    const Eigen::Vector3d br_c(kHalfW, kHalfH, kDepth);
+
+    auto toPoint = [](const Eigen::Vector3d &v) -> geometry_msgs::Point {
+        geometry_msgs::Point p;
+        p.x = v.x();
+        p.y = v.y();
+        p.z = v.z();
+        return p;
+    };
+
+    visualization_msgs::Marker m;
+    m.header.frame_id = frame_id;
+    m.header.stamp = now;
+    m.ns = "gloc_map_frustums";
+    m.id = 0;
+    m.type = visualization_msgs::Marker::TRIANGLE_LIST;
+    m.action = visualization_msgs::Marker::ADD;
+    m.scale.x = m.scale.y = m.scale.z = 1.0;
+    m.pose.orientation.w = 1.0;
+    m.color.r = 1.0f;
+    m.color.g = 0.0f;
+    m.color.b = 0.0f;
+    m.color.a = 1.0f;
+
+    m.points.reserve(map.images.size() * 36); // 6 faces × 2 sides × 3 vertices
 
     for (const auto &img : map.images)
     {
-        const auto [o_rig, q_w_rig] = rig_pose(img);
-        cam_vis.add_pose(o_rig, q_w_rig);
+        const Eigen::Matrix3d R_wc = img.q_c_w.toRotationMatrix().transpose();
+        const auto [apex, q_w_rig] = rig_pose(img);
+
+        const Eigen::Vector3d tl = R_wc * tl_c + apex;
+        const Eigen::Vector3d tr = R_wc * tr_c + apex;
+        const Eigen::Vector3d bl = R_wc * bl_c + apex;
+        const Eigen::Vector3d br = R_wc * br_c + apex;
+
+        const auto pa = toPoint(apex);
+        const auto ptl = toPoint(tl), ptr = toPoint(tr);
+        const auto pbl = toPoint(bl), pbr = toPoint(br);
+
+        // Each face added twice (both winding orders) for double-sided rendering
+        // since RViz culls back-faces.
+#define FACE(a, b, c)      \
+    m.points.push_back(a); \
+    m.points.push_back(b); \
+    m.points.push_back(c); \
+    m.points.push_back(a); \
+    m.points.push_back(c); \
+    m.points.push_back(b);
+
+        // 4 side faces
+        FACE(pa, ptl, ptr)
+        FACE(pa, pbr, pbl)
+        FACE(pa, pbl, ptl)
+        FACE(pa, ptr, pbr)
+        // near plane
+        FACE(ptl, pbl, pbr)
+        FACE(ptl, pbr, ptr)
+
+#undef FACE
     }
 
-    std_msgs::Header hdr;
-    hdr.stamp = now;
-    hdr.frame_id = frame_id;
-    cam_vis.publish_by(pub_gloc_map_frustums, hdr);
+    visualization_msgs::MarkerArray marker_array;
+    marker_array.markers.push_back(m);
+    pub_gloc_map_frustums.publish(marker_array);
 
-    ROS_INFO("[pubGlocMap] Published %zu camera frustums on gloc/map_frustums",
+    ROS_INFO("[pubGlocMap] Published %zu frustums (single marker) on gloc/map_frustums",
              map.images.size());
 
     // ── Rig path (nav_msgs/Path, latched) ─────────────────────────────────────
@@ -163,21 +222,34 @@ void pubGlocMap(const gloc::Gloc &gloc)
     //
     // Representative: lowest image_id within the group (deterministic).
 
-    // Build a map: rig_key → representative image (lowest image_id)
-    std::map<uint32_t, const colmap::Image *> rig_rep; // rig_key → image*
+    // Build a map: frame_suffix → representative image (lowest image_id).
+    // Images captured at the same time share the same numeric suffix in their
+    // name (e.g. "../frame_000007.jpg" → "000007"). One path pose per unique
+    // frame suffix = one pose per rig capture.
+    //
+    // Suffix extraction: strip the extension, then take the last run of digits.
+    // Falls back to image_id as string if no digits are found.
+    auto frame_suffix = [](const std::string &name) -> std::string {
+        // Remove extension
+        const std::size_t dot = name.rfind('.');
+        const std::string stem = (dot == std::string::npos) ? name : name.substr(0, dot);
+        // Find last run of digits
+        std::size_t end = stem.size();
+        while (end > 0 && !std::isdigit(static_cast<unsigned char>(stem[end - 1])))
+            --end;
+        std::size_t begin = end;
+        while (begin > 0 && std::isdigit(static_cast<unsigned char>(stem[begin - 1])))
+            --begin;
+        return (begin < end) ? stem.substr(begin, end - begin) : stem;
+    };
 
-    for (const auto *img : sorted_imgs) // already sorted ascending by image_id
-    {
-        uint32_t rig_key;
-        auto cr_it = map.cam_rig_map.find(img->camera_id);
-        if (cr_it != map.cam_rig_map.end())
-            rig_key = cr_it->second.rig_id;
-        else
-            rig_key = img->camera_id; // no rig — treat camera as its own rig
+    std::map<std::string, const colmap::Image *> rig_rep; // suffix → image*
 
-        // try_emplace only inserts if key is new → keeps lowest image_id
-        rig_rep.try_emplace(rig_key, img);
-    }
+    for (const auto *img : sorted_imgs)                    // sorted ascending by image_id
+        rig_rep.try_emplace(frame_suffix(img->name), img); // keeps lowest image_id
+
+    ROS_INFO("[pubGlocMap] cam_rig_map size=%zu, unique frame suffixes=%zu, total images=%zu",
+             map.cam_rig_map.size(), rig_rep.size(), map.images.size());
 
     nav_msgs::Path map_path;
     map_path.header.stamp = now;
@@ -187,7 +259,7 @@ void pubGlocMap(const gloc::Gloc &gloc)
     // Sort representatives by image_id for a clean chronological path
     std::vector<const colmap::Image *> rep_imgs;
     rep_imgs.reserve(rig_rep.size());
-    for (const auto &[key, img] : rig_rep)
+    for (const auto &[suffix, img] : rig_rep)
         rep_imgs.push_back(img);
     std::sort(rep_imgs.begin(), rep_imgs.end(),
               [](const colmap::Image *a, const colmap::Image *b) {
