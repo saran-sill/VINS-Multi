@@ -69,7 +69,8 @@ void pubGlocMap(const gloc::Gloc &gloc);
 // Broadcast the world → odom TF transform from T_map_local.
 // Call whenever T_map_local changes (from the gloc callback).
 // Convention: X_world = R * X_odom + t
-void broadcastWorldOdomTF(const Eigen::Matrix3d &R, const Eigen::Vector3d &t);
+void broadcastWorldOdomTF(const Eigen::Matrix3d &R, const Eigen::Vector3d &t,
+                          ros::Time stamp = ros::Time(0));
 
 // Publish optimized keyframe rig poses and path in world frame.
 // Called from the gloc worker thread after each successful runOptimization.

@@ -687,9 +687,15 @@ void pubPointCloud(const Estimator &estimator, const unsigned int unique_id)
 // Convention:  X_world = R * X_odom + t
 // ─────────────────────────────────────────────────────────────────────────────
 
-void broadcastWorldOdomTF(const Eigen::Matrix3d &R, const Eigen::Vector3d &t)
+void broadcastWorldOdomTF(const Eigen::Matrix3d &R, const Eigen::Vector3d &t,
+                          ros::Time stamp)
 {
     static tf::TransformBroadcaster br;
+
+    // Use the provided sensor timestamp when available so the TF stays
+    // synchronised with bag replay time. Fall back to ros::Time::now()
+    // only when no stamp is given (e.g. the pre-snap identity broadcast).
+    const ros::Time tf_stamp = (stamp.toSec() > 0.0) ? stamp : ros::Time::now();
 
     tf::Transform transform;
     transform.setOrigin(tf::Vector3(t.x(), t.y(), t.z()));
@@ -698,7 +704,7 @@ void broadcastWorldOdomTF(const Eigen::Matrix3d &R, const Eigen::Vector3d &t)
     transform.setRotation(tf::Quaternion(q.x(), q.y(), q.z(), q.w()));
 
     br.sendTransform(tf::StampedTransform(
-        transform, ros::Time::now(), "world", "odom"));
+        transform, tf_stamp, "world", "odom"));
 }
 
 void pubTF(const Estimator &estimator)
@@ -710,6 +716,17 @@ void pubTF(const Estimator &estimator)
     static tf::TransformBroadcaster br;
     tf::Transform transform;
     tf::Quaternion q;
+
+    // Broadcast world → odom TF at every estimator update, stamped with the
+    // current sensor time. This keeps the TF tree alive at the full estimator
+    // rate regardless of how often gloc fires, avoiding extrapolation errors
+    // during bag replay or when gloc solves are slow.
+    {
+        std::lock_guard<std::mutex> lk(estimator.t_map_mutex_);
+        broadcastWorldOdomTF(estimator.t_map_local_R_,
+                             estimator.t_map_local_t_,
+                             stamp);
+    }
     // body frame
     Vector3d correct_t;
     Quaterniond correct_q;
@@ -917,7 +934,7 @@ void pubGlocKeyframeStatus(
         m.pose.position.z = pos.z();
         m.pose.orientation.w = 1.0;
 
-        m.scale.x = m.scale.y = m.scale.z = 0.5;
+        m.scale.x = m.scale.y = m.scale.z = 0.15;
 
         // status: 2=valid(green), 1=no match(red), 0=not processed(yellow)
         if (status == 2) // green — valid gloc match

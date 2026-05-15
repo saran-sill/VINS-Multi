@@ -1,5 +1,8 @@
 %YAML:1.0
 
+############################################################################
+# VINS
+############################################################################
 use_gpu: 0
 output_path: "/tmp/vins_multi_output"
 
@@ -31,14 +34,14 @@ cam_module:
         # bottom_cam image within ±image_match_tol_s of t_kf. Defaults to 0.05
         # (slightly over half a 15Hz frame interval) when omitted. Increase
         # for slow / low frame-rate gloc cameras (e.g. 0.1 for a 5Hz camera).
-        image_match_tol_s: 0.05
+        image_match_tol_s: 0.1
         # Optional: gloc image ring-buffer capacity (slots). Gloc keeps the
         # last N frames from this camera so newly-arrived keyframes can find
         # their nearest-in-time image. Defaults to 10 when omitted; eager
         # resolution drains the buffer, so a few slots is usually plenty.
         # Tune up if your gloc camera arrives noticeably later than VINS
         # keyframes.
-        image_ring_buffer_capacity: 10
+        image_ring_buffer_capacity: 30
         depth: 0
         stereo: 1
         image_width: 1920
@@ -78,14 +81,14 @@ cam_module:
         # bottom_cam image within ±image_match_tol_s of t_kf. Defaults to 0.05
         # (slightly over half a 15Hz frame interval) when omitted. Increase
         # for slow / low frame-rate gloc cameras (e.g. 0.1 for a 5Hz camera).
-        image_match_tol_s: 0.05
+        image_match_tol_s: 0.1
         # Optional: gloc image ring-buffer capacity (slots). Gloc keeps the
         # last N frames from this camera so newly-arrived keyframes can find
         # their nearest-in-time image. Defaults to 10 when omitted; eager
         # resolution drains the buffer, so a few slots is usually plenty.
         # Tune up if your gloc camera arrives noticeably later than VINS
         # keyframes.
-        image_ring_buffer_capacity: 10
+        image_ring_buffer_capacity: 30
         depth: 0
         stereo: 1
         image_width: 1280
@@ -125,14 +128,14 @@ cam_module:
         # bottom_cam image within ±image_match_tol_s of t_kf. Defaults to 0.05
         # (slightly over half a 15Hz frame interval) when omitted. Increase
         # for slow / low frame-rate gloc cameras (e.g. 0.1 for a 5Hz camera).
-        image_match_tol_s: 0.05
+        image_match_tol_s: 0.1
         # Optional: gloc image ring-buffer capacity (slots). Gloc keeps the
         # last N frames from this camera so newly-arrived keyframes can find
         # their nearest-in-time image. Defaults to 10 when omitted; eager
         # resolution drains the buffer, so a few slots is usually plenty.
         # Tune up if your gloc camera arrives noticeably later than VINS
         # keyframes.
-        image_ring_buffer_capacity: 10
+        image_ring_buffer_capacity: 60
         depth: 0
         stereo: 1
         image_width: 1280
@@ -213,15 +216,55 @@ save_image: 0
 vis_circle_radius: 7
 vis_arrow_thickness: 4
 
-######################################
+############################################################################
 # GLOC
-######################################
-gloc_enabled: 1
+############################################################################
+gloc_enabled: true
+gloc_fix_rel_poses: true   # fix relative poses, optimize only T_map_local
+gloc_use_4dof: true        # yaw-only rotation (4-DOF); false = full 6-DOF
+
 gloc_colmap_sparse_folder: "/mnt/EXDISK/HiveGround/colmap_ws/SCGP/colmap/_sparse/0"
 gloc_colmap_img_folder: "/mnt/EXDISK/HiveGround/colmap_ws/SCGP/images_2"
 gloc_world_tmat_file: "/mnt/EXDISK/HiveGround/colmap_ws/SCGP/world_transform.txt"
 gloc_dbow3_database: "/mnt/EXDISK/HiveGround/colmap_ws/_SCGP_database/database_orb.bin"
 gloc_dbow3_vocab: "/mnt/EXDISK/HiveGround/dbow3/orbvoc.dbow3"
+
+# gloc_debug_folder: "/mnt/EXDISK/tmp/dbg_"
+gloc_debug_folder: ""
+
+# Image preprocessing (applied to query images before ORB extraction)
+gloc_preprocess_white_balance: false
+
+# bilateral blur
+gloc_preprocess_denoise: false
+gloc_preprocess_denoise_d: 5
+gloc_preprocess_denoise_sigma_color: 40.0
+gloc_preprocess_denoise_sigma_space: 40.0
+
+# chroma denoise
+gloc_preprocess_denoise_color: false
+gloc_preprocess_denoise_h_luminance: 2.5
+gloc_preprocess_denoise_h_color: 10.0
+
+gloc_preprocess_gamma: false
+gloc_preprocess_gamma_value: 2.2
+
+gloc_preprocess_tonemap: false
+gloc_preprocess_tonemap_gamma: 0.78
+gloc_preprocess_tonemap_highlight: 0.65
+gloc_preprocess_tonemap_shadow_lift: 0.08
+
+gloc_preprocess_clahe: true
+gloc_preprocess_clahe_clip_limit: 5.0
+gloc_preprocess_clahe_grid_size: 5
+
+gloc_preprocess_clarity: false
+gloc_preprocess_clarity_amount: 0.40
+gloc_preprocess_clarity_sigma: 15.0
+
+gloc_preprocess_sharpen: false
+gloc_preprocess_sharpen_sigma: 1.0
+gloc_preprocess_sharpen_amount: 1.5
 
 # DBoW3 retrieval
 gloc_dbow3_max_results: 5
@@ -229,10 +272,10 @@ gloc_dbow3_min_score: 0.005
 
 # Consensus voting
 gloc_vote_eps_m: 3.0
-gloc_vote_min_votes: -1             # -1 = majority rule (ceil((X-1)/2))
+gloc_vote_min_votes: 2             # -1 = majority rule (ceil((X-1)/2))
 
 # ORB feature extraction
-gloc_orb_nfeatures: 5000
+gloc_orb_nfeatures: 2000
 gloc_orb_scale_factor: 1.25
 gloc_orb_nlevels: 4
 gloc_orb_edge_threshold: 31
@@ -241,34 +284,34 @@ gloc_orb_wta_k: 2
 gloc_orb_score_type: 0
 gloc_orb_patch_size: 31
 gloc_orb_fast_threshold: 10
-gloc_use_beblid: 1                  # 0=ORB descriptors, 1=BEBLID descriptors
+gloc_use_beblid: true                  # 0=ORB descriptors, 1=BEBLID descriptors
 gloc_beblid_scale_factor: 1.0
 gloc_beblid_n_bits: 256             # 256 or 512
 
 # Feature matching
-gloc_use_gms: 1                     # 0=BruteForce, 1=GMS
+gloc_use_gms: true                     # 0=BruteForce, 1=GMS
 gloc_gms_threshold: 6.0
-gloc_gms_with_rotation: 1
-gloc_gms_with_scale: 0
+gloc_gms_with_rotation: true
+gloc_gms_with_scale: false
 gloc_match_lowe_ratio: 0.7          # used only when gloc_use_gms: 0
 gloc_match_max_dist: 64
-gloc_match_geom_reproj_th: 3.0
-gloc_match_geom_confidence: 0.99
+gloc_match_geom_reproj_th: 5.0
+gloc_match_geom_confidence: 0.995
 gloc_match_geom_sampson_sq: -1.0    # negative = disabled
 gloc_match_min_inliers: 50
 gloc_subsample_min_dist_px: 10.0    # 0 = disabled;
 
 # Optimization
 gloc_min_pairs: 3               # min valid slots after first snap
-gloc_min_pairs_first_snap: 6    # min valid slots for first snap (stricter)
-gloc_rel_pose_k: 1              # chain half-width (1 = adjacent only)
+gloc_min_pairs_first_snap: 3    # min valid slots for first snap (stricter)
+gloc_rel_pose_k: 2              # chain half-width (1 = adjacent only)
 gloc_w_epipolar: 1.0            # weight for Sampson epipolar term
 gloc_w_reproj: 1.0              # weight for inverse-depth reprojection term
-gloc_w_rel_pose: 1.0            # weight for relative local pose term
-gloc_w_world_prior: 10.0        # weight for world prior (when snapped)
+gloc_w_rel_pose: 200.0            # weight for relative local pose term
+gloc_w_world_prior: 0.0        # weight for world prior (when snapped)
 gloc_huber_delta: 5.0           # Huber loss delta (virtual pixels)
 gloc_inlier_thresh_px: 10.0     # reprojection inlier threshold (virtual pixels)
 gloc_max_iters: 150             # main solver iterations
 gloc_init_iters: 20             # initialization pass iterations (before main solve)
 gloc_min_inlier_ratio: 0.3      # min inlier fraction to accept solution
-gloc_max_depth_m: 100.0    # inverse-depth lower bound: rho >= 1/max_depth
+gloc_max_depth_m: 30.0    # inverse-depth lower bound: rho >= 1/max_depth

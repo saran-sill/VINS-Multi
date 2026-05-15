@@ -11,7 +11,7 @@
 namespace gloc
 {
 
-extern int GLOC_ENABLED;
+extern bool GLOC_ENABLED;
 extern std::string GLOC_COLMAP_SPARSE_FOLDER;
 extern std::string GLOC_COLMAP_IMG_FOLDER;
 extern std::string GLOC_DBOW3_DATABASE;
@@ -56,17 +56,17 @@ extern int GLOC_ORB_FAST_THRESHOLD;
 // ── Descriptor choice ────────────────────────────────────────────────────────
 
 // 0 = use ORB descriptors, 1 = compute and use BEBLID descriptors.
-extern int GLOC_USE_BEBLID;
+extern bool GLOC_USE_BEBLID;
 extern float GLOC_BEBLID_SCALE_FACTOR;
 extern int GLOC_BEBLID_N_BITS; // 256 or 512
 
 // ── Feature matching ─────────────────────────────────────────────────────────
 
 // 0 = brute-force robustMatch, 1 = GMS matchGMS.
-extern int GLOC_USE_GMS;
+extern bool GLOC_USE_GMS;
 extern float GLOC_GMS_THRESHOLD;
-extern int GLOC_GMS_WITH_ROTATION;
-extern int GLOC_GMS_WITH_SCALE;
+extern bool GLOC_GMS_WITH_ROTATION;
+extern bool GLOC_GMS_WITH_SCALE;
 
 extern float GLOC_MATCH_LOWE_RATIO;
 extern int GLOC_MATCH_MAX_DIST;
@@ -115,5 +115,58 @@ extern double GLOC_MIN_INLIER_RATIO;
 
 // Maximum depth (metres) for inverse-depth lower bound: rho >= 1/GLOC_MAX_DEPTH_M.
 extern double GLOC_MAX_DEPTH_M;
+
+// When true, optimization is constrained to 4-DOF (x, y, z, yaw) by fixing
+// pitch and roll. Pitch and roll are trusted from IMU integration. When false
+// (default), full 6-DOF optimization is used.
+extern bool GLOC_USE_4DOF;
+
+// When true, relative poses between keyframes are fixed (trusted from VINS).
+// The only optimization variables are T_map_local (4 or 6 DOF depending on
+// GLOC_USE_4DOF). When false (default), per-keyframe poses are optimized
+// independently with soft relative-pose constraints.
+extern bool GLOC_FIX_REL_POSES;
+
+// Optional: folder prefix for debug images saved by runCorrespondences.
+// Empty = disabled. Example: "/mnt/EXDISK/tmp/dbg_"
+// Images are saved as:
+//   <prefix><t_kf>_g<g>_query.jpg       — query image with keypoints
+//   <prefix><t_kf>_g<g>_match.jpg       — side-by-side with match lines
+extern std::string GLOC_DEBUG_FOLDER;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Image preprocessing (applied to query images before ORB extraction)
+// ─────────────────────────────────────────────────────────────────────────────
+
+extern bool GLOC_PREPROCESS_WHITE_BALANCE;
+
+extern bool GLOC_PREPROCESS_DENOISE;
+extern int GLOC_PREPROCESS_DENOISE_D;
+extern double GLOC_PREPROCESS_DENOISE_SIGMA_COLOR;
+extern double GLOC_PREPROCESS_DENOISE_SIGMA_SPACE;
+
+extern bool GLOC_PREPROCESS_DENOISE_COLOR;
+extern double GLOC_PREPROCESS_DENOISE_H_LUMINANCE;
+extern double GLOC_PREPROCESS_DENOISE_H_COLOR;
+
+extern bool GLOC_PREPROCESS_GAMMA;
+extern double GLOC_PREPROCESS_GAMMA_VALUE;
+
+extern bool GLOC_PREPROCESS_TONEMAP;
+extern double GLOC_PREPROCESS_TONEMAP_GAMMA;
+extern double GLOC_PREPROCESS_TONEMAP_HIGHLIGHT;
+extern double GLOC_PREPROCESS_TONEMAP_SHADOW_LIFT;
+
+extern bool GLOC_PREPROCESS_CLAHE;
+extern double GLOC_PREPROCESS_CLAHE_CLIP_LIMIT;
+extern int GLOC_PREPROCESS_CLAHE_GRID_SIZE;
+
+extern bool GLOC_PREPROCESS_CLARITY;
+extern double GLOC_PREPROCESS_CLARITY_AMOUNT;
+extern double GLOC_PREPROCESS_CLARITY_SIGMA;
+
+extern bool GLOC_PREPROCESS_SHARPEN;
+extern double GLOC_PREPROCESS_SHARPEN_SIGMA;
+extern double GLOC_PREPROCESS_SHARPEN_AMOUNT;
 
 }; // namespace gloc

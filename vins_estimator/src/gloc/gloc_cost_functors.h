@@ -391,3 +391,249 @@ struct GlocWorldPriorCost
         return true;
     }
 };
+// ─────────────────────────────────────────────────────────────────────────────
+// Fixed-relative-pose functors
+//
+// When gloc_fix_rel_poses: true, relative keyframe poses are trusted from
+// VINS and held fixed. The only optimization variables are T_map_local:
+//   omega_map[3]  axis-angle of R_map_local^{-1} = R_local_map  (world→local, i.e. R_body_world when local≡world)
+//
+// Convention: we optimize T_map_local directly:
+//   R_map_local  encoded as axis-angle of its INVERSE: omega_map = AA(R_local_map)
+//                so that AngleAxisRotatePoint(omega_map, x_world) gives x_local.
+//
+// Actually simpler: store omega_map as AA(R_map_local) i.e. local→world,
+// and derive each keyframe's world pose inside the functor:
+//
+//   R_world_body[i] = R_map_local * R_local_body[i]
+//   t_world_body[i] = R_map_local * P_local[i] + t_map_local
+//
+// where R_local_body[i] and P_local[i] are baked in as constants.
+//
+// Variables : omega_map[3]  axis-angle of R_map_local  (local → world)
+//             t_map[3]      t_map_local (translation part of T_map_local)
+//             rho[1]        inverse depth (reprojection functor only)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GlocFixedRelReprojCost
+//
+// Reprojection cost when relative poses are fixed.
+// Bakes in R_local_body[i] and P_local[i] for one keyframe.
+//
+// The body-world derivation inside:
+//   R_map_local   = AngleAxis(omega_map)          (local → world)
+//   R_world_body  = R_map_local * R_local_body    (body → world)
+//   t_world_body  = R_map_local * P_local + t_map
+//   omega_body_world = AA(R_world_body^T)         (world → body, as in GlocReprojCost)
+//   t_i            = t_world_body
+// Then the reprojection math is identical to GlocReprojCost.
+// ─────────────────────────────────────────────────────────────────────────────
+struct GlocFixedRelReprojCost
+{
+    // Per-keyframe VINS local pose (constants)
+    double R_local_body[9]; // R_local_body  row-major
+    double P_local[3];      // t_local_body (body position in local frame)
+
+    // Same correspondence constants as GlocReprojCost
+    double Rtm[3];
+    double oj[3];
+    double pq[2];
+    double Rcr[9];
+    double tcr[3];
+    double fx, fy, cx_, cy_;
+
+    template <typename T>
+    bool operator()(const T *__restrict__ omega_map, // [3] AA(R_map_local)
+                    const T *__restrict__ t_map,     // [3] t_map_local
+                    const T *__restrict__ rho,       // [1] inverse depth
+                    T *__restrict__ res) const
+    {
+        // ── Derive R_world_body and t_world_body from T_map_local ─────────────
+        // R_map_local from axis-angle (col-major output from Ceres)
+        T R_ml[9]; // col-major R_map_local
+        ceres::AngleAxisToRotationMatrix(omega_map, R_ml);
+
+        // R_world_body = R_map_local * R_local_body  (both col-major)
+        // R_local_body is stored row-major → convert on the fly
+        T R_wb[9];
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+            {
+                R_wb[r + c * 3] = T(0); // col-major
+                for (int k = 0; k < 3; ++k)
+                    R_wb[r + c * 3] += R_ml[r + k * 3] * T(R_local_body[k * 3 + c]);
+            }
+
+        // t_world_body = R_map_local * P_local + t_map
+        const T pl[3] = {T(P_local[0]), T(P_local[1]), T(P_local[2])};
+        T t_i[3];
+        ceres::AngleAxisRotatePoint(omega_map, pl, t_i);
+        t_i[0] += t_map[0];
+        t_i[1] += t_map[1];
+        t_i[2] += t_map[2];
+
+        // omega_body_world = AA(R_world_body^T) = AA(R_body_world)
+        // R_wb is col-major R_world_body; R_body_world = R_wb^T col-major = R_wb row-major
+        T R_bw_cm[9]; // col-major R_body_world
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                R_bw_cm[r + c * 3] = R_wb[c + r * 3]; // transpose
+        T omega_bw[3];
+        ceres::RotationMatrixToAngleAxis(R_bw_cm, omega_bw);
+
+        // ── Now identical to GlocReprojCost ───────────────────────────────────
+        const T neg_t[3] = {-t_i[0], -t_i[1], -t_i[2]};
+        T t_bw[3];
+        ceres::AngleAxisRotatePoint(omega_bw, neg_t, t_bw);
+
+        const T oj_w[3] = {T(oj[0]), T(oj[1]), T(oj[2])};
+        const T Rtm_w[3] = {T(Rtm[0]), T(Rtm[1]), T(Rtm[2])};
+        T oj_b[3], Rtm_b[3];
+        ceres::AngleAxisRotatePoint(omega_bw, oj_w, oj_b);
+        ceres::AngleAxisRotatePoint(omega_bw, Rtm_w, Rtm_b);
+        oj_b[0] += t_bw[0];
+        oj_b[1] += t_bw[1];
+        oj_b[2] += t_bw[2];
+
+        T b[3], f[3];
+        for (int i = 0; i < 3; ++i)
+        {
+            b[i] = T(Rcr[i * 3 + 0]) * oj_b[0] + T(Rcr[i * 3 + 1]) * oj_b[1] + T(Rcr[i * 3 + 2]) * oj_b[2] + T(tcr[i]);
+            f[i] = T(Rcr[i * 3 + 0]) * Rtm_b[0] + T(Rcr[i * 3 + 1]) * Rtm_b[1] + T(Rcr[i * 3 + 2]) * Rtm_b[2];
+        }
+
+        const T h0 = rho[0] * b[0] + f[0];
+        const T h1 = rho[0] * b[1] + f[1];
+        const T h2 = rho[0] * b[2] + f[2];
+        if (h2 < T(1e-7))
+        {
+            res[0] = T(1000.0);
+            res[1] = T(1000.0);
+            return true;
+        }
+        const T inv_h2 = T(1.0) / h2;
+        res[0] = T(fx) * h0 * inv_h2 + T(cx_) - T(pq[0]);
+        res[1] = T(fy) * h1 * inv_h2 + T(cy_) - T(pq[1]);
+        return true;
+    }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GlocFixedRelEpipolarCost
+//
+// Sampson epipolar cost when relative poses are fixed.
+// ─────────────────────────────────────────────────────────────────────────────
+struct GlocFixedRelEpipolarCost
+{
+    double R_local_body[9]; // row-major
+    double P_local[3];
+
+    double x_q[3];
+    double x_t[3];
+    double R_j[9];
+    double t_j[3];
+    double Rcr[9];
+    double tcr[3];
+    double scale;
+
+    template <typename T>
+    bool operator()(const T *__restrict__ omega_map,
+                    const T *__restrict__ t_map,
+                    T *__restrict__ res) const
+    {
+        // ── Derive omega_bw and t_i (same as GlocFixedRelReprojCost) ─────────
+        T R_ml[9];
+        ceres::AngleAxisToRotationMatrix(omega_map, R_ml);
+
+        T R_wb[9];
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+            {
+                R_wb[r + c * 3] = T(0);
+                for (int k = 0; k < 3; ++k)
+                    R_wb[r + c * 3] += R_ml[r + k * 3] * T(R_local_body[k * 3 + c]);
+            }
+
+        const T pl[3] = {T(P_local[0]), T(P_local[1]), T(P_local[2])};
+        T t_i[3];
+        ceres::AngleAxisRotatePoint(omega_map, pl, t_i);
+        t_i[0] += t_map[0];
+        t_i[1] += t_map[1];
+        t_i[2] += t_map[2];
+
+        T R_bw_cm[9];
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                R_bw_cm[r + c * 3] = R_wb[c + r * 3];
+        T omega_bw[3];
+        ceres::RotationMatrixToAngleAxis(R_bw_cm, omega_bw);
+
+        // ── Now identical to GlocEpipolarCost ─────────────────────────────────
+        const T neg_t[3] = {-t_i[0], -t_i[1], -t_i[2]};
+        T t_bw[3];
+        ceres::AngleAxisRotatePoint(omega_bw, neg_t, t_bw);
+
+        T t_qw[3];
+        for (int i = 0; i < 3; ++i)
+            t_qw[i] = T(Rcr[i * 3 + 0]) * t_bw[0] + T(Rcr[i * 3 + 1]) * t_bw[1] + T(Rcr[i * 3 + 2]) * t_bw[2] + T(tcr[i]);
+
+        T R_bw2[9];
+        ceres::AngleAxisToRotationMatrix(omega_bw, R_bw2);
+        T R_qw[9];
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j)
+            {
+                R_qw[i * 3 + j] = T(0);
+                for (int k = 0; k < 3; ++k)
+                    R_qw[i * 3 + j] += T(Rcr[i * 3 + k]) * R_bw2[k + j * 3];
+            }
+
+        T R_rel[9];
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j)
+            {
+                R_rel[i * 3 + j] = T(0);
+                for (int k = 0; k < 3; ++k)
+                    R_rel[i * 3 + j] += R_qw[i * 3 + k] * T(R_j[j * 3 + k]);
+            }
+
+        T t_rel[3];
+        for (int i = 0; i < 3; ++i)
+        {
+            t_rel[i] = t_qw[i];
+            for (int j = 0; j < 3; ++j)
+                t_rel[i] -= R_rel[i * 3 + j] * T(t_j[j]);
+        }
+
+        T E[9];
+        for (int j = 0; j < 3; ++j)
+        {
+            E[0 * 3 + j] = -t_rel[2] * R_rel[1 * 3 + j] + t_rel[1] * R_rel[2 * 3 + j];
+            E[1 * 3 + j] = t_rel[2] * R_rel[0 * 3 + j] - t_rel[0] * R_rel[2 * 3 + j];
+            E[2 * 3 + j] = -t_rel[1] * R_rel[0 * 3 + j] + t_rel[0] * R_rel[1 * 3 + j];
+        }
+
+        T Ex_t[3] = {T(0), T(0), T(0)};
+        T ETx_q[3] = {T(0), T(0), T(0)};
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j)
+            {
+                Ex_t[i] += E[i * 3 + j] * T(x_t[j]);
+                ETx_q[i] += E[j * 3 + i] * T(x_q[j]);
+            }
+
+        T f_val = T(0);
+        for (int i = 0; i < 3; ++i)
+            f_val += T(x_q[i]) * Ex_t[i];
+
+        const T denom = Ex_t[0] * Ex_t[0] + Ex_t[1] * Ex_t[1] + ETx_q[0] * ETx_q[0] + ETx_q[1] * ETx_q[1];
+        if (denom < T(1e-14))
+        {
+            res[0] = T(1000.0);
+            return true;
+        }
+        res[0] = T(scale) * f_val / ceres::sqrt(denom);
+        return true;
+    }
+};

@@ -5,9 +5,11 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdio>
 #include <deque>
 #include <eigen3/Eigen/Dense>
 #include <eigen3/Eigen/Geometry>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <opencv2/opencv.hpp>
@@ -22,6 +24,37 @@
 #include "parameters.h"
 #include "point_features.h"
 
+// ── Gloc-local logging macros ─────────────────────────────────────────────────
+//
+// Bypass rosconsole entirely so gloc messages are always visible regardless
+// of the active ROS log level. Filter with:
+//
+//   roslaunch ... 2>&1 | grep "^\[GLOC"
+//
+// Levels:
+//   GLOC_DEBUG  verbose pipeline trace   stdout  [GLOC D]
+//   GLOC_INFO   normal milestones        stdout  [GLOC I]
+//   GLOC_WARN   unexpected but alive     stdout  [GLOC W]
+//   GLOC_ERROR  unrecoverable failure    stderr  [GLOC E]
+//
+// All output is flushed immediately so messages appear in order with other
+// terminal output even when stdout is line-buffered.
+// ─────────────────────────────────────────────────────────────────────────────
+// clang-format off
+#define GLOC_DEBUG(fmt, ...) \
+    do { std::fprintf(stdout, "[GLOC D] " fmt "\n", ##__VA_ARGS__); \
+         std::fflush(stdout); } while (0)
+#define GLOC_INFO(fmt, ...) \
+    do { std::fprintf(stdout, "[GLOC I] " fmt "\n", ##__VA_ARGS__); \
+         std::fflush(stdout); } while (0)
+#define GLOC_WARN(fmt, ...) \
+    do { std::fprintf(stdout, "[GLOC W] " fmt "\n", ##__VA_ARGS__); \
+         std::fflush(stdout); } while (0)
+#define GLOC_ERROR(fmt, ...) \
+    do { std::fprintf(stderr, "[GLOC E] " fmt "\n", ##__VA_ARGS__); \
+         std::fflush(stderr); } while (0)
+// clang-format on
+
 // Forward-declare Estimator so gloc.h does not pull in all estimator headers.
 namespace vins_multi
 {
@@ -34,21 +67,35 @@ namespace gloc
 // ─────────────────────────────────────────────────────────────────────────────
 // CameraRingBuffer
 //
-// Per-module fixed-capacity ring of (timestamp, image) pairs.
+// Per-module ring of (timestamp, image) pairs with eviction protection.
 //
 // Producer:  rosNode callback for that module (single producer per buffer).
 // Consumer:  Gloc process thread (single consumer per buffer).
 //
-// The capacity should be large enough to cover the deepest VINS keyframe
-// window plus typical gloc processing latency. For a 21-keyframe window at
-// 15 Hz (~50 ms inter-keyframe minimum), 30 slots = 2 s of history is ample.
+// Two eviction mechanisms keep the buffer bounded:
+//
+//   1. trimOlderThan(t)  — called by Phase 3 of onSnapshotChanged after
+//      computing the oldest unresolved keyframe. This is the *informed*
+//      eviction: it only removes images that no current keyframe can need.
+//
+//   2. Capacity eviction in push() — a safety ceiling that prevents
+//      unbounded growth if onSnapshotChanged stops running. push() honours
+//      a protect floor: images at or after protect_floor_ are kept even
+//      when the soft capacity is exceeded, up to a hard ceiling of
+//      hard_capacity_ (= 3× soft cap by default). This ensures that images
+//      gloc still needs survive bursts of incoming frames during VINS stalls.
+//
+// The eviction watermark (t_evict_watermark_) tracks the highest timestamp
+// lost to capacity eviction. findNearest uses it to distinguish a real gap
+// in the camera stream (→ NoneInTolerance) from an image that existed but
+// was evicted before gloc could look (→ Evicted, treated as NoneInTolerance
+// with a warning).
 //
 // All entries are kept in ascending timestamp order: push appends at the
 // back, eviction removes from the front. ROS image callbacks deliver frames
 // in arrival order, which is normally monotonic in timestamp, so the
-// invariant is preserved by construction. The push method asserts ordering
-// and drops out-of-order frames (rare; only happens with severely delayed
-// or replayed bags).
+// invariant is preserved by construction. The push method drops out-of-order
+// frames (rare; only happens with severely delayed or replayed bags).
 // ─────────────────────────────────────────────────────────────────────────────
 
 enum class LookupVerdict
@@ -62,8 +109,16 @@ enum class LookupVerdict
     NotYet,
 
     // No frame within tolerance, and the buffer has moved past t_kf + tol.
+    // The gap is genuine (the camera stream had no image near t_kf).
     // No future arrival can satisfy this keyframe. Caller should commit.
     NoneInTolerance,
+
+    // No frame within tolerance, and the buffer has moved past t_kf + tol,
+    // BUT the eviction watermark indicates that an image in the tolerance
+    // window was lost to capacity eviction before gloc could look. This is
+    // treated as terminal (the image is gone), but logged as a warning so
+    // the operator can increase the ring buffer capacity.
+    Evicted,
 
     // Buffer is empty.
     Empty,
@@ -79,12 +134,15 @@ struct LookupResult
 class CameraRingBuffer
 {
   public:
-    explicit CameraRingBuffer(std::size_t capacity = 10) : capacity_{capacity}
+    explicit CameraRingBuffer(std::size_t capacity = 10)
+        : capacity_{capacity},
+          hard_capacity_{capacity * 3}
     {
     }
 
     // Append an image with timestamp t. Drops out-of-order frames silently.
-    // Evicts the oldest frame when capacity is exceeded.
+    // Evicts images below protect_floor_ when soft capacity is exceeded.
+    // Above soft capacity, protected images are kept until the hard ceiling.
     void push(double t, const cv::Mat &image);
 
     // Find the frame with timestamp nearest to t_kf within ±tol. See
@@ -92,14 +150,15 @@ class CameraRingBuffer
     LookupResult findNearest(double t_kf, double tol) const;
 
     // Drop all slots whose timestamp is strictly less than t. The slot at
-    // exactly t (if any) is kept. Called by Gloc immediately after a
-    // successful findNearest as a "drop older-than-matched" optimisation:
-    // future state-3 keyframes will have t_kf greater than the just-resolved
-    // one, so anything earlier than the matched slot is dead weight.
-    //
-    // Concurrent push() at the back is safe — push only appends, this only
-    // removes from the front; the back-push is unaffected.
+    // exactly t (if any) is kept.
     void trimOlderThan(double t);
+
+    // Set the protect floor: push() will not evict images with t >= floor
+    // unless the hard ceiling is reached. Called by onSnapshotChanged Phase 3
+    // after computing the oldest-unresolved time minus tolerance. Pass
+    // std::numeric_limits<double>::max() to disable protection (all slots
+    // resolved) — this ensures no timestamp compares >= the floor.
+    void setProtectFloor(double floor);
 
     // Diagnostic helpers.
     std::size_t size() const;
@@ -114,7 +173,22 @@ class CameraRingBuffer
 
     mutable std::mutex mtx_;
     std::deque<Slot> slots_;
-    std::size_t capacity_;
+    std::size_t capacity_;      // soft capacity (configured via YAML)
+    std::size_t hard_capacity_; // absolute ceiling (3× soft)
+
+    // Images at or after this timestamp are protected from capacity eviction.
+    // Updated by setProtectFloor() from onSnapshotChanged.
+    //
+    // Sentinel: std::numeric_limits<double>::max() means "no protection" —
+    // no image timestamp can be >= max(), so push() evicts freely at the
+    // soft capacity. DO NOT use 0.0 as "no protection": ROS timestamps are
+    // large positive numbers, so 0.0 would protect everything.
+    double protect_floor_{std::numeric_limits<double>::max()};
+
+    // Highest timestamp evicted by capacity pressure (not by trimOlderThan,
+    // which is an informed eviction). Used by findNearest to detect whether
+    // a NoneInTolerance was caused by a genuine stream gap or by a lost image.
+    double t_evict_watermark_{0.0};
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -165,6 +239,13 @@ struct Snapshot
         // Identity & lookup key for gloc. Real-time timestamp, post time-offset.
         double t_kf{0.0};
 
+        // Raw image timestamp WITHOUT td correction. This is the timestamp
+        // domain that the gloc ring buffers operate in (images are pushed at
+        // their raw ROS header stamp). All ring-buffer lookups use t_image
+        // so that the dynamically-estimated td does not create a domain
+        // mismatch between keyframe queries and buffered images.
+        double t_image{0.0};
+
         // Local-frame body pose at t_kf: T_local_body(t_kf).
         // Gloc holds this as the soft-constraint anchor for the corresponding
         // optimization variable T_map_body(t_kf).
@@ -199,7 +280,8 @@ struct PerModuleResolution
 
     // Valid when verdict == Found.
     double t_image{0.0};
-    cv::Mat image;
+    cv::Mat image;              // raw image from ring buffer
+    cv::Mat preprocessed_image; // preprocessed version (filled by runOrbAndDbow)
 
     // ── Pipeline cache (filled by processLoop, stage 1) ───────────────────
 
@@ -228,7 +310,8 @@ struct PerModuleResolution
     bool isTerminal() const
     {
         return verdict == LookupVerdict::Found ||
-               verdict == LookupVerdict::NoneInTolerance;
+               verdict == LookupVerdict::NoneInTolerance ||
+               verdict == LookupVerdict::Evicted;
     }
 };
 
@@ -242,7 +325,8 @@ struct PerModuleResolution
 
 struct KeyframeGlocState
 {
-    double t_kf{0.0}; // == map key
+    double t_kf{0.0};    // == map key (td-corrected, used for pose optimization)
+    double t_image{0.0}; // raw image timestamp (no td), used for ring-buffer lookup
     Eigen::Quaterniond R_local{Eigen::Quaterniond::Identity()};
     Eigen::Vector3d P_local{Eigen::Vector3d::Zero()};
     unsigned int cam_unique_id{0};
@@ -453,6 +537,11 @@ class Gloc
     // Returns true if the solution was accepted (inlier ratio ≥ threshold)
     // and updates snapped_ / T_map_local_R_ / T_map_local_t_ on success.
     bool runOptimization(std::vector<KeyframeGlocState> &working_set);
+    bool runOptimization_6DOF(std::vector<KeyframeGlocState> &working_set);
+    bool runOptimization_4DOF(std::vector<KeyframeGlocState> &working_set);
+    bool runOptimization_FixedRel_6DOF(std::vector<KeyframeGlocState> &working_set);
+    bool runOptimization_FixedRel_4DOF(std::vector<KeyframeGlocState> &working_set);
+    bool runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set, bool use_4dof);
     // features from the cached image and query DBoW3 to populate dbow_candidates.
     void runOrbAndDbow(std::vector<KeyframeGlocState> &working_set);
 
@@ -464,7 +553,8 @@ class Gloc
     // Stage 1c: for each slot with a valid best_train_idx, match ORB descriptors
     // against the cached train features, run geometric verification, and store
     // the surviving 2D-2D correspondences.
-    void runCorrespondences(std::vector<KeyframeGlocState> &working_set);
+    void runCorrespondences(std::vector<KeyframeGlocState> &working_set,
+                            uint64_t snapshot_id);
 
     // Stage 1d: re-acquire state_mutex_ briefly and flush pipeline results from
     // the working_set copy back into state_map_.

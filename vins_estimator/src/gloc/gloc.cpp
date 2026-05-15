@@ -16,8 +16,215 @@
 
 namespace fs = std::filesystem;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Query image preprocessing
+//
+// Applied to the cached slot image before ORB extraction so the query
+// appearance matches the preprocessed train images in the COLMAP map.
+// All functions adapted from extract_images_from_metadata.cpp.
+// ─────────────────────────────────────────────────────────────────────────────
+
+static cv::Mat gloc_preprocessWhiteBalance(const cv::Mat &img)
+{
+    cv::Scalar mean = cv::mean(img);
+    double avg = (mean[0] + mean[1] + mean[2]) / 3.0;
+    std::vector<cv::Mat> ch;
+    cv::split(img, ch);
+    for (int i = 0; i < 3; ++i)
+        if (mean[i] > 0)
+            ch[i].convertTo(ch[i], -1, avg / mean[i]);
+    cv::Mat r;
+    cv::merge(ch, r);
+    return r;
+}
+
+static cv::Mat gloc_preprocessGamma(const cv::Mat &img, double gamma)
+{
+    cv::Mat lut(1, 256, CV_8UC1);
+    for (int i = 0; i < 256; ++i)
+        lut.at<uchar>(i) = cv::saturate_cast<uchar>(
+            std::pow(i / 255.0, 1.0 / gamma) * 255.0);
+    cv::Mat r;
+    cv::LUT(img, lut, r);
+    return r;
+}
+
+static cv::Mat gloc_preprocessDenoise(const cv::Mat &img,
+                                      int d, double sc, double ss)
+{
+    cv::Mat r;
+    cv::bilateralFilter(img, r, d, sc, ss);
+    cv::bilateralFilter(r.clone(), r, d, sc, ss);
+    return r;
+}
+
+static cv::Mat gloc_preprocessDenoiseColor(const cv::Mat &img,
+                                           float hl, float hc)
+{
+    cv::Mat r;
+    cv::fastNlMeansDenoisingColored(img, r, hl, hc, 7, 21);
+    return r;
+}
+
+static cv::Mat gloc_preprocessTonemap(const cv::Mat &img,
+                                      double gamma, double highlight,
+                                      double shadow_lift)
+{
+    cv::Mat f32;
+    img.convertTo(f32, CV_32FC3, 1.0 / 255.0);
+    for (int y = 0; y < f32.rows; ++y)
+    {
+        cv::Vec3f *row = f32.ptr<cv::Vec3f>(y);
+        for (int x = 0; x < f32.cols; ++x)
+            for (int c = 0; c < 3; ++c)
+            {
+                float v = row[x][c];
+                v = static_cast<float>(shadow_lift) + v * static_cast<float>(1.0 - shadow_lift);
+                v = std::pow(std::max(v, 0.0f), static_cast<float>(gamma));
+                float knee = static_cast<float>(1.0 - highlight);
+                if (v > knee)
+                {
+                    float t = (v - knee) / static_cast<float>(highlight);
+                    t = t - t * t * 0.5f;
+                    v = knee + t * static_cast<float>(highlight);
+                }
+                row[x][c] = std::min(v, 1.0f);
+            }
+    }
+    cv::Mat r;
+    f32.convertTo(r, CV_8UC3, 255.0);
+    return r;
+}
+
+static cv::Mat gloc_preprocessCLAHE(const cv::Mat &img,
+                                    double clip_limit, int grid_size)
+{
+    cv::Mat r;
+    auto clahe = cv::createCLAHE(clip_limit, cv::Size(grid_size, grid_size));
+    if (img.channels() == 1)
+    {
+        clahe->apply(img, r);
+    }
+    else
+    {
+        cv::Mat lab;
+        cv::cvtColor(img, lab, cv::COLOR_BGR2Lab);
+        std::vector<cv::Mat> ch;
+        cv::split(lab, ch);
+        clahe->apply(ch[0], ch[0]);
+        cv::merge(ch, lab);
+        cv::cvtColor(lab, r, cv::COLOR_Lab2BGR);
+    }
+    return r;
+}
+
+static cv::Mat gloc_preprocessClarity(const cv::Mat &img,
+                                      double sigma, double amount)
+{
+    cv::Mat f32;
+    img.convertTo(f32, CV_32FC3, 1.0 / 255.0);
+    cv::Mat blurred;
+    cv::GaussianBlur(f32, blurred, cv::Size(0, 0), sigma);
+    cv::Mat hp;
+    cv::subtract(f32, blurred, hp);
+    cv::Mat boosted;
+    cv::addWeighted(f32, 1.0, hp, amount, 0.0, boosted);
+    cv::threshold(boosted, boosted, 1.0, 1.0, cv::THRESH_TRUNC);
+    cv::max(boosted, 0.0, boosted);
+    cv::Mat r;
+    boosted.convertTo(r, CV_8UC3, 255.0);
+    return r;
+}
+
+static cv::Mat gloc_preprocessSharpen(const cv::Mat &img,
+                                      double sigma, double amount)
+{
+    cv::Mat blurred;
+    cv::GaussianBlur(img, blurred, cv::Size(0, 0), sigma);
+    cv::Mat r;
+    cv::addWeighted(img, 1.0 + amount, blurred, -amount, 0, r);
+    return r;
+}
+
+// Apply all enabled preprocessing steps in the correct order.
+// Input may be grayscale or BGR; output matches input channels.
+static cv::Mat gloc_preprocessImage(const cv::Mat &image)
+{
+    using namespace gloc; // bring GLOC_PREPROCESS_* into scope
+    cv::Mat result = image;
+
+    // Convert to BGR for colour-aware steps if needed
+    bool was_gray = (image.channels() == 1);
+    if (was_gray && (GLOC_PREPROCESS_WHITE_BALANCE ||
+                     GLOC_PREPROCESS_DENOISE_COLOR ||
+                     GLOC_PREPROCESS_TONEMAP ||
+                     GLOC_PREPROCESS_CLAHE ||
+                     GLOC_PREPROCESS_CLARITY))
+        cv::cvtColor(result, result, cv::COLOR_GRAY2BGR);
+
+    if (GLOC_PREPROCESS_WHITE_BALANCE && result.channels() == 3)
+        result = gloc_preprocessWhiteBalance(result);
+
+    if (GLOC_PREPROCESS_DENOISE)
+        result = gloc_preprocessDenoise(result,
+                                        GLOC_PREPROCESS_DENOISE_D,
+                                        GLOC_PREPROCESS_DENOISE_SIGMA_COLOR,
+                                        GLOC_PREPROCESS_DENOISE_SIGMA_SPACE);
+
+    if (GLOC_PREPROCESS_DENOISE_COLOR && result.channels() == 3)
+        result = gloc_preprocessDenoiseColor(result,
+                                             static_cast<float>(GLOC_PREPROCESS_DENOISE_H_LUMINANCE),
+                                             static_cast<float>(GLOC_PREPROCESS_DENOISE_H_COLOR));
+
+    if (GLOC_PREPROCESS_GAMMA)
+        result = gloc_preprocessGamma(result, GLOC_PREPROCESS_GAMMA_VALUE);
+
+    if (GLOC_PREPROCESS_TONEMAP && result.channels() == 3)
+        result = gloc_preprocessTonemap(result,
+                                        GLOC_PREPROCESS_TONEMAP_GAMMA,
+                                        GLOC_PREPROCESS_TONEMAP_HIGHLIGHT,
+                                        GLOC_PREPROCESS_TONEMAP_SHADOW_LIFT);
+
+    if (GLOC_PREPROCESS_CLAHE)
+        result = gloc_preprocessCLAHE(result,
+                                      GLOC_PREPROCESS_CLAHE_CLIP_LIMIT,
+                                      GLOC_PREPROCESS_CLAHE_GRID_SIZE);
+
+    if (GLOC_PREPROCESS_CLARITY)
+        result = gloc_preprocessClarity(result,
+                                        GLOC_PREPROCESS_CLARITY_SIGMA,
+                                        GLOC_PREPROCESS_CLARITY_AMOUNT);
+
+    if (GLOC_PREPROCESS_SHARPEN)
+        result = gloc_preprocessSharpen(result,
+                                        GLOC_PREPROCESS_SHARPEN_SIGMA,
+                                        GLOC_PREPROCESS_SHARPEN_AMOUNT);
+
+    // Convert back to grayscale if input was grayscale
+    if (was_gray && result.channels() == 3)
+        cv::cvtColor(result, result, cv::COLOR_BGR2GRAY);
+
+    return result;
+}
+
 namespace gloc
 {
+
+// ─────────────────────────────────────────────────────────────────────────────
+// yawOnlyR
+//
+// Extracts the yaw component of a rotation matrix and returns a pure
+// yaw rotation (pitch = roll = 0). Used when GLOC_USE_4DOF is true to
+// ensure T_map_local_R_ is gravity-aligned before storing and broadcasting.
+//
+// Yaw is extracted as atan2(R(1,0), R(0,0)) — the rotation of the X axis
+// projected onto the world XY plane.
+// ─────────────────────────────────────────────────────────────────────────────
+static Eigen::Matrix3d yawOnlyR(const Eigen::Matrix3d &R)
+{
+    const double yaw = std::atan2(R(1, 0), R(0, 0));
+    return Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CameraRingBuffer
@@ -27,24 +234,55 @@ void CameraRingBuffer::push(double t, const cv::Mat &image)
 {
     std::lock_guard<std::mutex> lk(mtx_);
 
-    // Reject out-of-order frames. The invariant slots_ is sorted ascending
-    // by timestamp keeps findNearest correct without sorting on every read.
-    // Normal ROS callbacks deliver frames in arrival order, which is almost
-    // always monotonic in timestamp. Stragglers from a delayed transport or
-    // a replayed bag are dropped rather than inserted out of order.
+    // Reject out-of-order frames. The invariant that slots_ is sorted
+    // ascending by timestamp keeps findNearest correct without sorting on
+    // every read.
     if (!slots_.empty() && t <= slots_.back().t)
     {
-        ROS_WARN_THROTTLE(2.0,
-                          "[Gloc::CameraRingBuffer] dropping out-of-order frame: "
-                          "t=%.6f vs newest=%.6f",
-                          t, slots_.back().t);
+        GLOC_WARN("[CameraRingBuffer] out-of-order frame dropped: t=%.6f vs newest=%.6f",
+                  t, slots_.back().t);
         return;
     }
 
     slots_.push_back({t, image});
 
+    // Evict from the front, respecting the protect floor.
+    //
+    // Images BELOW protect_floor_ are safe to evict — gloc has already
+    // resolved or given up on every keyframe that could have needed them.
+    //
+    // Images AT or ABOVE protect_floor_ are still needed by unresolved
+    // keyframes. They survive past the soft capacity_ limit. Only the
+    // hard_capacity_ ceiling forces eviction of protected images (to
+    // prevent unbounded growth if onSnapshotChanged stops running).
     while (slots_.size() > capacity_)
-        slots_.pop_front();
+    {
+        if (slots_.front().t >= protect_floor_)
+        {
+            // Front image is protected. Only evict if hard ceiling exceeded.
+            if (slots_.size() > hard_capacity_)
+            {
+                GLOC_WARN("[CameraRingBuffer] hard ceiling reached (%zu > %zu), "
+                          "evicting protected t=%.6f (floor=%.6f)",
+                          slots_.size(), hard_capacity_,
+                          slots_.front().t, protect_floor_);
+                t_evict_watermark_ = std::max(t_evict_watermark_,
+                                              slots_.front().t);
+                slots_.pop_front();
+            }
+            else
+            {
+                break; // let buffer grow beyond soft cap
+            }
+        }
+        else
+        {
+            // Below protect floor — safe to evict, but track watermark.
+            t_evict_watermark_ = std::max(t_evict_watermark_,
+                                          slots_.front().t);
+            slots_.pop_front();
+        }
+    }
 }
 
 LookupResult CameraRingBuffer::findNearest(double t_kf, double tol) const
@@ -60,7 +298,7 @@ LookupResult CameraRingBuffer::findNearest(double t_kf, double tol) const
     }
 
     // slots_ is sorted ascending by timestamp. Binary-search the first slot
-    // with t >= t_kf, then compare its predecessor too — the nearest in time
+    // with t >= t_kf, then compare its predecessor too - the nearest in time
     // is one of those two.
     auto it = std::lower_bound(
         slots_.begin(), slots_.end(), t_kf,
@@ -97,14 +335,37 @@ LookupResult CameraRingBuffer::findNearest(double t_kf, double tol) const
         return r;
     }
 
-    // No frame within tolerance. Distinguish "still waiting" from "missed it
-    // forever" by checking whether the buffer has any frame beyond t_kf+tol.
-    // If the newest frame is still earlier than t_kf+tol, a future arrival
-    // may yet fall inside the window, so we tell the caller to retry.
+    // No frame within tolerance.
     const double newest_t = slots_.back().t;
-    r.verdict = (newest_t > t_kf + tol)
-                    ? LookupVerdict::NoneInTolerance
-                    : LookupVerdict::NotYet;
+    if (newest_t <= t_kf + tol)
+    {
+        // Buffer hasn't advanced past the tolerance window yet — the image
+        // may still arrive.
+        r.verdict = LookupVerdict::NotYet;
+        return r;
+    }
+
+    // Buffer has moved past t_kf + tol. The image is gone.
+    // Distinguish a genuine stream gap from an eviction casualty.
+    if (t_evict_watermark_ >= t_kf - tol)
+    {
+        // An image within the tolerance window was evicted by capacity
+        // pressure before we could look. The camera DID produce a frame
+        // near t_kf, but it was lost.
+        r.verdict = LookupVerdict::Evicted;
+        GLOC_WARN("[findNearest] EVICTED t_kf=%.4f tol=%.4f watermark=%.4f"
+                  " -- increase image_ring_buffer_capacity",
+                  t_kf, tol, t_evict_watermark_);
+    }
+    else
+    {
+        // Genuine gap — the camera stream had no image near t_kf.
+        r.verdict = LookupVerdict::NoneInTolerance;
+        if (best_it != slots_.end())
+            GLOC_DEBUG("[findNearest] NoneInTol t_kf=%.4f nearest=%.4f dt=%.4f tol=%.4f",
+                       t_kf, best_it->t, std::abs(best_it->t - t_kf), tol);
+    }
+
     return r;
 }
 
@@ -112,11 +373,11 @@ void CameraRingBuffer::trimOlderThan(double t)
 {
     std::lock_guard<std::mutex> lk(mtx_);
 
-    // Strict less-than: the slot at exactly t (if present) is kept. This is
-    // the "drop older-than-matched" optimisation called by Gloc after a
-    // successful findNearest — future state-3 keyframes will have t_kf later
-    // than the just-resolved one, so anything earlier than the matched slot
-    // can never serve them.
+    // Strict less-than: the slot at exactly t (if present) is kept.
+    // This is the *informed* eviction called by Phase 3 of onSnapshotChanged.
+    // These images are provably unneeded (every keyframe that could match
+    // them is already resolved or marginalized), so we do NOT update
+    // t_evict_watermark_ — this is not data loss.
     auto cutoff = std::lower_bound(
         slots_.begin(), slots_.end(), t,
         [](const Slot &s, double v) { return s.t < v; });
@@ -134,6 +395,12 @@ bool CameraRingBuffer::empty() const
 {
     std::lock_guard<std::mutex> lk(mtx_);
     return slots_.empty();
+}
+
+void CameraRingBuffer::setProtectFloor(double floor)
+{
+    std::lock_guard<std::mutex> lk(mtx_);
+    protect_floor_ = floor;
 }
 
 Gloc::Gloc()
@@ -169,11 +436,11 @@ bool Gloc::init()
 {
     if (estimator_ptr_ == nullptr)
     {
-        std::cerr << "[Gloc] ERROR: setEstimator() must be called before init().\n";
+        GLOC_ERROR("[init] setEstimator() must be called before init()");
         return false;
     }
 
-    std::cout << "[Gloc::init] Initialising global localiser ...\n";
+    GLOC_INFO("[init] Initialising global localiser ...");
 
     if (!checkPaths())
         return false;
@@ -203,8 +470,7 @@ bool Gloc::init()
         ring_buffers_.emplace_back(std::make_unique<CameraRingBuffer>(cap));
     }
 
-    std::cout << "[Gloc::init] Allocated " << ring_buffers_.size()
-              << " camera ring buffer(s).\n";
+    GLOC_INFO("[init] Allocated %zu camera ring buffer(s).", ring_buffers_.size());
 
     initialized_.store(true, std::memory_order_release);
 
@@ -217,13 +483,12 @@ bool Gloc::init()
         camodocal::CameraPtr cam = camodocal::CameraFactory::instance()->generateCameraFromYamlFile(mod.calib_file_[0]);
         if (!cam)
         {
-            ROS_ERROR("[Gloc::init] Failed to load camera model from %s",
-                      mod.calib_file_[0].c_str());
+            GLOC_ERROR("[init] Failed to load camera model from %s",
+                       mod.calib_file_[0].c_str());
             return false;
         }
         query_cameras_.push_back(cam);
-        std::cout << "[Gloc::init] Loaded query camera model from "
-                  << mod.calib_file_[0] << "\n";
+        GLOC_INFO("[init] Loaded query camera model from %s", mod.calib_file_[0].c_str());
     }
 
     // ── Construct shared ORB extractor ───────────────────────────────────────
@@ -255,31 +520,26 @@ bool Gloc::init()
 
         beblid_extractor_ = cv::xfeatures2d::BEBLID::create(GLOC_BEBLID_SCALE_FACTOR, n_bits);
 
-        std::cout << "[Gloc::init] BEBLID extractor enabled"
-                  << " (scale_factor=" << GLOC_BEBLID_SCALE_FACTOR
-                  << " n_bits=" << GLOC_BEBLID_N_BITS << ").\n";
+        GLOC_INFO("[init] BEBLID extractor: scale_factor=%.2f n_bits=%d", GLOC_BEBLID_SCALE_FACTOR, GLOC_BEBLID_N_BITS);
     }
 
     // ── Construct feature matcher ────────────────────────────────────────────
     if (GLOC_USE_GMS)
     {
         feat_matcher_ = std::make_unique<PointFeatureMatcherGMS>(cv::NORM_HAMMING,
-                                                                 static_cast<bool>(GLOC_GMS_WITH_ROTATION),
-                                                                 static_cast<bool>(GLOC_GMS_WITH_SCALE),
+                                                                 GLOC_GMS_WITH_ROTATION,
+                                                                 GLOC_GMS_WITH_SCALE,
                                                                  static_cast<double>(GLOC_GMS_THRESHOLD));
-        std::cout << "[Gloc::init] Matcher: GMS"
-                  << " (rotation=" << GLOC_GMS_WITH_ROTATION
-                  << " scale=" << GLOC_GMS_WITH_SCALE
-                  << " threshold=" << GLOC_GMS_THRESHOLD << ")\n";
+        GLOC_INFO("[init] Matcher: GMS (rotation=%d scale=%d threshold=%.1f)", GLOC_GMS_WITH_ROTATION, GLOC_GMS_WITH_SCALE, GLOC_GMS_THRESHOLD);
     }
     else
     {
         feat_matcher_ = std::make_unique<PointFeatureMatcherBruteForce>(
             cv::NORM_HAMMING);
-        std::cout << "[Gloc::init] Matcher: BruteForce Hamming.\n";
+        GLOC_INFO("[init] Matcher: BruteForce Hamming");
     }
 
-    std::cout << "[Gloc::init] Ready.\n";
+    GLOC_INFO("[init] Ready.");
     return true;
 }
 
@@ -290,7 +550,7 @@ bool Gloc::init()
 void Gloc::start_process_thread()
 {
     process_thread_ = std::thread(&Gloc::processLoop, this);
-    std::cout << "[Gloc] Process thread started.\n";
+    GLOC_INFO("[start] Process thread started.");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -308,9 +568,8 @@ void Gloc::pushCameraImage(unsigned int gloc_unique_id,
 
     if (gloc_unique_id >= ring_buffers_.size())
     {
-        ROS_WARN_THROTTLE(2.0,
-                          "[Gloc::pushCameraImage] gloc_unique_id %u out of range (size=%zu)",
-                          gloc_unique_id, ring_buffers_.size());
+        GLOC_WARN("[pushCameraImage] gloc_unique_id %u out of range (size=%zu)",
+                  gloc_unique_id, ring_buffers_.size());
         return;
     }
 
@@ -388,10 +647,11 @@ void Gloc::onSnapshotChanged(const Snapshot &snapshot)
             if (inserted)
             {
                 s.t_kf = kf.t_kf;
+                s.t_image = kf.t_image; // raw image timestamp for ring-buffer lookup
                 s.cam_unique_id = kf.cam_unique_id;
                 s.per_gloc.assign(n_modules, PerModuleResolution{});
             }
-            // Refresh local pose every snapshot — VINS keeps re-optimising
+            // Refresh local pose every snapshot - VINS keeps re-optimising
             // these and the soft-constraint anchor needs to track.
             s.R_local = kf.R_local;
             s.P_local = kf.P_local;
@@ -407,7 +667,7 @@ void Gloc::onSnapshotChanged(const Snapshot &snapshot)
         //   ΔT[i] = T_local_new[i] ⊕ T_local_old[i]^-1
         //         applied as: T_map_local_new = T_map_local_old ⊕ ΔT_mean
         //
-        // If no common keyframes exist, T_map_local is left unchanged — the
+        // If no common keyframes exist, T_map_local is left unchanged - the
         // next successful gloc solve will produce a fresh estimate.
         {
             std::lock_guard<std::mutex> snap_lk(snap_mutex_);
@@ -433,7 +693,7 @@ void Gloc::onSnapshotChanged(const Snapshot &snapshot)
                 {
                     auto it = new_pose_map.find(t_kf);
                     if (it == new_pose_map.end())
-                        continue; // keyframe marginalized — skip
+                        continue; // keyframe marginalized - skip
 
                     const auto &new_kf = *it->second;
                     const double w = snap.weight;
@@ -516,37 +776,75 @@ void Gloc::onSnapshotChanged(const Snapshot &snapshot)
         //
         // For each (keyframe, gloc-module) slot that is still non-terminal
         // (Empty or NotYet), attempt to resolve it now against the module's
-        // ring buffer. On a successful Found we additionally trim the buffer
-        // to drop slots older than the matched one — they can never serve a
-        // future keyframe under the t_kf-increasing invariant.
+        // ring buffer.
+        //
+        // Ring buffers store images at their raw ROS timestamp (no td), so
+        // we query with s.t_image (the raw image time) rather than t_kf
+        // (which includes the dynamically-estimated td offset). This avoids
+        // a domain mismatch that would cause missed lookups when td drifts.
         for (auto &[t_kf, s] : state_map_)
         {
             for (std::size_t g = 0; g < s.per_gloc.size(); ++g)
             {
                 auto &slot = s.per_gloc[g];
                 if (slot.isTerminal())
-                    continue; // Found or NoneInTolerance — already done
+                    continue; // Found, NoneInTolerance, or Evicted
 
                 const double tol_g = vins_multi::GLOC_CAM_MODULES[g].image_match_tol_s_;
-                const LookupResult r = ring_buffers_[g]->findNearest(t_kf, tol_g);
+                const LookupResult r = ring_buffers_[g]->findNearest(s.t_image, tol_g);
 
                 slot.verdict = r.verdict;
                 if (r.verdict == LookupVerdict::Found)
                 {
                     slot.t_image = r.t_image;
                     slot.image = r.image;
-                    // Drop older-than-matched: future state-3 keyframes have
-                    // larger t_kf, so anything earlier than r.t_image cannot
-                    // help them. The matched slot itself is kept (strict <).
-                    ring_buffers_[g]->trimOlderThan(r.t_image);
                 }
-                // For NotYet / NoneInTolerance / Empty we just record the
-                // verdict; nothing else changes. NotYet → tried again next
-                // snapshot; NoneInTolerance → terminal, never retried.
+                else if (r.verdict == LookupVerdict::NoneInTolerance)
+                {
+                    GLOC_DEBUG("[snapshot] NoneInTol t_image=%.4f t_kf=%.4f tol=%.4f g=%zu",
+                               s.t_image, t_kf, tol_g, g);
+                }
+                // Evicted: the ROS_WARN is already emitted by findNearest.
+                // The slot becomes terminal — the image is unrecoverable.
             }
         }
 
-        // ── Phase 3: signal the worker ──────────────────────────────────────
+        // ── Phase 3: smart ring buffer trim + protect floor ─────────────────
+        //
+        // For each ring buffer:
+        //   1. Trim images that no keyframe can possibly need (informed eviction).
+        //   2. Set the protect floor so push() knows what to keep.
+        //
+        // Uses t_image (raw timestamp, same domain as the ring buffer).
+        for (std::size_t g = 0; g < ring_buffers_.size(); ++g)
+        {
+            double oldest_unresolved_t_image = std::numeric_limits<double>::max();
+            for (const auto &[t, s] : state_map_)
+            {
+                const auto &slot = s.per_gloc[g];
+                if (!slot.isTerminal())
+                {
+                    oldest_unresolved_t_image = std::min(oldest_unresolved_t_image, s.t_image);
+                }
+            }
+
+            const double tol_g = vins_multi::GLOC_CAM_MODULES[g].image_match_tol_s_;
+
+            if (oldest_unresolved_t_image < std::numeric_limits<double>::max())
+            {
+                const double floor = oldest_unresolved_t_image - tol_g;
+                ring_buffers_[g]->trimOlderThan(floor);
+                ring_buffers_[g]->setProtectFloor(floor);
+            }
+            else
+            {
+                // All slots resolved — no protection needed. Let push()
+                // evict freely at the soft capacity limit.
+                ring_buffers_[g]->setProtectFloor(std::numeric_limits<double>::max());
+            }
+        }
+
+        // ── Phase 4: signal the worker ──────────────────────────────────────
         snapshot_fresh_ = true;
     }
 
@@ -573,7 +871,7 @@ void Gloc::onSnapshotChanged(const Snapshot &snapshot)
 
 void Gloc::processLoop()
 {
-    std::cout << "[Gloc] processLoop running.\n";
+    GLOC_INFO("[processLoop] Started.");
 
     while (true)
     {
@@ -589,7 +887,35 @@ void Gloc::processLoop()
             snapshot_fresh_ = false;
             working_snapshot_id = last_snapshot_id_;
 
-            // Copy out only keyframes with at least one Found slot — keyframes
+            // Count verdicts across all keyframes for diagnostics.
+            int n_total = 0, n_found = 0, n_none = 0, n_evicted = 0, n_notyet = 0;
+            for (const auto &[t, s] : state_map_)
+            {
+                ++n_total;
+                bool has_found = false, has_none = false, has_evicted = false;
+                for (const auto &slot : s.per_gloc)
+                {
+                    if (slot.verdict == LookupVerdict::Found)
+                        has_found = true;
+                    else if (slot.verdict == LookupVerdict::NoneInTolerance)
+                        has_none = true;
+                    else if (slot.verdict == LookupVerdict::Evicted)
+                        has_evicted = true;
+                }
+                if (has_found)
+                    ++n_found;
+                else if (has_none)
+                    ++n_none;
+                else if (has_evicted)
+                    ++n_evicted;
+                else
+                    ++n_notyet;
+            }
+            GLOC_DEBUG("[snapshot %lu] kf=%d Found=%d NoneInTol=%d Evicted=%d NotYet=%d",
+                       (unsigned long)working_snapshot_id,
+                       n_total, n_found, n_none, n_evicted, n_notyet);
+
+            // Copy out only keyframes with at least one Found slot - keyframes
             // with zero resolved gloc images contribute nothing to the
             // current round but stay in state_map_ in case they resolve later.
             for (const auto &[t, s] : state_map_)
@@ -607,23 +933,122 @@ void Gloc::processLoop()
                     working_set.push_back(s);
             }
         }
-        // state_mutex_ released — the Ceres solve below runs without it.
-
-        ROS_DEBUG("[Gloc] worker round snapshot_id=%lu, %zu resolved keyframes",
-                  (unsigned long)working_snapshot_id, working_set.size());
+        // state_mutex_ released - the Ceres solve below runs without it.
 
         if (working_set.empty())
             continue;
 
         runOrbAndDbow(working_set);
         runConsensusVoting(working_set);
-        runCorrespondences(working_set);
+        runCorrespondences(working_set, working_snapshot_id);
         writeBackToStateMap(working_set);
 
         runOptimization(working_set);
     }
 
-    std::cout << "[Gloc] processLoop exiting.\n";
+    GLOC_INFO("[processLoop] Exiting.");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// saveDebugImages  (file-local helper)
+//
+// Saves query image with keypoints and side-by-side match image to disk.
+// Called at every correspondence attempt (pass or fail) when GLOC_DEBUG_FOLDER
+// is set. The 'reason' suffix encodes what happened:
+//   ""                  - match accepted
+//   "VOTED_OUT"         - rejected by consensus voting
+//   "FEW_INLIERS_<n>"   - rejected by geometric test
+//   "NO_TRAIN_IMG"      - train image could not be loaded
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void saveDebugImages(const std::string &base_dir,
+                            uint64_t snapshot_id,
+                            double t_kf,
+                            std::size_t g,
+                            std::size_t train_idx,
+                            const cv::Mat &query_image,
+                            const std::vector<cv::KeyPoint> &kp0,
+                            const std::vector<cv::KeyPoint> &kp1,
+                            const std::vector<cv::DMatch> &matches,
+                            const std::string &reason,
+                            const gloc::Map &map)
+{
+    if (base_dir.empty() || query_image.empty())
+        return;
+
+    // base_dir is guaranteed to end with '/' (normalized in readParameters).
+    // Create round sub-folder inside the base directory.
+    const std::string round_dir =
+        base_dir + "round_" + std::to_string(snapshot_id) + "/";
+    fs::create_directories(round_dir);
+
+    // Base filename
+    const std::string reason_str = reason.empty() ? "" : "_" + reason;
+    const std::string base = round_dir + "kf_" + std::to_string(t_kf) + "_g" + std::to_string(g) + "_train" + std::to_string(train_idx) + reason_str;
+
+    // ── Query image with keypoints ────────────────────────────────────────────
+    cv::Mat dbg_query;
+    if (query_image.channels() == 1)
+        cv::cvtColor(query_image, dbg_query, cv::COLOR_GRAY2BGR);
+    else
+        dbg_query = query_image.clone();
+
+    // All ORB keypoints in red
+    for (const auto &kp : kp0)
+        cv::circle(dbg_query, kp.pt, 3, cv::Scalar(0, 0, 255), 1);
+    // Matched keypoints in green
+    for (const auto &m : matches)
+        cv::circle(dbg_query, kp0[m.queryIdx].pt, 4, cv::Scalar(0, 255, 0), 2);
+
+    // Annotate with reason
+    const std::string label = reason.empty() ? "ACCEPTED" : reason;
+    cv::putText(dbg_query, label, cv::Point(10, 30),
+                cv::FONT_HERSHEY_SIMPLEX, 1.0,
+                reason.empty() ? cv::Scalar(0, 255, 0) : cv::Scalar(0, 0, 255), 2);
+    cv::putText(dbg_query,
+                "matches=" + std::to_string(matches.size()),
+                cv::Point(10, 65),
+                cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(255, 255, 0), 2);
+
+    cv::imwrite(base + "_query.jpg", dbg_query);
+
+    // ── Side-by-side with match lines ────────────────────────────────────────
+    const colmap::Image &train_img = map.images[train_idx];
+    const std::string train_path =
+        GLOC_COLMAP_IMG_FOLDER + "/" + train_img.name;
+    cv::Mat train_bgr = cv::imread(train_path);
+
+    if (train_bgr.empty())
+    {
+        GLOC_WARN("[runOrbAndDbow] cannot load train image: %s",
+                  train_path.c_str());
+        return;
+    }
+
+    // Resize train to query height
+    float train_scale = 1.0f;
+    if (train_bgr.rows != dbg_query.rows)
+    {
+        train_scale = static_cast<float>(dbg_query.rows) / train_bgr.rows;
+        cv::resize(train_bgr, train_bgr, cv::Size(), train_scale, train_scale);
+    }
+
+    cv::Mat sbs;
+    cv::hconcat(dbg_query, train_bgr, sbs);
+
+    const int offset = dbg_query.cols;
+    for (const auto &m : matches)
+    {
+        const cv::Point2f &pq = kp0[m.queryIdx].pt;
+        const cv::Point2f pt(kp1[m.trainIdx].pt.x * train_scale,
+                             kp1[m.trainIdx].pt.y * train_scale);
+        cv::line(sbs,
+                 cv::Point(static_cast<int>(pq.x), static_cast<int>(pq.y)),
+                 cv::Point(static_cast<int>(pt.x) + offset, static_cast<int>(pt.y)),
+                 cv::Scalar(255, 0, 255), 1);
+    }
+
+    cv::imwrite(base + "_match.jpg", sbs);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -649,12 +1074,15 @@ void Gloc::runOrbAndDbow(std::vector<KeyframeGlocState> &working_set)
             if (slot.image.empty())
                 continue;
 
+            // ── Preprocessing ─────────────────────────────────────────────────
+            slot.preprocessed_image = gloc_preprocessImage(slot.image);
+
             // ── ORB extraction ───────────────────────────────────────────────
             cv::Mat gray;
-            if (slot.image.channels() == 1)
-                gray = slot.image;
+            if (slot.preprocessed_image.channels() == 1)
+                gray = slot.preprocessed_image;
             else
-                cv::cvtColor(slot.image, gray, cv::COLOR_BGR2GRAY);
+                cv::cvtColor(slot.preprocessed_image, gray, cv::COLOR_BGR2GRAY);
 
             slot.query_feats.image_size = gray.size();
             orb_extractor_->extract(gray,
@@ -663,10 +1091,8 @@ void Gloc::runOrbAndDbow(std::vector<KeyframeGlocState> &working_set)
 
             if (slot.query_feats.orb_descriptors.empty())
             {
-                ROS_WARN_THROTTLE(2.0,
-                                  "[Gloc] ORB extraction yielded no descriptors "
-                                  "for keyframe t=%.4f module=%zu",
-                                  kf_state.t_kf, g);
+                GLOC_WARN("[runOrbAndDbow] no ORB descriptors: kf_t=%.4f g=%zu",
+                          kf_state.t_kf, g);
                 slot.pipeline_done = true;
                 continue;
             }
@@ -813,16 +1239,15 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
             if (best_ni >= 0)
             {
                 slot.best_train_idx = static_cast<int>(slot.dbow_candidates[best_ni].second);
-                ROS_DEBUG("[Gloc] kf t=%.4f module=%zu → train_idx=%d "
-                          "(votes=%d score=%.4f)",
-                          working_set[i].t_kf, g, slot.best_train_idx,
-                          votes[i][best_ni], best_score);
+                GLOC_DEBUG("[vote] kf_t=%.4f g=%zu -> train=%d votes=%d score=%.4f",
+                           working_set[i].t_kf, g, slot.best_train_idx,
+                           votes[i][best_ni], best_score);
             }
             else
             {
                 slot.best_train_idx = -1;
-                ROS_DEBUG("[Gloc] kf t=%.4f module=%zu → rejected by voting",
-                          working_set[i].t_kf, g);
+                GLOC_DEBUG("[vote] kf_t=%.4f g=%zu -> rejected by voting",
+                           working_set[i].t_kf, g);
             }
         }
     }
@@ -888,7 +1313,8 @@ static void subsampleMatchesMinDist(const std::vector<cv::KeyPoint> &keypoints0,
 // have best_train_idx reset to -1 and are marked pipeline_done.
 // ─────────────────────────────────────────────────────────────────────────────
 
-void Gloc::runCorrespondences(std::vector<KeyframeGlocState> &working_set)
+void Gloc::runCorrespondences(std::vector<KeyframeGlocState> &working_set,
+                              uint64_t snapshot_id)
 {
     for (auto &kf_state : working_set)
     {
@@ -902,6 +1328,21 @@ void Gloc::runCorrespondences(std::vector<KeyframeGlocState> &working_set)
                 continue;
             if (slot.best_train_idx < 0)
             {
+                // Voted out - save debug image showing the top DBoW candidate
+                // (even though it was rejected) so we can inspect the match.
+                if (!GLOC_DEBUG_FOLDER.empty() && !slot.image.empty() &&
+                    !slot.dbow_candidates.empty())
+                {
+                    const std::size_t top_ti = slot.dbow_candidates[0].second;
+                    const std::vector<cv::DMatch> no_matches;
+                    saveDebugImages(GLOC_DEBUG_FOLDER, snapshot_id,
+                                    kf_state.t_kf, g, top_ti,
+                                    slot.preprocessed_image,
+                                    slot.query_feats.keypoints,
+                                    map_.feats[top_ti].keypoints,
+                                    no_matches,
+                                    "VOTED_OUT", map_);
+                }
                 slot.pipeline_done = true;
                 continue;
             }
@@ -911,10 +1352,7 @@ void Gloc::runCorrespondences(std::vector<KeyframeGlocState> &working_set)
             if (ti >= map_.feats.size() ||
                 map_.feats[ti].orb_descriptors.empty())
             {
-                ROS_WARN_THROTTLE(2.0,
-                                  "[Gloc] train_idx=%zu has no cached features "
-                                  "— skipping",
-                                  ti);
+                GLOC_WARN("[corr] train_idx=%zu has no cached features - skipping", ti);
                 slot.pipeline_done = true;
                 continue;
             }
@@ -954,8 +1392,18 @@ void Gloc::runCorrespondences(std::vector<KeyframeGlocState> &working_set)
                                            GLOC_MATCH_MAX_DIST);
             }
 
+            const int n_after_gms = static_cast<int>(matches.size());
+            GLOC_DEBUG("[corr] kf_t=%.4f g=%zu train=%zu: "
+                       "q_kp=%zu t_kp=%zu after_gms=%d",
+                       kf_state.t_kf, g, ti,
+                       slot.query_feats.keypoints.size(),
+                       train_feats.keypoints.size(),
+                       n_after_gms);
+
             if (matches.empty())
             {
+                GLOC_DEBUG("[corr] kf_t=%.4f g=%zu train=%zu: 0 matches after GMS - skip",
+                           kf_state.t_kf, g, ti);
                 slot.pipeline_done = true;
                 continue;
             }
@@ -970,6 +1418,11 @@ void Gloc::runCorrespondences(std::vector<KeyframeGlocState> &working_set)
                 matches.swap(spread);
             }
 
+            const int n_after_subsample = static_cast<int>(matches.size());
+            if (n_after_subsample < n_after_gms)
+                GLOC_DEBUG("[corr] kf_t=%.4f g=%zu train=%zu: after_subsample=%d",
+                           kf_state.t_kf, g, ti, n_after_subsample);
+
             if (matches.empty())
             {
                 slot.pipeline_done = true;
@@ -979,15 +1432,14 @@ void Gloc::runCorrespondences(std::vector<KeyframeGlocState> &working_set)
             // ── Undistort matched keypoints ──────────────────────────────────
             //
             // Query: liftProjective via the camodocal model loaded from
-            //        GLOC_CAM_MODULES[g].calib_file_[0] — handles any distortion
+            //        GLOC_CAM_MODULES[g].calib_file_[0] - handles any distortion
             //        model (pinhole, equidistant, scaramuzza, etc.).
             // Train: colmap::undistort_point with the COLMAP map calibration.
             auto tcal_it = map_.calibs.find(map_.images[ti].camera_id);
             if (tcal_it == map_.calibs.end())
             {
-                ROS_WARN_THROTTLE(2.0,
-                                  "[Gloc] no calibration for train camera_id=%u",
-                                  map_.images[ti].camera_id);
+                GLOC_WARN("[corr] no calibration for train camera_id=%u",
+                          map_.images[ti].camera_id);
                 slot.pipeline_done = true;
                 continue;
             }
@@ -995,8 +1447,7 @@ void Gloc::runCorrespondences(std::vector<KeyframeGlocState> &working_set)
 
             if (g >= query_cameras_.size() || !query_cameras_[g])
             {
-                ROS_WARN_THROTTLE(2.0,
-                                  "[Gloc] no query camera model for module=%zu", g);
+                GLOC_WARN("[corr] no query camera model for g=%zu", g);
                 slot.pipeline_done = true;
                 continue;
             }
@@ -1020,13 +1471,13 @@ void Gloc::runCorrespondences(std::vector<KeyframeGlocState> &working_set)
 
             for (const auto &m : matches)
             {
-                // ── Query: liftProjective → virtual camera ───────────────────
+                // ── Query: liftProjective -> virtual camera ───────────────────
                 Eigen::Vector3d ray;
                 query_cam->liftProjective(Eigen::Vector2d(kp0[m.queryIdx].pt.x, kp0[m.queryIdx].pt.y), ray);
                 undist_kp0[m.queryIdx].pt = cv::Point2f((float)(vins_multi::FOCAL_LENGTH * ray.x() / ray.z() + query_cx),
                                                         (float)(vins_multi::FOCAL_LENGTH * ray.y() / ray.z() + query_cy));
 
-                // ── Train: colmap undistort → normalised → virtual camera ────
+                // ── Train: colmap undistort -> normalised -> virtual camera ────
                 const Eigen::Vector2d u1 = colmap::undistort_point(Eigen::Vector2d(kp1[m.trainIdx].pt.x, kp1[m.trainIdx].pt.y), train_cal);
                 const double xn = (u1.x() - train_cal.cx) / train_cal.fx;
                 const double yn = (u1.y() - train_cal.cy) / train_cal.fy;
@@ -1042,24 +1493,39 @@ void Gloc::runCorrespondences(std::vector<KeyframeGlocState> &working_set)
 
             if (static_cast<int>(matches.size()) < GLOC_MATCH_MIN_INLIERS)
             {
-                ROS_DEBUG("[Gloc] kf t=%.4f module=%zu train_idx=%zu: "
-                          "only %zu inliers after geom test (need %d) — rejecting",
-                          kf_state.t_kf, g, ti,
-                          matches.size(), GLOC_MATCH_MIN_INLIERS);
+                GLOC_DEBUG("[corr] kf_t=%.4f g=%zu train=%zu: "
+                           "gms=%d -> geom=%d (need %d) - REJECT",
+                           kf_state.t_kf, g, ti,
+                           n_after_gms,
+                           static_cast<int>(matches.size()),
+                           GLOC_MATCH_MIN_INLIERS);
+
+                saveDebugImages(GLOC_DEBUG_FOLDER, snapshot_id,
+                                kf_state.t_kf, g, ti,
+                                slot.preprocessed_image, kp0, kp1, matches,
+                                "FEW_INLIERS_" + std::to_string(matches.size()),
+                                map_);
+
                 slot.best_train_idx = -1;
                 slot.pipeline_done = true;
                 continue;
             }
 
             // ── Store correspondences ────────────────────────────────────────
-            PointFeatureMatcher::matchesToPointCorrespondences(kp0, kp1, matches, slot.pt_pairs_distorted, 1.0f);
-            PointFeatureMatcher::matchesToPointCorrespondences(undist_kp0, undist_kp1, matches, slot.pt_pairs_undistorted, 1.0f);
+            PointFeatureMatcher::matchesToPointCorrespondences(
+                kp0, kp1, matches, slot.pt_pairs_distorted, 1.0f);
+            PointFeatureMatcher::matchesToPointCorrespondences(
+                undist_kp0, undist_kp1, matches, slot.pt_pairs_undistorted, 1.0f);
 
             slot.pipeline_done = true;
 
-            ROS_DEBUG("[Gloc] kf t=%.4f module=%zu → %zu correspondences "
-                      "with train_idx=%zu",
-                      kf_state.t_kf, g, slot.pt_pairs_distorted.size(), ti);
+            GLOC_DEBUG("[corr] kf_t=%.4f g=%zu -> %zu corr (train=%zu)",
+                       kf_state.t_kf, g, slot.pt_pairs_distorted.size(), ti);
+
+            saveDebugImages(GLOC_DEBUG_FOLDER, snapshot_id,
+                            kf_state.t_kf, g, ti,
+                            slot.preprocessed_image, kp0, kp1, matches,
+                            "", map_);
         }
     }
 }
@@ -1091,6 +1557,7 @@ void Gloc::writeBackToStateMap(const std::vector<KeyframeGlocState> &working_set
 
             auto &dst = it->second.per_gloc[g];
             dst.query_feats = src.query_feats;
+            dst.preprocessed_image = src.preprocessed_image;
             dst.dbow_candidates = src.dbow_candidates;
             dst.best_train_idx = src.best_train_idx;
             dst.pt_pairs_distorted = src.pt_pairs_distorted;
@@ -1109,11 +1576,11 @@ void Gloc::writeBackToStateMap(const std::vector<KeyframeGlocState> &working_set
 //
 //   R_local, P_local  represent  T_local_body:
 //     X_local = R_local * X_body + P_local
-//     R_local ≡ R_local_body  (rotation body → local)
+//     R_local ≡ R_local_body  (rotation body -> local)
 //     P_local ≡ t_local_body  (position of body origin in local frame)
 //
 //   Optimisation variable per keyframe i:
-//     omega_i[3]  axis-angle of R_body_world[i]  (world → body)
+//     omega_i[3]  axis-angle of R_body_world[i]  (world -> body)
 //     t_i[3]      t_world_body[i]  (position of body in world frame)
 //
 //   T_map_local convention (output):
@@ -1121,7 +1588,7 @@ void Gloc::writeBackToStateMap(const std::vector<KeyframeGlocState> &working_set
 //
 // ─────────────────────────────────────────────────────────────────────────────
 
-bool Gloc::runOptimization(std::vector<KeyframeGlocState> &working_set)
+bool Gloc::runOptimization_6DOF(std::vector<KeyframeGlocState> &working_set)
 {
     using Mat3d = Eigen::Matrix3d;
     using Vec3d = Eigen::Vector3d;
@@ -1141,63 +1608,142 @@ bool Gloc::runOptimization(std::vector<KeyframeGlocState> &working_set)
 
     if (valid_slot_count < min_pairs)
     {
-        ROS_DEBUG("[Gloc::runOptimization] Only %d valid slots (need %d%s) — skip",
-                  valid_slot_count, min_pairs, snapped_ ? "" : " first-snap");
+        GLOC_DEBUG("[opt] only %d valid slots (need %d%s) - skip",
+                   valid_slot_count, min_pairs, snapped_ ? "" : " first-snap");
         return false;
     }
 
     // ── 2. Init variables ─────────────────────────────────────────────────────
-    // omega_kf[i][3]: axis-angle R_body_world[i]  (world → body)
-    // t_kf[i][3]:     t_world_body[i]
+    // omega_kf[i][3]: axis-angle of R_body_world[i]  (world -> body)
+    // t_kf[i][3]:     t_world_body[i]  (body origin in world)
+    //
+    // Convention check (the functor uses AngleAxisRotatePoint(omega, neg_t, t_bw)):
+    //   omega represents R_body_world  (world → body)
+    //   t_i   represents t_world_body  (body position expressed in world)
+    //
+    // Snapped:   derive from T_map_local + VINS local pose.
+    // Unsnapped: seed from the matched train image pose in COLMAP world.
+    //            DO NOT use P_local here — that is in the VINS local frame
+    //            (arbitrary origin), not in COLMAP world. Starting the
+    //            optimizer there puts every residual at ~1000 px (the
+    //            behind-camera clamp), the gradient is near-zero everywhere,
+    //            and Ceres converges to the same wrong point after ~30 iters.
+
     std::vector<std::array<double, 3>> omega_kf(X);
     std::vector<std::array<double, 3>> t_kf(X);
+
+    // Read snap state once outside the loop — snapped_ only flips on success,
+    // which can't happen until after this function returns.
+    bool snapped_local;
+    Mat3d R_map_local;
+    Vec3d t_map_local;
+    {
+        std::lock_guard<std::mutex> lk(snap_mutex_);
+        snapped_local = snapped_;
+        R_map_local = T_map_local_R_;
+        t_map_local = T_map_local_t_;
+    }
+
+    // Precompute camera-body extrinsic (same for all keyframes, g=0).
+    // imu_T_cam convention:  p_body = R_imu_cam * p_cam + t_imu_cam
+    //   ric_[0] = R_imu_cam  (cam vectors → body/imu vectors)
+    //   tic_[0] = position of cam origin in body/imu frame
+    const Mat3d R_imu_cam = vins_multi::GLOC_CAM_MODULES[0].ric_[0].toRotationMatrix();
+    const Vec3d t_imu_cam = vins_multi::GLOC_CAM_MODULES[0].tic_[0];
 
     for (int i = 0; i < X; ++i)
     {
         const auto &kf = working_set[i];
 
-        bool snapped_local;
-        Mat3d R_map_local;
-        Vec3d t_map_local;
-        {
-            std::lock_guard<std::mutex> lk(snap_mutex_);
-            snapped_local = snapped_;
-            R_map_local = T_map_local_R_;
-            t_map_local = T_map_local_t_;
-        }
-
         if (snapped_local)
         {
-            // Derive T_map_body[i] from last known T_map_local:
-            //   R_world_body[i] = T_map_local_R_ * R_local_body[i]
-            //   t_world_body[i] = T_map_local_R_ * P_local[i] + T_map_local_t_
+            // ── Snapped: use T_map_local to place body in COLMAP world ────────
+            //
+            // R_world_body = T_map_local_R * R_local_body
+            // t_world_body = T_map_local_R * P_local + T_map_local_t
+            //
+            // omega must encode R_body_world = R_world_body^T  (not R_world_body).
             const Mat3d R_local_body = kf.R_local.toRotationMatrix();
             const Mat3d R_world_body = R_map_local * R_local_body;
             const Vec3d t_world_body = R_map_local * kf.P_local + t_map_local;
 
-            const Eigen::AngleAxisd aa(R_world_body);
+            const Eigen::AngleAxisd aa(R_world_body.transpose()); // R_body_world
             const Vec3d ov = aa.axis() * aa.angle();
             omega_kf[i] = {ov.x(), ov.y(), ov.z()};
             t_kf[i] = {t_world_body.x(), t_world_body.y(), t_world_body.z()};
         }
         else
         {
-            // No prior — use train image rotation as rough seed, VINS position
-            // as translation seed. Yaw candidates in init pass will correct rotation.
+            // ── Unsnapped: derive from matched train image pose ───────────────
+            //
+            // For keyframe i we use the nearest voted train image (per_gloc[0]).
+            // Composition (world → cam → body):
+            //
+            //   R_body_world = R_imu_cam * R_cam_world
+            //
+            // Body position in world:
+            //   oj            = train cam centre = -R_cw^T * t_cw
+            //   t_world_body  = oj - R_cw^T * R_imu_cam^T * t_imu_cam
+            //
+            // For keyframes without a matched train image, we use {0,0,0} as
+            // placeholder; a second pass below fills them with the mean of
+            // the valid ones so they start in the right region of the map.
             const auto &slot0 = kf.per_gloc[0];
             if (slot0.best_train_idx >= 0)
             {
                 const colmap::Image &train_img =
                     map_.images[static_cast<size_t>(slot0.best_train_idx)];
-                const Eigen::AngleAxisd aa(train_img.q_c_w.toRotationMatrix());
+
+                const Mat3d R_cw = train_img.q_c_w.toRotationMatrix(); // world → cam
+                const Vec3d t_cw = train_img.t_c_w;
+                const Vec3d oj = -(R_cw.transpose() * t_cw); // cam centre in world
+
+                // R_body_world = R_imu_cam * R_cam_world
+                const Mat3d R_bw = R_imu_cam * R_cw;
+                const Eigen::AngleAxisd aa(R_bw);
                 const Vec3d ov = aa.axis() * aa.angle();
                 omega_kf[i] = {ov.x(), ov.y(), ov.z()};
+
+                // t_world_body = oj - R_world_body * t_cam_in_body
+                //              = oj - R_cw^T * R_imu_cam^T * t_imu_cam
+                const Vec3d t_body = oj - R_cw.transpose() * R_imu_cam.transpose() * t_imu_cam;
+                t_kf[i] = {t_body.x(), t_body.y(), t_body.z()};
             }
             else
             {
+                // No match — placeholder; filled below.
                 omega_kf[i] = {0.0, 0.0, 0.0};
+                t_kf[i] = {0.0, 0.0, 0.0}; // sentinel: will be replaced
             }
-            t_kf[i] = {kf.P_local.x(), kf.P_local.y(), kf.P_local.z()};
+        }
+    }
+
+    // ── Backfill unmatched unsnapped keyframes ────────────────────────────────
+    //
+    // Keyframes without a voted train image start at (0,0,0) in world, which
+    // would perturb the relative-pose constraints. Replace them with the mean
+    // world position of the matched keyframes so all variables start in the
+    // correct region of the COLMAP map.
+    if (!snapped_local)
+    {
+        Vec3d t_sum = Vec3d::Zero();
+        int n_valid = 0;
+        for (int i = 0; i < X; ++i)
+        {
+            if (working_set[i].per_gloc[0].best_train_idx >= 0)
+            {
+                t_sum += Vec3d(t_kf[i][0], t_kf[i][1], t_kf[i][2]);
+                ++n_valid;
+            }
+        }
+        if (n_valid > 0)
+        {
+            const Vec3d t_mean = t_sum / n_valid;
+            for (int i = 0; i < X; ++i)
+            {
+                if (working_set[i].per_gloc[0].best_train_idx < 0)
+                    t_kf[i] = {t_mean.x(), t_mean.y(), t_mean.z()};
+            }
         }
     }
 
@@ -1310,11 +1856,11 @@ bool Gloc::runOptimization(std::vector<KeyframeGlocState> &working_set)
     const int N = static_cast<int>(flat_obs.size());
     if (N < GLOC_MIN_PAIRS)
     {
-        ROS_DEBUG("[Gloc::runOptimization] Too few observations (%d) — skip", N);
+        GLOC_DEBUG("[opt] too few observations (%d) - skip", N);
         return false;
     }
 
-    ROS_DEBUG("[Gloc::runOptimization] X=%d keyframes, N=%d observations", X, N);
+    GLOC_DEBUG("[opt] X=%d keyframes N=%d observations", X, N);
 
     // ── Solver base options ───────────────────────────────────────────────────
     ceres::Solver::Options solver_opts;
@@ -1340,6 +1886,19 @@ bool Gloc::runOptimization(std::vector<KeyframeGlocState> &working_set)
                              bool add_epi,
                              bool add_rel,
                              bool add_prior) {
+        // ── Ordering: group 1 = ALL pose variables ────────────────────────────
+        //
+        // This MUST happen before any residual blocks are added. The rel_pose
+        // and prior terms reference every keyframe in the working set, including
+        // keyframes that have no direct observations (empty pt_pairs). If those
+        // blocks are in the Ceres problem but absent from the ordering, DENSE_SCHUR
+        // and ITERATIVE_SCHUR fail immediately (Iterations: -2, cost: -1.0).
+        for (int i = 0; i < X; ++i)
+        {
+            ord->AddElementToGroup(omega_kf[i].data(), 1);
+            ord->AddElementToGroup(t_kf[i].data(), 1);
+        }
+
         for (int k = 0; k < N; ++k)
         {
             const int i = flat_obs[k].kf_idx;
@@ -1365,9 +1924,6 @@ bool Gloc::runOptimization(std::vector<KeyframeGlocState> &working_set)
                     &huber_loss, GLOC_W_EPIPOLAR, ceres::DO_NOT_TAKE_OWNERSHIP);
                 prob.AddResidualBlock(cost, scaled, om, ti);
             }
-
-            ord->AddElementToGroup(om, 1); // group 1: pose variables
-            ord->AddElementToGroup(ti, 1);
         }
 
         // Relative local pose between adjacent keyframes
@@ -1455,25 +2011,32 @@ bool Gloc::runOptimization(std::vector<KeyframeGlocState> &working_set)
         std::vector<std::array<double, 3>> best_t = t_kf;
         std::vector<double> best_rhos = rhos;
 
+        // Save the original initial poses so each candidate starts fresh.
+        const auto orig_omega = omega_kf;
+        const auto orig_rhos = rhos;
+
         for (int yk = 0; yk < kNumYaw; ++yk)
         {
-            auto cand_omega = omega_kf;
-            auto cand_t = t_kf;
-            auto cand_rhos = rhos;
+            // ── Reset to original initial and apply yaw offset ────────────────
+            //
+            // The lambda captures omega_kf/rhos by reference and Ceres updates
+            // them in-place. Reset before each candidate so every solve starts
+            // from a clean state with only the yaw rotation applied.
+            omega_kf = orig_omega;
+            rhos = orig_rhos;
 
-            // Apply yaw offset to all keyframes
             const Mat3d Rz = Eigen::AngleAxisd(yk * kYawStep, Vec3d::UnitZ())
                                  .toRotationMatrix();
             for (int i = 0; i < X; ++i)
             {
-                const Eigen::Map<const Vec3d> ov(cand_omega[i].data());
+                const Eigen::Map<const Vec3d> ov(omega_kf[i].data());
                 const double norm = ov.norm();
                 const Mat3d R_orig = Eigen::AngleAxisd(
                                          norm, norm > 1e-8 ? (ov / norm).eval() : Vec3d::UnitZ())
                                          .toRotationMatrix();
                 const Eigen::AngleAxisd aa_new(Rz * R_orig);
                 const Vec3d ov_new = aa_new.axis() * aa_new.angle();
-                cand_omega[i] = {ov_new.x(), ov_new.y(), ov_new.z()};
+                omega_kf[i] = {ov_new.x(), ov_new.y(), ov_new.z()};
             }
 
             ceres::Problem init_prob(prob_opts);
@@ -1493,12 +2056,16 @@ bool Gloc::runOptimization(std::vector<KeyframeGlocState> &working_set)
             ceres::Solver::Summary init_summary;
             ceres::Solve(init_opts, &init_prob, &init_summary);
 
+            // Skip failed solves (initial_cost == -1.0 means evaluator failure).
+            if (init_summary.initial_cost < 0.0)
+                continue;
+
             if (init_summary.final_cost < best_cost)
             {
                 best_cost = init_summary.final_cost;
-                best_omega = cand_omega;
-                best_t = cand_t;
-                best_rhos = cand_rhos;
+                best_omega = omega_kf; // omega_kf updated in-place by Ceres
+                best_t = t_kf;
+                best_rhos = rhos;
             }
         }
 
@@ -1520,7 +2087,7 @@ bool Gloc::runOptimization(std::vector<KeyframeGlocState> &working_set)
     ceres::Solver::Summary main_summary;
     ceres::Solve(main_opts, &main_prob, &main_summary);
 
-    ROS_DEBUG("[Gloc::runOptimization] %s", main_summary.BriefReport().c_str());
+    GLOC_DEBUG("[opt] %s", main_summary.BriefReport().c_str());
 
     // ── 6. Inlier check ───────────────────────────────────────────────────────
     int inliers = 0;
@@ -1535,14 +2102,13 @@ bool Gloc::runOptimization(std::vector<KeyframeGlocState> &working_set)
     }
 
     const double inlier_ratio = static_cast<double>(inliers) / N;
-    ROS_DEBUG("[Gloc::runOptimization] inliers=%d/%d (%.1f%%)",
-              inliers, N, inlier_ratio * 100.0);
+    GLOC_DEBUG("[opt] inliers=%d/%d (%.1f%%)",
+               inliers, N, inlier_ratio * 100.0);
 
     if (inlier_ratio < GLOC_MIN_INLIER_RATIO)
     {
-        ROS_WARN_THROTTLE(2.0,
-                          "[Gloc::runOptimization] Rejected: inlier ratio %.2f < %.2f",
-                          inlier_ratio, GLOC_MIN_INLIER_RATIO);
+        GLOC_WARN("[opt] rejected: inlier ratio %.2f < %.2f",
+                  inlier_ratio, GLOC_MIN_INLIER_RATIO);
         return false;
     }
 
@@ -1576,7 +2142,7 @@ bool Gloc::runOptimization(std::vector<KeyframeGlocState> &working_set)
                                        norm, norm > 1e-8 ? (ov / norm).eval() : Vec3d::UnitZ())
                                        .toRotationMatrix();
 
-        // R_local_body = kf.R_local  (rotation body → local)
+        // R_local_body = kf.R_local  (rotation body -> local)
         const Mat3d R_local_body = kf.R_local.toRotationMatrix();
         const Mat3d R_map_local_i = R_world_body * R_local_body.transpose();
         const Vec3d t_map_local_i = Vec3d(t_kf[i][0], t_kf[i][1], t_kf[i][2]) - R_map_local_i * kf.P_local;
@@ -1601,7 +2167,7 @@ bool Gloc::runOptimization(std::vector<KeyframeGlocState> &working_set)
 
     if (w_total < 1.0)
     {
-        ROS_WARN_THROTTLE(2.0, "[Gloc::runOptimization] Zero weight — skip");
+        GLOC_WARN("[opt] zero weight - skip");
         return false;
     }
 
@@ -1634,12 +2200,12 @@ bool Gloc::runOptimization(std::vector<KeyframeGlocState> &working_set)
         }
     }
 
-    ROS_INFO("[Gloc] Snapped! T_map_local t=[%.2f %.2f %.2f]",
-             T_map_local_t_.x(), T_map_local_t_.y(), T_map_local_t_.z());
+    GLOC_INFO("[opt] SNAPPED T_map_local t=[%.2f %.2f %.2f]",
+              T_map_local_t_.x(), T_map_local_t_.y(), T_map_local_t_.z());
 
     // ── Publish optimized poses and path ─────────────────────────────────────
     // For each keyframe, compute the average rig centre across all valid
-    // gloc modules (multiple cameras on the same rig → average position).
+    // gloc modules (multiple cameras on the same rig -> average position).
     if (vins_multi::hasGlocOptimizedSubscribers())
     {
         std::vector<geometry_msgs::Pose> opt_poses;
@@ -1656,7 +2222,7 @@ bool Gloc::runOptimization(std::vector<KeyframeGlocState> &working_set)
                                            .toRotationMatrix();
             const Vec3d t_world_body(t_kf[i][0], t_kf[i][1], t_kf[i][2]);
 
-            // All keyframes have optimized poses — publish regardless of
+            // All keyframes have optimized poses - publish regardless of
             // whether they had valid gloc observations (they're still
             // constrained via relative pose and world prior terms).
             const Quat q_world_body(R_world_body);
@@ -1703,19 +2269,19 @@ bool Gloc::runOptimization(std::vector<KeyframeGlocState> &working_set)
                     any_done = true;
                     if (slot.best_train_idx >= 0)
                     {
-                        status = 2; // valid match — green
+                        status = 2; // valid match - green
                         break;
                     }
                 }
             }
             if (status == 0 && any_done)
-                status = 1; // pipeline done but no valid match — red
+                status = 1; // pipeline done but no valid match - red
 
             kf_status_vec.push_back({pos, status});
         }
         vins_multi::pubGlocKeyframeStatus(kf_status_vec);
 
-        // ── Match lines: query cam → train cam ───────────────────────────────
+        // ── Match lines: query cam -> train cam ───────────────────────────────
         if (vins_multi::pub_gloc_match_lines.getNumSubscribers() > 0)
         {
             std::vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>> match_pairs;
@@ -1757,7 +2323,1209 @@ bool Gloc::runOptimization(std::vector<KeyframeGlocState> &working_set)
     }
 
     // Notify registered consumer (e.g. estimator) on the gloc worker thread.
-    // The callback must be lightweight — store and return.
+    // The callback must be lightweight - store and return.
+    {
+        std::lock_guard<std::mutex> lk(cb_mutex_);
+        if (callback_)
+            callback_(T_map_local_R_, T_map_local_t_);
+    }
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// YawOnlyParameterization
+//
+// Constrains the axis-angle omega[3] (encoding R_body_world) to move only
+// along world-Z yaw. Pitch and roll are frozen at their initial values,
+// which are trusted from IMU integration.
+//
+// LocalSize  = 1  (scalar yaw perturbation δ in radians)
+// GlobalSize = 3  (axis-angle vector)
+//
+// Plus(omega, δ):
+//   R_new = Rz(δ) * AngleAxis(omega)   ← prepend yaw in world frame
+//   omega_new = AngleAxis(R_new)
+//
+// Jacobian (3×1) at δ=0:
+//   d/dδ [log(Rz(δ)*R)] |_{δ=0} = R^T * e_z = third row of R_body_world
+// ─────────────────────────────────────────────────────────────────────────────
+class YawOnlyParameterization : public ceres::LocalParameterization
+{
+  public:
+    bool Plus(const double *omega,
+              const double *delta,
+              double *omega_new) const override
+    {
+        const double norm = std::sqrt(omega[0] * omega[0] + omega[1] * omega[1] + omega[2] * omega[2]);
+        Eigen::Matrix3d R_current;
+        if (norm > 1e-8)
+        {
+            Eigen::AngleAxisd aa(norm, Eigen::Vector3d(omega[0], omega[1], omega[2]) / norm);
+            R_current = aa.toRotationMatrix();
+        }
+        else
+            R_current = Eigen::Matrix3d::Identity();
+
+        const Eigen::Matrix3d Rz =
+            Eigen::AngleAxisd(delta[0], Eigen::Vector3d::UnitZ()).toRotationMatrix();
+        const Eigen::AngleAxisd aa_new(Rz * R_current);
+        const Eigen::Vector3d ov = aa_new.axis() * aa_new.angle();
+        omega_new[0] = ov.x();
+        omega_new[1] = ov.y();
+        omega_new[2] = ov.z();
+        return true;
+    }
+
+    bool ComputeJacobian(const double *omega, double *jacobian) const override
+    {
+        // Column-major 3×1: d(omega)/d(delta)|_{delta=0} = third row of R_body_world
+        const double norm = std::sqrt(omega[0] * omega[0] + omega[1] * omega[1] + omega[2] * omega[2]);
+        Eigen::Matrix3d R;
+        if (norm > 1e-8)
+        {
+            Eigen::AngleAxisd aa(norm, Eigen::Vector3d(omega[0], omega[1], omega[2]) / norm);
+            R = aa.toRotationMatrix();
+        }
+        else
+            R = Eigen::Matrix3d::Identity();
+
+        jacobian[0] = R(2, 0);
+        jacobian[1] = R(2, 1);
+        jacobian[2] = R(2, 2);
+        return true;
+    }
+
+    int GlobalSize() const override
+    {
+        return 3;
+    }
+    int LocalSize() const override
+    {
+        return 1;
+    }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// runOptimization_4DOF
+//
+// Identical to runOptimization_6DOF except each keyframe's rotation is
+// constrained to yaw-only via YawOnlyParameterization. Pitch and roll are
+// trusted from IMU and held fixed throughout the solve.
+// ─────────────────────────────────────────────────────────────────────────────
+bool Gloc::runOptimization_4DOF(std::vector<KeyframeGlocState> &working_set)
+{
+    using Mat3d = Eigen::Matrix3d;
+    using Vec3d = Eigen::Vector3d;
+    using Quat = Eigen::Quaterniond;
+
+    const int X = static_cast<int>(working_set.size());
+
+    // ── 1. Guard ──────────────────────────────────────────────────────────────
+    int valid_slot_count = 0;
+    for (const auto &kf : working_set)
+        for (const auto &slot : kf.per_gloc)
+            if (slot.pipeline_done && slot.best_train_idx >= 0 &&
+                !slot.pt_pairs_undistorted.empty())
+                ++valid_slot_count;
+
+    const int min_pairs = snapped_ ? GLOC_MIN_PAIRS : GLOC_MIN_PAIRS_FIRST_SNAP;
+    if (valid_slot_count < min_pairs)
+    {
+        GLOC_DEBUG("[opt4] only %d valid slots (need %d%s) - skip",
+                   valid_slot_count, min_pairs, snapped_ ? "" : " first-snap");
+        return false;
+    }
+
+    // ── 2. Init variables ─────────────────────────────────────────────────────
+    std::vector<std::array<double, 3>> omega_kf(X);
+    std::vector<std::array<double, 3>> t_kf(X);
+
+    bool snapped_local;
+    Mat3d R_map_local;
+    Vec3d t_map_local;
+    {
+        std::lock_guard<std::mutex> lk(snap_mutex_);
+        snapped_local = snapped_;
+        R_map_local = T_map_local_R_;
+        t_map_local = T_map_local_t_;
+    }
+
+    const Mat3d R_imu_cam = vins_multi::GLOC_CAM_MODULES[0].ric_[0].toRotationMatrix();
+    const Vec3d t_imu_cam = vins_multi::GLOC_CAM_MODULES[0].tic_[0];
+
+    for (int i = 0; i < X; ++i)
+    {
+        const auto &kf = working_set[i];
+        if (snapped_local)
+        {
+            const Mat3d R_local_body = kf.R_local.toRotationMatrix();
+            const Mat3d R_world_body = R_map_local * R_local_body;
+            const Vec3d t_world_body = R_map_local * kf.P_local + t_map_local;
+            const Eigen::AngleAxisd aa(R_world_body.transpose());
+            const Vec3d ov = aa.axis() * aa.angle();
+            omega_kf[i] = {ov.x(), ov.y(), ov.z()};
+            t_kf[i] = {t_world_body.x(), t_world_body.y(), t_world_body.z()};
+        }
+        else
+        {
+            const auto &slot0 = kf.per_gloc[0];
+            if (slot0.best_train_idx >= 0)
+            {
+                const colmap::Image &train_img =
+                    map_.images[static_cast<size_t>(slot0.best_train_idx)];
+                const Mat3d R_cw = train_img.q_c_w.toRotationMatrix();
+                const Vec3d t_cw = train_img.t_c_w;
+                const Vec3d oj = -(R_cw.transpose() * t_cw);
+                const Mat3d R_bw = R_imu_cam * R_cw;
+                const Eigen::AngleAxisd aa(R_bw);
+                const Vec3d ov = aa.axis() * aa.angle();
+                omega_kf[i] = {ov.x(), ov.y(), ov.z()};
+                const Vec3d t_body = oj - R_cw.transpose() * R_imu_cam.transpose() * t_imu_cam;
+                t_kf[i] = {t_body.x(), t_body.y(), t_body.z()};
+            }
+            else
+            {
+                omega_kf[i] = {0.0, 0.0, 0.0};
+                t_kf[i] = {0.0, 0.0, 0.0};
+            }
+        }
+    }
+
+    if (!snapped_local)
+    {
+        Vec3d t_sum = Vec3d::Zero();
+        int n_valid = 0;
+        for (int i = 0; i < X; ++i)
+            if (working_set[i].per_gloc[0].best_train_idx >= 0)
+            {
+                t_sum += Vec3d(t_kf[i][0], t_kf[i][1], t_kf[i][2]);
+                ++n_valid;
+            }
+        if (n_valid > 0)
+        {
+            const Vec3d t_mean = t_sum / n_valid;
+            for (int i = 0; i < X; ++i)
+                if (working_set[i].per_gloc[0].best_train_idx < 0)
+                    t_kf[i] = {t_mean.x(), t_mean.y(), t_mean.z()};
+        }
+    }
+
+    // ── 3. Flatten observations ───────────────────────────────────────────────
+    struct FlatObs
+    {
+        GlocReprojCost rep;
+        GlocEpipolarCost epi;
+        int kf_idx;
+        int mod_idx;
+    };
+    std::vector<FlatObs> flat_obs;
+    flat_obs.reserve(4096);
+    std::vector<double> rhos;
+    rhos.reserve(4096);
+    const double kMaxDepthM = GLOC_MAX_DEPTH_M;
+
+    for (int i = 0; i < X; ++i)
+    {
+        const auto &kf = working_set[i];
+        for (std::size_t g = 0; g < kf.per_gloc.size(); ++g)
+        {
+            const auto &slot = kf.per_gloc[g];
+            if (!slot.pipeline_done || slot.best_train_idx < 0 ||
+                slot.pt_pairs_undistorted.empty())
+                continue;
+
+            const std::size_t ti = static_cast<std::size_t>(slot.best_train_idx);
+            const colmap::Image &train_img = map_.images[ti];
+            const colmap::CameraCalib &train_cal = map_.calibs.at(train_img.camera_id);
+            const Mat3d R_j = train_img.q_c_w.toRotationMatrix();
+            const Vec3d t_j = train_img.t_c_w;
+            const Vec3d o_j = -(R_j.transpose() * t_j);
+            const Mat3d R_cb = vins_multi::GLOC_CAM_MODULES[g].ric_[0].toRotationMatrix();
+            const Vec3d t_cb = vins_multi::GLOC_CAM_MODULES[g].tic_[0];
+            const double fx_q = vins_multi::FOCAL_LENGTH;
+            const double fy_q = vins_multi::FOCAL_LENGTH;
+            const double cx_q = slot.query_feats.image_size.width / 2.0;
+            const double cy_q = slot.query_feats.image_size.height / 2.0;
+
+            double R_j_arr[9], Rcr_arr[9], t_j_arr[3], tcr_arr[3];
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c)
+                {
+                    R_j_arr[r * 3 + c] = R_j(r, c);
+                    Rcr_arr[r * 3 + c] = R_cb(r, c);
+                }
+            t_j_arr[0] = t_j.x();
+            t_j_arr[1] = t_j.y();
+            t_j_arr[2] = t_j.z();
+            tcr_arr[0] = t_cb.x();
+            tcr_arr[1] = t_cb.y();
+            tcr_arr[2] = t_cb.z();
+
+            for (const auto &[pq, pt] : slot.pt_pairs_undistorted)
+            {
+                const Vec3d m_t((pt.x() - train_cal.cx) / train_cal.fx,
+                                (pt.y() - train_cal.cy) / train_cal.fy, 1.0);
+                const Vec3d Rtm = R_j.transpose() * m_t;
+
+                GlocReprojCost rep{};
+                rep.Rtm[0] = Rtm.x();
+                rep.Rtm[1] = Rtm.y();
+                rep.Rtm[2] = Rtm.z();
+                rep.oj[0] = o_j.x();
+                rep.oj[1] = o_j.y();
+                rep.oj[2] = o_j.z();
+                rep.pq[0] = pq.x();
+                rep.pq[1] = pq.y();
+                std::memcpy(rep.Rcr, Rcr_arr, sizeof(Rcr_arr));
+                std::memcpy(rep.tcr, tcr_arr, sizeof(tcr_arr));
+                rep.fx = fx_q;
+                rep.fy = fy_q;
+                rep.cx_ = cx_q;
+                rep.cy_ = cy_q;
+
+                GlocEpipolarCost epi{};
+                epi.x_q[0] = (pq.x() - cx_q) / fx_q;
+                epi.x_q[1] = (pq.y() - cy_q) / fy_q;
+                epi.x_q[2] = 1.0;
+                epi.x_t[0] = m_t.x();
+                epi.x_t[1] = m_t.y();
+                epi.x_t[2] = m_t.z();
+                std::memcpy(epi.R_j, R_j_arr, sizeof(R_j_arr));
+                epi.t_j[0] = t_j_arr[0];
+                epi.t_j[1] = t_j_arr[1];
+                epi.t_j[2] = t_j_arr[2];
+                std::memcpy(epi.Rcr, Rcr_arr, sizeof(Rcr_arr));
+                std::memcpy(epi.tcr, tcr_arr, sizeof(tcr_arr));
+                epi.scale = std::sqrt(fx_q * fy_q);
+
+                flat_obs.push_back({rep, epi, i, static_cast<int>(g)});
+                rhos.push_back(0.1);
+            }
+        }
+    }
+
+    const int N = static_cast<int>(flat_obs.size());
+    if (N < GLOC_MIN_PAIRS)
+    {
+        GLOC_DEBUG("[opt4] too few observations (%d) - skip", N);
+        return false;
+    }
+    GLOC_DEBUG("[opt4] X=%d keyframes N=%d observations", X, N);
+
+    // ── Solver options ────────────────────────────────────────────────────────
+    ceres::Solver::Options solver_opts;
+    solver_opts.minimizer_type = ceres::TRUST_REGION;
+    solver_opts.trust_region_strategy_type = ceres::LEVENBERG_MARQUARDT;
+    solver_opts.linear_solver_type = (N <= 2000) ? ceres::DENSE_SCHUR : ceres::ITERATIVE_SCHUR;
+    solver_opts.preconditioner_type = (N <= 2000) ? ceres::JACOBI : ceres::SCHUR_JACOBI;
+    solver_opts.function_tolerance = 1e-8;
+    solver_opts.gradient_tolerance = 1e-10;
+    solver_opts.parameter_tolerance = 1e-8;
+    solver_opts.minimizer_progress_to_stdout = false;
+    solver_opts.num_threads = 1;
+
+    ceres::HuberLoss huber_loss(GLOC_HUBER_DELTA);
+    ceres::Problem::Options prob_opts;
+    prob_opts.loss_function_ownership = ceres::DO_NOT_TAKE_OWNERSHIP;
+
+    // ── Problem builder — same as 6DOF but applies YawOnlyParameterization ───
+    auto build_problem = [&](ceres::Problem &prob,
+                             ceres::ParameterBlockOrdering *ord,
+                             bool add_epi,
+                             bool add_rel,
+                             bool add_prior) {
+        for (int i = 0; i < X; ++i)
+        {
+            ord->AddElementToGroup(omega_kf[i].data(), 1);
+            ord->AddElementToGroup(t_kf[i].data(), 1);
+            // Yaw-only: pitch and roll frozen, only yaw (world-Z) is optimized.
+            prob.AddParameterBlock(omega_kf[i].data(), 3, new YawOnlyParameterization());
+        }
+
+        for (int k = 0; k < N; ++k)
+        {
+            const int i = flat_obs[k].kf_idx;
+            double *om = omega_kf[i].data();
+            double *ti = t_kf[i].data();
+
+            if (GLOC_W_REPROJ > 0.0)
+            {
+                auto *cost = new ceres::AutoDiffCostFunction<GlocReprojCost, 2, 3, 3, 1>(
+                    new GlocReprojCost(flat_obs[k].rep));
+                auto *scaled = new ceres::ScaledLoss(
+                    &huber_loss, GLOC_W_REPROJ, ceres::DO_NOT_TAKE_OWNERSHIP);
+                prob.AddResidualBlock(cost, scaled, om, ti, &rhos[k]);
+                prob.SetParameterLowerBound(&rhos[k], 0, 1.0 / kMaxDepthM);
+                ord->AddElementToGroup(&rhos[k], 0);
+            }
+
+            if (add_epi && GLOC_W_EPIPOLAR > 0.0)
+            {
+                auto *cost = new ceres::AutoDiffCostFunction<GlocEpipolarCost, 1, 3, 3>(
+                    new GlocEpipolarCost(flat_obs[k].epi));
+                auto *scaled = new ceres::ScaledLoss(
+                    &huber_loss, GLOC_W_EPIPOLAR, ceres::DO_NOT_TAKE_OWNERSHIP);
+                prob.AddResidualBlock(cost, scaled, om, ti);
+            }
+        }
+
+        if (add_rel && GLOC_W_REL_POSE > 0.0)
+        {
+            for (int i = 0; i < X; ++i)
+            {
+                const int k_max = std::min(i + GLOC_REL_POSE_K, X - 1);
+                for (int j = i + 1; j <= k_max; ++j)
+                {
+                    const auto &kf_i = working_set[i];
+                    const auto &kf_j = working_set[j];
+                    const Mat3d R_li = kf_i.R_local.toRotationMatrix();
+                    const Mat3d R_lj = kf_j.R_local.toRotationMatrix();
+                    const Mat3d R_rel = R_li.transpose() * R_lj;
+                    const Vec3d t_rel = R_li.transpose() * (kf_j.P_local - kf_i.P_local);
+                    GlocRelPoseCost c{};
+                    for (int r = 0; r < 3; ++r)
+                        for (int col = 0; col < 3; ++col)
+                            c.R_rel_local[r * 3 + col] = R_rel(r, col);
+                    c.t_rel_local[0] = t_rel.x();
+                    c.t_rel_local[1] = t_rel.y();
+                    c.t_rel_local[2] = t_rel.z();
+                    auto *cost = new ceres::AutoDiffCostFunction<GlocRelPoseCost, 6, 3, 3, 3, 3>(
+                        new GlocRelPoseCost(c));
+                    auto *scaled = new ceres::ScaledLoss(
+                        nullptr, GLOC_W_REL_POSE, ceres::DO_NOT_TAKE_OWNERSHIP);
+                    prob.AddResidualBlock(cost, scaled,
+                                          omega_kf[i].data(), t_kf[i].data(),
+                                          omega_kf[j].data(), t_kf[j].data());
+                }
+            }
+        }
+
+        if (add_prior && GLOC_W_WORLD_PRIOR > 0.0)
+        {
+            std::lock_guard<std::mutex> lk(snap_mutex_);
+            if (!snapped_)
+                return;
+            for (int i = 0; i < X; ++i)
+            {
+                const auto &kf = working_set[i];
+                const Mat3d R_local_body = kf.R_local.toRotationMatrix();
+                const Mat3d R_prior = T_map_local_R_ * R_local_body;
+                const Vec3d t_prior = T_map_local_R_ * kf.P_local + T_map_local_t_;
+                GlocWorldPriorCost c{};
+                for (int r = 0; r < 3; ++r)
+                    for (int col = 0; col < 3; ++col)
+                        c.R_prior[r * 3 + col] = R_prior(r, col);
+                c.t_prior[0] = t_prior.x();
+                c.t_prior[1] = t_prior.y();
+                c.t_prior[2] = t_prior.z();
+                auto *cost = new ceres::AutoDiffCostFunction<GlocWorldPriorCost, 6, 3, 3>(
+                    new GlocWorldPriorCost(c));
+                auto *scaled = new ceres::ScaledLoss(
+                    nullptr, GLOC_W_WORLD_PRIOR, ceres::DO_NOT_TAKE_OWNERSHIP);
+                prob.AddResidualBlock(cost, scaled, omega_kf[i].data(), t_kf[i].data());
+            }
+        }
+    };
+
+    // ── 4. Init pass: yaw candidates (only when not snapped) ─────────────────
+    if (!snapped_local)
+    {
+        constexpr int kNumYaw = 12;
+        const double kYawStep = 2.0 * M_PI / kNumYaw;
+        double best_cost = std::numeric_limits<double>::max();
+        std::vector<std::array<double, 3>> best_omega = omega_kf;
+        std::vector<std::array<double, 3>> best_t = t_kf;
+        std::vector<double> best_rhos = rhos;
+        const auto orig_omega = omega_kf;
+        const auto orig_rhos = rhos;
+
+        for (int yk = 0; yk < kNumYaw; ++yk)
+        {
+            omega_kf = orig_omega;
+            rhos = orig_rhos;
+            const Mat3d Rz = Eigen::AngleAxisd(yk * kYawStep, Vec3d::UnitZ()).toRotationMatrix();
+            for (int i = 0; i < X; ++i)
+            {
+                const Eigen::Map<const Vec3d> ov(omega_kf[i].data());
+                const double norm = ov.norm();
+                const Mat3d R_orig = Eigen::AngleAxisd(
+                                         norm, norm > 1e-8 ? (ov / norm).eval() : Vec3d::UnitZ())
+                                         .toRotationMatrix();
+                const Eigen::AngleAxisd aa_new(Rz * R_orig);
+                const Vec3d ov_new = aa_new.axis() * aa_new.angle();
+                omega_kf[i] = {ov_new.x(), ov_new.y(), ov_new.z()};
+            }
+
+            ceres::Problem init_prob(prob_opts);
+            auto *init_ord = new ceres::ParameterBlockOrdering;
+            build_problem(init_prob, init_ord, true, true, false);
+
+            ceres::Solver::Options init_opts = solver_opts;
+            init_opts.linear_solver_ordering.reset(init_ord);
+            init_opts.max_num_iterations = GLOC_INIT_ITERS;
+            init_opts.function_tolerance = 1e-3;
+            init_opts.parameter_tolerance = 1e-3;
+            init_opts.gradient_tolerance = 1e-3;
+            init_opts.linear_solver_type = ceres::DENSE_SCHUR;
+            init_opts.preconditioner_type = ceres::JACOBI;
+
+            ceres::Solver::Summary init_summary;
+            ceres::Solve(init_opts, &init_prob, &init_summary);
+            if (init_summary.initial_cost < 0.0)
+                continue;
+            if (init_summary.final_cost < best_cost)
+            {
+                best_cost = init_summary.final_cost;
+                best_omega = omega_kf;
+                best_t = t_kf;
+                best_rhos = rhos;
+            }
+        }
+        omega_kf = best_omega;
+        t_kf = best_t;
+        rhos = best_rhos;
+    }
+
+    // ── 5. Main solve ─────────────────────────────────────────────────────────
+    ceres::Problem main_prob(prob_opts);
+    auto *main_ord = new ceres::ParameterBlockOrdering;
+    build_problem(main_prob, main_ord, true, true, true);
+
+    ceres::Solver::Options main_opts = solver_opts;
+    main_opts.linear_solver_ordering.reset(main_ord);
+    main_opts.max_num_iterations = GLOC_MAX_ITERS;
+
+    ceres::Solver::Summary main_summary;
+    ceres::Solve(main_opts, &main_prob, &main_summary);
+    GLOC_DEBUG("[opt4] %s", main_summary.BriefReport().c_str());
+
+    // ── 6. Inlier check ───────────────────────────────────────────────────────
+    int inliers = 0;
+    for (int k = 0; k < N; ++k)
+    {
+        const int i = flat_obs[k].kf_idx;
+        double res[2];
+        flat_obs[k].rep(omega_kf[i].data(), t_kf[i].data(), &rhos[k], res);
+        const double err = std::sqrt(res[0] * res[0] + res[1] * res[1]);
+        if (err < GLOC_INLIER_THRESH_PX)
+            ++inliers;
+    }
+    const double inlier_ratio = static_cast<double>(inliers) / N;
+    GLOC_DEBUG("[opt4] inliers=%d/%d (%.1f%%)", inliers, N, inlier_ratio * 100.0);
+    if (inlier_ratio < GLOC_MIN_INLIER_RATIO)
+    {
+        GLOC_WARN("[opt4] rejected: inlier ratio %.2f < %.2f", inlier_ratio, GLOC_MIN_INLIER_RATIO);
+        return false;
+    }
+
+    // ── 7. Compute T_map_local ────────────────────────────────────────────────
+    Vec3d t_acc = Vec3d::Zero();
+    Vec3d q_acc_v = Vec3d::Zero();
+    double q_acc_w = 0.0;
+    double w_total = 0.0;
+
+    for (int i = 0; i < X; ++i)
+    {
+        const auto &kf = working_set[i];
+        double w = 0.0;
+        for (const auto &slot : kf.per_gloc)
+            if (slot.pipeline_done && slot.best_train_idx >= 0)
+                w += static_cast<double>(slot.pt_pairs_undistorted.size());
+        if (w < 1.0)
+            continue;
+
+        const Eigen::Map<const Vec3d> ov(omega_kf[i].data());
+        const double norm = ov.norm();
+        const Mat3d R_world_body = Eigen::AngleAxisd(
+                                       norm, norm > 1e-8 ? (ov / norm).eval() : Vec3d::UnitZ())
+                                       .toRotationMatrix();
+        const Mat3d R_local_body = kf.R_local.toRotationMatrix();
+        // Strip pitch/roll from R_map_local_i before computing t so that
+        // t_map_local_i is consistent with the yaw-only rotation.
+        const Mat3d R_map_local_i = yawOnlyR(R_world_body * R_local_body.transpose());
+        const Vec3d t_map_local_i = Vec3d(t_kf[i][0], t_kf[i][1], t_kf[i][2]) - R_map_local_i * kf.P_local;
+
+        t_acc += w * t_map_local_i;
+        w_total += w;
+
+        Quat q_i(R_map_local_i);
+        if (w_total > w)
+        {
+            const Quat q_acc_so_far(q_acc_w / (w_total - w),
+                                    q_acc_v.x() / (w_total - w),
+                                    q_acc_v.y() / (w_total - w),
+                                    q_acc_v.z() / (w_total - w));
+            if (q_i.dot(q_acc_so_far) < 0.0)
+                q_i.coeffs() = -q_i.coeffs();
+        }
+        q_acc_v += w * q_i.vec();
+        q_acc_w += w * q_i.w();
+    }
+
+    if (w_total < 1.0)
+    {
+        GLOC_WARN("[opt4] zero weight - skip");
+        return false;
+    }
+
+    // ── 8. Update snapped state ───────────────────────────────────────────────
+    // q_mean is already a pure yaw quaternion since R_map_local_i was
+    // yaw-stripped before accumulation — no post-hoc stripping needed.
+    Quat q_mean(q_acc_w / w_total, q_acc_v.x() / w_total, q_acc_v.y() / w_total, q_acc_v.z() / w_total);
+    q_mean.normalize();
+
+    {
+        std::lock_guard<std::mutex> lk(snap_mutex_);
+        T_map_local_R_ = q_mean.toRotationMatrix();
+        T_map_local_t_ = t_acc / w_total;
+        snapped_ = true;
+        last_snap_poses_.clear();
+        for (int i = 0; i < X; ++i)
+        {
+            const auto &kf = working_set[i];
+            double w = 0.0;
+            for (const auto &slot : kf.per_gloc)
+                if (slot.pipeline_done && slot.best_train_idx >= 0)
+                    w += static_cast<double>(slot.pt_pairs_undistorted.size());
+            if (w < 1.0)
+                continue;
+            last_snap_poses_[kf.t_kf] = {kf.R_local, kf.P_local, w};
+        }
+    }
+
+    GLOC_INFO("[opt4] SNAPPED T_map_local t=[%.2f %.2f %.2f]",
+              T_map_local_t_.x(), T_map_local_t_.y(), T_map_local_t_.z());
+
+    // ── Publish (identical to 6DOF) ───────────────────────────────────────────
+    if (vins_multi::hasGlocOptimizedSubscribers())
+    {
+        std::vector<geometry_msgs::Pose> opt_poses;
+        std::vector<geometry_msgs::Point> opt_path_pts;
+        opt_poses.reserve(X);
+        opt_path_pts.reserve(X);
+
+        for (int i = 0; i < X; ++i)
+        {
+            const Eigen::Map<const Vec3d> ov(omega_kf[i].data());
+            const double norm = ov.norm();
+            const Mat3d R_world_body = Eigen::AngleAxisd(
+                                           norm, norm > 1e-8 ? (ov / norm).eval() : Vec3d::UnitZ())
+                                           .toRotationMatrix();
+            const Vec3d t_world_body(t_kf[i][0], t_kf[i][1], t_kf[i][2]);
+            const Quat q_world_body(R_world_body);
+
+            geometry_msgs::Pose pose;
+            pose.position.x = t_world_body.x();
+            pose.position.y = t_world_body.y();
+            pose.position.z = t_world_body.z();
+            pose.orientation.x = q_world_body.x();
+            pose.orientation.y = q_world_body.y();
+            pose.orientation.z = q_world_body.z();
+            pose.orientation.w = q_world_body.w();
+            opt_poses.push_back(pose);
+
+            geometry_msgs::Point pt;
+            pt.x = t_world_body.x();
+            pt.y = t_world_body.y();
+            pt.z = t_world_body.z();
+            opt_path_pts.push_back(pt);
+        }
+        vins_multi::pubGlocOptimized(opt_poses, opt_path_pts);
+
+        std::vector<std::pair<Eigen::Vector3d, int>> kf_status_vec;
+        kf_status_vec.reserve(X);
+        for (int i = 0; i < X; ++i)
+        {
+            const Vec3d pos(t_kf[i][0], t_kf[i][1], t_kf[i][2]);
+            int status = 0;
+            bool any_done = false;
+            for (const auto &slot : working_set[i].per_gloc)
+            {
+                if (slot.pipeline_done)
+                {
+                    any_done = true;
+                    if (slot.best_train_idx >= 0)
+                    {
+                        status = 2;
+                        break;
+                    }
+                }
+            }
+            if (status == 0 && any_done)
+                status = 1;
+            kf_status_vec.push_back({pos, status});
+        }
+        vins_multi::pubGlocKeyframeStatus(kf_status_vec);
+
+        if (vins_multi::pub_gloc_match_lines.getNumSubscribers() > 0)
+        {
+            std::vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>> match_pairs;
+            for (int i = 0; i < X; ++i)
+            {
+                const Eigen::Map<const Vec3d> ov(omega_kf[i].data());
+                const double norm = ov.norm();
+                const Mat3d R_world_body = Eigen::AngleAxisd(
+                                               norm, norm > 1e-8 ? (ov / norm).eval() : Vec3d::UnitZ())
+                                               .toRotationMatrix();
+                const Vec3d t_world_body(t_kf[i][0], t_kf[i][1], t_kf[i][2]);
+                for (std::size_t g = 0; g < working_set[i].per_gloc.size(); ++g)
+                {
+                    const auto &slot = working_set[i].per_gloc[g];
+                    if (!slot.pipeline_done || slot.best_train_idx < 0)
+                        continue;
+                    const Mat3d R_cb = vins_multi::GLOC_CAM_MODULES[g].ric_[0].toRotationMatrix();
+                    const Vec3d t_cb = vins_multi::GLOC_CAM_MODULES[g].tic_[0];
+                    const Vec3d o_query = R_world_body * (-t_cb) + t_world_body;
+                    const std::size_t ti = static_cast<std::size_t>(slot.best_train_idx);
+                    const colmap::Image &train_img = map_.images[ti];
+                    const Mat3d R_j = train_img.q_c_w.toRotationMatrix();
+                    const Vec3d o_train = -(R_j.transpose() * train_img.t_c_w);
+                    match_pairs.push_back({o_query, o_train});
+                }
+            }
+            vins_multi::pubGlocMatchLines(match_pairs);
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(cb_mutex_);
+        if (callback_)
+            callback_(T_map_local_R_, T_map_local_t_);
+    }
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// runOptimization  (dispatcher)
+// ─────────────────────────────────────────────────────────────────────────────
+bool Gloc::runOptimization(std::vector<KeyframeGlocState> &working_set)
+{
+    if (GLOC_FIX_REL_POSES)
+        return GLOC_USE_4DOF ? runOptimization_FixedRel_4DOF(working_set)
+                             : runOptimization_FixedRel_6DOF(working_set);
+    else
+        return GLOC_USE_4DOF ? runOptimization_4DOF(working_set)
+                             : runOptimization_6DOF(working_set);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// runOptimization_FixedRel  (shared implementation)
+//
+// Relative poses between keyframes are fixed (trusted from VINS). The sole
+// optimization variables are T_map_local:
+//   omega_map[3]  axis-angle of R_map_local  (local → world)
+//   t_map[3]      t_map_local
+//
+// Each keyframe's world pose is derived analytically inside the functors:
+//   R_world_body[i] = R_map_local * R_local_body[i]
+//   t_world_body[i] = R_map_local * P_local[i] + t_map_local
+//
+// No GlocRelPoseCost or GlocWorldPriorCost needed — relative poses are
+// exact by construction, and the world prior IS T_map_local itself.
+// When use_4dof=true, YawOnlyParameterization is applied to omega_map.
+// ─────────────────────────────────────────────────────────────────────────────
+bool Gloc::runOptimization_FixedRel_6DOF(std::vector<KeyframeGlocState> &working_set)
+{
+    return runOptimization_FixedRel(working_set, /*use_4dof=*/false);
+}
+
+bool Gloc::runOptimization_FixedRel_4DOF(std::vector<KeyframeGlocState> &working_set)
+{
+    return runOptimization_FixedRel(working_set, /*use_4dof=*/true);
+}
+
+bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
+                                    bool use_4dof)
+{
+    using Mat3d = Eigen::Matrix3d;
+    using Vec3d = Eigen::Vector3d;
+    using Quat = Eigen::Quaterniond;
+
+    const int X = static_cast<int>(working_set.size());
+
+    // ── 1. Guard ──────────────────────────────────────────────────────────────
+    int valid_slot_count = 0;
+    for (const auto &kf : working_set)
+        for (const auto &slot : kf.per_gloc)
+            if (slot.pipeline_done && slot.best_train_idx >= 0 &&
+                !slot.pt_pairs_undistorted.empty())
+                ++valid_slot_count;
+
+    const int min_pairs = snapped_ ? GLOC_MIN_PAIRS : GLOC_MIN_PAIRS_FIRST_SNAP;
+    if (valid_slot_count < min_pairs)
+    {
+        GLOC_DEBUG("[opt_fr] only %d valid slots (need %d%s) - skip",
+                   valid_slot_count, min_pairs, snapped_ ? "" : " first-snap");
+        return false;
+    }
+
+    // ── 2. Init T_map_local variables ─────────────────────────────────────────
+    // omega_map[3]: AA(R_map_local)   t_map[3]: t_map_local
+    std::array<double, 3> omega_map;
+    std::array<double, 3> t_map;
+
+    bool snapped_local;
+    {
+        std::lock_guard<std::mutex> lk(snap_mutex_);
+        snapped_local = snapped_;
+        if (snapped_local)
+        {
+            // Seed from current T_map_local
+            const Eigen::AngleAxisd aa(T_map_local_R_);
+            const Vec3d ov = aa.axis() * aa.angle();
+            omega_map = {ov.x(), ov.y(), ov.z()};
+            t_map = {T_map_local_t_.x(), T_map_local_t_.y(), T_map_local_t_.z()};
+        }
+    }
+
+    if (!snapped_local)
+    {
+        // Seed from the first valid keyframe's matched train image.
+        // T_map_local maps local → world, so:
+        //   R_map_local = R_world_body[i] * R_local_body[i]^T
+        //   t_map_local = t_world_body[i] - R_map_local * P_local[i]
+        // where R_world_body[i] comes from the matched train image.
+        const Mat3d R_imu_cam =
+            vins_multi::GLOC_CAM_MODULES[0].ric_[0].toRotationMatrix();
+        const Vec3d t_imu_cam = vins_multi::GLOC_CAM_MODULES[0].tic_[0];
+
+        bool seeded = false;
+        for (int i = 0; i < X && !seeded; ++i)
+        {
+            const auto &slot0 = working_set[i].per_gloc[0];
+            if (slot0.best_train_idx < 0)
+                continue;
+
+            const colmap::Image &img =
+                map_.images[static_cast<size_t>(slot0.best_train_idx)];
+            const Mat3d R_cw = img.q_c_w.toRotationMatrix();
+            const Vec3d t_cw = img.t_c_w;
+            const Vec3d oj = -(R_cw.transpose() * t_cw);
+
+            const Mat3d R_bw = R_imu_cam * R_cw; // R_body_world
+            const Mat3d R_wb = R_bw.transpose(); // R_world_body
+            const Vec3d t_wb = oj - R_cw.transpose() *
+                                        R_imu_cam.transpose() * t_imu_cam;
+
+            const Mat3d R_lb = working_set[i].R_local.toRotationMatrix();
+            const Vec3d P_l = working_set[i].P_local;
+
+            const Mat3d R_ml = R_wb * R_lb.transpose(); // R_map_local
+            const Vec3d t_ml = t_wb - R_ml * P_l;
+
+            const Eigen::AngleAxisd aa(R_ml);
+            const Vec3d ov = aa.axis() * aa.angle();
+            omega_map = {ov.x(), ov.y(), ov.z()};
+            t_map = {t_ml.x(), t_ml.y(), t_ml.z()};
+            seeded = true;
+        }
+        if (!seeded)
+        {
+            GLOC_DEBUG("[opt_fr] no valid seed - skip");
+            return false;
+        }
+    }
+
+    // ── 3. Flatten observations ───────────────────────────────────────────────
+    struct FlatObs
+    {
+        GlocFixedRelReprojCost rep;
+        GlocFixedRelEpipolarCost epi;
+        int kf_idx;
+    };
+    std::vector<FlatObs> flat_obs;
+    flat_obs.reserve(4096);
+    std::vector<double> rhos;
+    rhos.reserve(4096);
+    const double kMaxDepthM = GLOC_MAX_DEPTH_M;
+
+    for (int i = 0; i < X; ++i)
+    {
+        const auto &kf = working_set[i];
+        for (std::size_t g = 0; g < kf.per_gloc.size(); ++g)
+        {
+            const auto &slot = kf.per_gloc[g];
+            if (!slot.pipeline_done || slot.best_train_idx < 0 ||
+                slot.pt_pairs_undistorted.empty())
+                continue;
+
+            const std::size_t ti = static_cast<std::size_t>(slot.best_train_idx);
+            const colmap::Image &train_img = map_.images[ti];
+            const colmap::CameraCalib &train_cal = map_.calibs.at(train_img.camera_id);
+            const Mat3d R_j = train_img.q_c_w.toRotationMatrix();
+            const Vec3d t_j = train_img.t_c_w;
+            const Vec3d o_j = -(R_j.transpose() * t_j);
+            const Mat3d R_cb = vins_multi::GLOC_CAM_MODULES[g].ric_[0].toRotationMatrix();
+            const Vec3d t_cb = vins_multi::GLOC_CAM_MODULES[g].tic_[0];
+            const double fx_q = vins_multi::FOCAL_LENGTH;
+            const double fy_q = vins_multi::FOCAL_LENGTH;
+            const double cx_q = slot.query_feats.image_size.width / 2.0;
+            const double cy_q = slot.query_feats.image_size.height / 2.0;
+
+            // Bake in per-keyframe VINS local pose
+            const Mat3d R_lb = kf.R_local.toRotationMatrix();
+            double R_lb_arr[9], R_j_arr[9], Rcr_arr[9], t_j_arr[3], tcr_arr[3];
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c)
+                {
+                    R_lb_arr[r * 3 + c] = R_lb(r, c);
+                    R_j_arr[r * 3 + c] = R_j(r, c);
+                    Rcr_arr[r * 3 + c] = R_cb(r, c);
+                }
+            t_j_arr[0] = t_j.x();
+            t_j_arr[1] = t_j.y();
+            t_j_arr[2] = t_j.z();
+            tcr_arr[0] = t_cb.x();
+            tcr_arr[1] = t_cb.y();
+            tcr_arr[2] = t_cb.z();
+
+            for (const auto &[pq, pt] : slot.pt_pairs_undistorted)
+            {
+                const Vec3d m_t((pt.x() - train_cal.cx) / train_cal.fx,
+                                (pt.y() - train_cal.cy) / train_cal.fy, 1.0);
+                const Vec3d Rtm = R_j.transpose() * m_t;
+
+                GlocFixedRelReprojCost rep{};
+                std::memcpy(rep.R_local_body, R_lb_arr, sizeof(R_lb_arr));
+                rep.P_local[0] = kf.P_local.x();
+                rep.P_local[1] = kf.P_local.y();
+                rep.P_local[2] = kf.P_local.z();
+                rep.Rtm[0] = Rtm.x();
+                rep.Rtm[1] = Rtm.y();
+                rep.Rtm[2] = Rtm.z();
+                rep.oj[0] = o_j.x();
+                rep.oj[1] = o_j.y();
+                rep.oj[2] = o_j.z();
+                rep.pq[0] = pq.x();
+                rep.pq[1] = pq.y();
+                std::memcpy(rep.Rcr, Rcr_arr, sizeof(Rcr_arr));
+                std::memcpy(rep.tcr, tcr_arr, sizeof(tcr_arr));
+                rep.fx = fx_q;
+                rep.fy = fy_q;
+                rep.cx_ = cx_q;
+                rep.cy_ = cy_q;
+
+                GlocFixedRelEpipolarCost epi{};
+                std::memcpy(epi.R_local_body, R_lb_arr, sizeof(R_lb_arr));
+                epi.P_local[0] = kf.P_local.x();
+                epi.P_local[1] = kf.P_local.y();
+                epi.P_local[2] = kf.P_local.z();
+                epi.x_q[0] = (pq.x() - cx_q) / fx_q;
+                epi.x_q[1] = (pq.y() - cy_q) / fy_q;
+                epi.x_q[2] = 1.0;
+                epi.x_t[0] = m_t.x();
+                epi.x_t[1] = m_t.y();
+                epi.x_t[2] = m_t.z();
+                std::memcpy(epi.R_j, R_j_arr, sizeof(R_j_arr));
+                epi.t_j[0] = t_j_arr[0];
+                epi.t_j[1] = t_j_arr[1];
+                epi.t_j[2] = t_j_arr[2];
+                std::memcpy(epi.Rcr, Rcr_arr, sizeof(Rcr_arr));
+                std::memcpy(epi.tcr, tcr_arr, sizeof(tcr_arr));
+                epi.scale = std::sqrt(fx_q * fy_q);
+
+                flat_obs.push_back({rep, epi, i});
+                rhos.push_back(0.1);
+            }
+        }
+    }
+
+    const int N = static_cast<int>(flat_obs.size());
+    if (N < GLOC_MIN_PAIRS)
+    {
+        GLOC_DEBUG("[opt_fr] too few observations (%d) - skip", N);
+        return false;
+    }
+    GLOC_DEBUG("[opt_fr] X=%d keyframes N=%d observations (fixed-rel, %s)",
+               X, N, use_4dof ? "4DOF" : "6DOF");
+
+    // ── Solver options ────────────────────────────────────────────────────────
+    ceres::Solver::Options solver_opts;
+    solver_opts.minimizer_type = ceres::TRUST_REGION;
+    solver_opts.trust_region_strategy_type = ceres::LEVENBERG_MARQUARDT;
+    // Single variable block (6 or 4 DOF) + N rho blocks: always small enough for DENSE_SCHUR
+    solver_opts.linear_solver_type = ceres::DENSE_SCHUR;
+    solver_opts.preconditioner_type = ceres::JACOBI;
+    solver_opts.function_tolerance = 1e-8;
+    solver_opts.gradient_tolerance = 1e-10;
+    solver_opts.parameter_tolerance = 1e-8;
+    solver_opts.minimizer_progress_to_stdout = false;
+    solver_opts.num_threads = 1;
+
+    ceres::HuberLoss huber_loss(GLOC_HUBER_DELTA);
+    ceres::Problem::Options prob_opts;
+    prob_opts.loss_function_ownership = ceres::DO_NOT_TAKE_OWNERSHIP;
+
+    auto build_problem = [&](ceres::Problem &prob,
+                             ceres::ParameterBlockOrdering *ord,
+                             bool add_epi) {
+        // One pose block (omega_map), optionally yaw-only
+        ord->AddElementToGroup(omega_map.data(), 1);
+        ord->AddElementToGroup(t_map.data(), 1);
+        if (use_4dof)
+            prob.AddParameterBlock(omega_map.data(), 3, new YawOnlyParameterization());
+
+        for (int k = 0; k < N; ++k)
+        {
+            if (GLOC_W_REPROJ > 0.0)
+            {
+                auto *cost = new ceres::AutoDiffCostFunction<
+                    GlocFixedRelReprojCost, 2, 3, 3, 1>(
+                    new GlocFixedRelReprojCost(flat_obs[k].rep));
+                auto *scaled = new ceres::ScaledLoss(
+                    &huber_loss, GLOC_W_REPROJ, ceres::DO_NOT_TAKE_OWNERSHIP);
+                prob.AddResidualBlock(cost, scaled,
+                                      omega_map.data(), t_map.data(), &rhos[k]);
+                prob.SetParameterLowerBound(&rhos[k], 0, 1.0 / kMaxDepthM);
+                ord->AddElementToGroup(&rhos[k], 0);
+            }
+            if (add_epi && GLOC_W_EPIPOLAR > 0.0)
+            {
+                auto *cost = new ceres::AutoDiffCostFunction<
+                    GlocFixedRelEpipolarCost, 1, 3, 3>(
+                    new GlocFixedRelEpipolarCost(flat_obs[k].epi));
+                auto *scaled = new ceres::ScaledLoss(
+                    &huber_loss, GLOC_W_EPIPOLAR, ceres::DO_NOT_TAKE_OWNERSHIP);
+                prob.AddResidualBlock(cost, scaled, omega_map.data(), t_map.data());
+            }
+        }
+    };
+
+    // ── 4. Init pass: yaw candidates (only when not snapped) ─────────────────
+    if (!snapped_local)
+    {
+        constexpr int kNumYaw = 12;
+        const double kYawStep = 2.0 * M_PI / kNumYaw;
+        double best_cost = std::numeric_limits<double>::max();
+        std::array<double, 3> best_omega = omega_map;
+        std::array<double, 3> best_t = t_map;
+        std::vector<double> best_rhos = rhos;
+        const auto orig_omega = omega_map;
+        const auto orig_rhos = rhos;
+
+        for (int yk = 0; yk < kNumYaw; ++yk)
+        {
+            omega_map = orig_omega;
+            rhos = orig_rhos;
+
+            const Eigen::Map<const Eigen::Vector3d> ov(omega_map.data());
+            const double norm = ov.norm();
+            const Mat3d R_orig = Eigen::AngleAxisd(
+                                     norm, norm > 1e-8 ? (ov / norm).eval() : Eigen::Vector3d::UnitZ())
+                                     .toRotationMatrix();
+            const Mat3d Rz = Eigen::AngleAxisd(yk * kYawStep,
+                                               Eigen::Vector3d::UnitZ())
+                                 .toRotationMatrix();
+            const Eigen::AngleAxisd aa_new(Rz * R_orig);
+            const Eigen::Vector3d ov_new = aa_new.axis() * aa_new.angle();
+            omega_map = {ov_new.x(), ov_new.y(), ov_new.z()};
+
+            ceres::Problem init_prob(prob_opts);
+            auto *init_ord = new ceres::ParameterBlockOrdering;
+            build_problem(init_prob, init_ord, /*add_epi=*/true);
+
+            ceres::Solver::Options init_opts = solver_opts;
+            init_opts.linear_solver_ordering.reset(init_ord);
+            init_opts.max_num_iterations = GLOC_INIT_ITERS;
+            init_opts.function_tolerance = 1e-3;
+            init_opts.parameter_tolerance = 1e-3;
+            init_opts.gradient_tolerance = 1e-3;
+
+            ceres::Solver::Summary init_sum;
+            ceres::Solve(init_opts, &init_prob, &init_sum);
+            if (init_sum.initial_cost < 0.0)
+                continue;
+            if (init_sum.final_cost < best_cost)
+            {
+                best_cost = init_sum.final_cost;
+                best_omega = omega_map;
+                best_t = t_map;
+                best_rhos = rhos;
+            }
+        }
+        omega_map = best_omega;
+        t_map = best_t;
+        rhos = best_rhos;
+    }
+
+    // ── 5. Main solve ─────────────────────────────────────────────────────────
+    ceres::Problem main_prob(prob_opts);
+    auto *main_ord = new ceres::ParameterBlockOrdering;
+    build_problem(main_prob, main_ord, /*add_epi=*/true);
+
+    ceres::Solver::Options main_opts = solver_opts;
+    main_opts.linear_solver_ordering.reset(main_ord);
+    main_opts.max_num_iterations = GLOC_MAX_ITERS;
+
+    ceres::Solver::Summary main_sum;
+    ceres::Solve(main_opts, &main_prob, &main_sum);
+    GLOC_DEBUG("[opt_fr] %s", main_sum.BriefReport().c_str());
+
+    // ── 6. Inlier check ───────────────────────────────────────────────────────
+    int inliers = 0;
+    for (int k = 0; k < N; ++k)
+    {
+        double res[2];
+        flat_obs[k].rep(omega_map.data(), t_map.data(), &rhos[k], res);
+        const double err = std::sqrt(res[0] * res[0] + res[1] * res[1]);
+        if (err < GLOC_INLIER_THRESH_PX)
+            ++inliers;
+    }
+    const double inlier_ratio = static_cast<double>(inliers) / N;
+    GLOC_DEBUG("[opt_fr] inliers=%d/%d (%.1f%%)", inliers, N, inlier_ratio * 100.0);
+    if (inlier_ratio < GLOC_MIN_INLIER_RATIO)
+    {
+        GLOC_WARN("[opt_fr] rejected: inlier ratio %.2f < %.2f",
+                  inlier_ratio, GLOC_MIN_INLIER_RATIO);
+        return false;
+    }
+
+    // ── 7. T_map_local is the result directly ─────────────────────────────────
+    const Eigen::Map<const Eigen::Vector3d> ov(omega_map.data());
+    const double norm = ov.norm();
+    const Mat3d R_ml = Eigen::AngleAxisd(
+                           norm, norm > 1e-8 ? (ov / norm).eval() : Eigen::Vector3d::UnitZ())
+                           .toRotationMatrix();
+    const Vec3d t_ml(t_map[0], t_map[1], t_map[2]);
+
+    // ── 8. Update snapped state ───────────────────────────────────────────────
+    {
+        std::lock_guard<std::mutex> lk(snap_mutex_);
+        T_map_local_R_ = use_4dof ? yawOnlyR(R_ml) : R_ml;
+        // When stripping pitch/roll, recompute t_ml consistently with the
+        // new rotation using the first valid keyframe as anchor so the
+        // world position of that keyframe is preserved.
+        if (use_4dof)
+        {
+            const Mat3d R_stripped = T_map_local_R_;
+            // Find first keyframe with valid correspondence to use as anchor
+            for (int i = 0; i < X; ++i)
+            {
+                const auto &kf = working_set[i];
+                double w = 0.0;
+                for (const auto &slot : kf.per_gloc)
+                    if (slot.pipeline_done && slot.best_train_idx >= 0)
+                        w += static_cast<double>(slot.pt_pairs_undistorted.size());
+                if (w < 1.0)
+                    continue;
+                // t_world_body_i from optimized omega_map/t_map (consistent with R_ml)
+                // Recompute: t_map_new = t_world_body_i - R_stripped * P_local_i
+                // where t_world_body_i = R_ml * P_local_i + t_ml (original)
+                const Vec3d t_world_body_i = R_ml * kf.P_local + t_ml;
+                T_map_local_t_ = t_world_body_i - R_stripped * kf.P_local;
+                break;
+            }
+        }
+        else
+        {
+            T_map_local_t_ = t_ml;
+        }
+        snapped_ = true;
+        last_snap_poses_.clear();
+        for (int i = 0; i < X; ++i)
+        {
+            const auto &kf = working_set[i];
+            double w = 0.0;
+            for (const auto &slot : kf.per_gloc)
+                if (slot.pipeline_done && slot.best_train_idx >= 0)
+                    w += static_cast<double>(slot.pt_pairs_undistorted.size());
+            if (w < 1.0)
+                continue;
+            last_snap_poses_[kf.t_kf] = {kf.R_local, kf.P_local, w};
+        }
+    }
+
+    GLOC_INFO("[opt_fr] SNAPPED T_map_local t=[%.2f %.2f %.2f]",
+              t_ml.x(), t_ml.y(), t_ml.z());
+
+    // ── Publish ───────────────────────────────────────────────────────────────
+    if (vins_multi::hasGlocOptimizedSubscribers())
+    {
+        std::vector<geometry_msgs::Pose> opt_poses;
+        std::vector<geometry_msgs::Point> opt_path_pts;
+        opt_poses.reserve(X);
+        opt_path_pts.reserve(X);
+
+        for (int i = 0; i < X; ++i)
+        {
+            const auto &kf = working_set[i];
+            const Mat3d R_lb = kf.R_local.toRotationMatrix();
+            const Mat3d R_wb = R_ml * R_lb;
+            const Vec3d t_wb = R_ml * kf.P_local + t_ml;
+            const Quat q_wb(R_wb);
+
+            geometry_msgs::Pose pose;
+            pose.position.x = t_wb.x();
+            pose.position.y = t_wb.y();
+            pose.position.z = t_wb.z();
+            pose.orientation.x = q_wb.x();
+            pose.orientation.y = q_wb.y();
+            pose.orientation.z = q_wb.z();
+            pose.orientation.w = q_wb.w();
+            opt_poses.push_back(pose);
+
+            geometry_msgs::Point pt;
+            pt.x = t_wb.x();
+            pt.y = t_wb.y();
+            pt.z = t_wb.z();
+            opt_path_pts.push_back(pt);
+        }
+        vins_multi::pubGlocOptimized(opt_poses, opt_path_pts);
+
+        std::vector<std::pair<Eigen::Vector3d, int>> kf_status_vec;
+        kf_status_vec.reserve(X);
+        for (int i = 0; i < X; ++i)
+        {
+            const Vec3d t_wb = R_ml * working_set[i].P_local + t_ml;
+            int status = 0;
+            bool any_done = false;
+            for (const auto &slot : working_set[i].per_gloc)
+            {
+                if (slot.pipeline_done)
+                {
+                    any_done = true;
+                    if (slot.best_train_idx >= 0)
+                    {
+                        status = 2;
+                        break;
+                    }
+                }
+            }
+            if (status == 0 && any_done)
+                status = 1;
+            kf_status_vec.push_back({t_wb, status});
+        }
+        vins_multi::pubGlocKeyframeStatus(kf_status_vec);
+
+        if (vins_multi::pub_gloc_match_lines.getNumSubscribers() > 0)
+        {
+            std::vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>> match_pairs;
+            for (int i = 0; i < X; ++i)
+            {
+                const auto &kf = working_set[i];
+                const Mat3d R_wb = R_ml * kf.R_local.toRotationMatrix();
+                const Vec3d t_wb = R_ml * kf.P_local + t_ml;
+                for (std::size_t g = 0; g < kf.per_gloc.size(); ++g)
+                {
+                    const auto &slot = kf.per_gloc[g];
+                    if (!slot.pipeline_done || slot.best_train_idx < 0)
+                        continue;
+                    const Mat3d R_cb = vins_multi::GLOC_CAM_MODULES[g].ric_[0].toRotationMatrix();
+                    const Vec3d t_cb = vins_multi::GLOC_CAM_MODULES[g].tic_[0];
+                    const Vec3d o_query = R_wb * (-t_cb) + t_wb;
+                    const std::size_t ti = static_cast<std::size_t>(slot.best_train_idx);
+                    const colmap::Image &train_img = map_.images[ti];
+                    const Mat3d R_j = train_img.q_c_w.toRotationMatrix();
+                    const Vec3d o_train = -(R_j.transpose() * train_img.t_c_w);
+                    match_pairs.push_back({o_query, o_train});
+                }
+            }
+            vins_multi::pubGlocMatchLines(match_pairs);
+        }
+    }
+
     {
         std::lock_guard<std::mutex> lk(cb_mutex_);
         if (callback_)
@@ -1795,29 +3563,26 @@ bool Gloc::checkPaths() const
         const fs::path p = fs::path(GLOC_COLMAP_SPARSE_FOLDER) / f;
         if (!fs::exists(p))
         {
-            std::cerr << "[Gloc] ERROR: missing COLMAP file: " << p << "\n";
+            GLOC_ERROR("[checkPaths] missing COLMAP file: %s", p.string().c_str());
             ok = false;
         }
     }
 
     if (!fs::exists(GLOC_COLMAP_IMG_FOLDER))
     {
-        std::cerr << "[Gloc] ERROR: image folder does not exist: "
-                  << GLOC_COLMAP_IMG_FOLDER << "\n";
+        GLOC_ERROR("[checkPaths] image folder does not exist: %s", GLOC_COLMAP_IMG_FOLDER.c_str());
         ok = false;
     }
 
     if (!fs::exists(GLOC_DBOW3_DATABASE))
     {
-        std::cerr << "[Gloc] ERROR: DBoW3 database not found: "
-                  << GLOC_DBOW3_DATABASE << "\n";
+        GLOC_ERROR("[checkPaths] DBoW3 database not found: %s", GLOC_DBOW3_DATABASE.c_str());
         ok = false;
     }
 
     if (!fs::exists(GLOC_DBOW3_VOCAB))
     {
-        std::cerr << "[Gloc] ERROR: DBoW3 vocabulary not found: "
-                  << GLOC_DBOW3_VOCAB << "\n";
+        GLOC_ERROR("[checkPaths] DBoW3 vocabulary not found: %s", GLOC_DBOW3_VOCAB.c_str());
         ok = false;
     }
 
@@ -1833,14 +3598,14 @@ bool Gloc::loadColmapData()
     const std::string &colmap_dir = GLOC_COLMAP_SPARSE_FOLDER;
     const std::string &img_folder = GLOC_COLMAP_IMG_FOLDER;
 
-    std::cout << "[Gloc] Loading COLMAP data from: " << colmap_dir << "\n";
+    GLOC_INFO("[loadColmap] loading from: %s", colmap_dir.c_str());
 
     try
     {
         auto img_map = colmap::read_images_bin(colmap_dir + "/images.bin");
 
         if (!colmap::check_image_paths(img_map, img_folder))
-            std::cerr << "[Gloc] WARNING: some map images are missing on disk.\n";
+            GLOC_WARN("[loadColmap] some map images are missing on disk");
 
         map_.calibs = colmap::read_cameras_bin(colmap_dir + "/cameras.bin");
 
@@ -1853,8 +3618,8 @@ bool Gloc::loadColmapData()
             std::ifstream f(GLOC_WORLD_TMAT_FILE);
             if (!f)
             {
-                ROS_WARN("[Gloc] Cannot open world transform file: %s — using identity.",
-                         GLOC_WORLD_TMAT_FILE.c_str());
+                GLOC_WARN("[loadColmap] cannot open world transform: %s - using identity",
+                          GLOC_WORLD_TMAT_FILE.c_str());
             }
             else
             {
@@ -1874,8 +3639,7 @@ bool Gloc::loadColmapData()
                     if (col > 0)
                         ++row;
                 }
-                std::cout << "[Gloc] Loaded world transform from: "
-                          << GLOC_WORLD_TMAT_FILE << "\n";
+                GLOC_INFO("[loadColmap] loaded world transform from: %s", GLOC_WORLD_TMAT_FILE.c_str());
             }
         }
         else
@@ -1898,13 +3662,12 @@ bool Gloc::loadColmapData()
         const auto rigs = colmap::read_rigs(colmap_dir + "/rigs.bin");
         map_.cam_rig_map = colmap::build_camera_rig_map(rigs);
 
-        std::cout << "[Gloc] Map images  : " << map_.images.size() << "\n"
-                  << "[Gloc] Map cameras : " << map_.calibs.size() << "\n"
-                  << "[Gloc] Rig slots     : " << map_.cam_rig_map.size() << "\n";
+        GLOC_INFO("[loadColmap] images=%zu cameras=%zu rig_slots=%zu",
+                  map_.images.size(), map_.calibs.size(), map_.cam_rig_map.size());
     }
     catch (const std::exception &e)
     {
-        std::cerr << "[Gloc] ERROR loading COLMAP data: " << e.what() << "\n";
+        GLOC_ERROR("[loadColmap] %s", e.what());
         return false;
     }
 
@@ -1917,7 +3680,7 @@ bool Gloc::loadColmapData()
 
 bool Gloc::loadDatabase()
 {
-    std::cout << "[Gloc] Loading DBoW3 database ...\n";
+    GLOC_INFO("[loadDB] loading DBoW3 database ...");
 
     try
     {
@@ -1926,12 +3689,11 @@ bool Gloc::loadDatabase()
                                    map_.db,
                                    map_.feats);
 
-        std::cout << "[Gloc] DB entries  : " << map_.db.size() << "\n"
-                  << "[Gloc] Map feats  : " << map_.feats.size() << "\n";
+        GLOC_INFO("[loadDB] db_entries=%zu map_feats=%zu", map_.db.size(), map_.feats.size());
     }
     catch (const std::exception &e)
     {
-        std::cerr << "[Gloc] ERROR loading DBoW3 database: " << e.what() << "\n";
+        GLOC_ERROR("[loadDB] %s", e.what());
         return false;
     }
 

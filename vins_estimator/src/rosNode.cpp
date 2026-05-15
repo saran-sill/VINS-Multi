@@ -365,9 +365,11 @@ void VinsNodeBaseClass::camera_module_info_with_sub::comp_imgs_callback(const se
 void VinsNodeBaseClass::gloc_only_camera_module_info_with_sub::img_callback(const sensor_msgs::ImageConstPtr &img0_msg)
 {
     const double t = img0_msg->header.stamp.toSec();
-    if (last_img_t_ > 0 && t - last_img_t_ < 1.0 / IMG_FREQ)
-        return;
-    last_img_t_ = t;
+
+    // No IMG_FREQ rate gate here. Unlike the VINS path (which rate-gates to
+    // control feature-tracker compute), the gloc path just stuffs frames into
+    // a ring buffer — cheap, and the buffer's own eviction handles bounding.
+    // Rate-gating would create timestamp gaps that cause missed lookups.
 
     cv_bridge::CvImagePtr img_0 = getImageFromMsg(img0_msg);
 
@@ -470,10 +472,22 @@ void VinsNodeBaseClass::Init(ros::NodeHandle &n, const std::string &config_file)
         gloc_.setTMapLocalCallback(
             [this](const Eigen::Matrix3d &R, const Eigen::Vector3d &t) {
                 estimator_.setTMapLocal(R, t);
-                vins_multi::broadcastWorldOdomTF(R, t);
+                // Stamp the TF with the latest sensor timestamp so it stays
+                // synchronised with bag replay time instead of wall-clock.
+                const double latest_t = estimator_.latest_image_time_;
+                const ros::Time stamp = (latest_t > 0.0)
+                                            ? ros::Time(latest_t)
+                                            : ros::Time::now();
+                vins_multi::broadcastWorldOdomTF(R, t, stamp);
             });
 
         pubGlocMap(gloc_);
+
+        // Broadcast identity world → odom TF immediately so the frame
+        // exists in the TF tree before the first gloc snap. Will be
+        // updated by the callback whenever a new T_map_local is accepted.
+        vins_multi::broadcastWorldOdomTF(Eigen::Matrix3d::Identity(),
+                                         Eigen::Vector3d::Zero());
     }
 
     estimator_.start_process_thread();

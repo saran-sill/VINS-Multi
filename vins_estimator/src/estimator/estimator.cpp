@@ -224,7 +224,7 @@ void Estimator::inputImageToBuffer(const unsigned int unique_id, double t, const
     if (dropped_count > 0)
     {
         ROS_DEBUG("img_buf[%d] dropped %d frame(s), final size=%zu",
-                 unique_id, dropped_count, img_tracker->image_buffer_.size());
+                  unique_id, dropped_count, img_tracker->image_buffer_.size());
     }
 
     img_tracker->image_buffer_mutex_.unlock();
@@ -594,7 +594,8 @@ deque<State>::iterator Estimator::insertState(const State &state)
 
 void Estimator::updateFeatureTrackerMaxCnt()
 {
-    if (img_trackers_.empty()) return;
+    if (img_trackers_.empty())
+        return;
 
     // Equal budget per module. Each cam gets the same cap regardless of
     // how well it's currently tracking — so weak modules don't get starved
@@ -1416,6 +1417,7 @@ void Estimator::processWindow(const int img_cam_unique_id)
 
             gloc::Snapshot::KeyframeEntry e;
             e.t_kf = frame_ptr->t_ + frame_ptr->td_;
+            e.t_image = frame_ptr->t_; // raw image timestamp, no td
             // Eigen::Map<Eigen::Quaterniond> R_ and Map<Vector3d> T_ implicitly
             // convert to fresh Quaterniond / Vector3d on copy — a couple of
             // doubles each, no aliasing back into para_Pose_ memory.
@@ -2343,8 +2345,8 @@ void Estimator::updateLatestStates(const int unique_id)
     double time_lag = state_hist_.back().t_ - image_frame->t_;
 
     ROS_DEBUG("imu_img_dist: %.3fm, time_lag: %.3fms, imu_t=%.3f, img_t=%.3f",
-             dist, time_lag * 1000.0,
-             state_hist_.back().t_, image_frame->t_);
+              dist, time_lag * 1000.0,
+              state_hist_.back().t_, image_frame->t_);
 
     // publish infomation
     std_msgs::Header header;

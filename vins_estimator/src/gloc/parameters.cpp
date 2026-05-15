@@ -1,9 +1,11 @@
 #include "parameters.h"
 
+#include <filesystem>
+
 namespace gloc
 {
 
-int GLOC_ENABLED;
+bool GLOC_ENABLED = false;
 std::string GLOC_COLMAP_SPARSE_FOLDER;
 std::string GLOC_COLMAP_IMG_FOLDER;
 std::string GLOC_DBOW3_DATABASE;
@@ -30,15 +32,15 @@ int GLOC_ORB_PATCH_SIZE = 31;
 int GLOC_ORB_FAST_THRESHOLD = 20;
 
 // Descriptor
-int GLOC_USE_BEBLID = 0;
+bool GLOC_USE_BEBLID = false;
 float GLOC_BEBLID_SCALE_FACTOR = 1.0f;
 int GLOC_BEBLID_N_BITS = 256;
 
 // Matching
-int GLOC_USE_GMS = 1;
+bool GLOC_USE_GMS = true;
 float GLOC_GMS_THRESHOLD = 6.0f;
-int GLOC_GMS_WITH_ROTATION = 0;
-int GLOC_GMS_WITH_SCALE = 0;
+bool GLOC_GMS_WITH_ROTATION = false;
+bool GLOC_GMS_WITH_SCALE = false;
 
 float GLOC_MATCH_LOWE_RATIO = 0.8f;
 int GLOC_MATCH_MAX_DIST = 64;
@@ -62,6 +64,34 @@ int GLOC_MAX_ITERS = 150;
 int GLOC_INIT_ITERS = 20;
 double GLOC_MIN_INLIER_RATIO = 0.3;
 double GLOC_MAX_DEPTH_M = 200.0;
+bool GLOC_USE_4DOF = false;
+bool GLOC_FIX_REL_POSES = false;
+std::string GLOC_DEBUG_FOLDER;
+
+// Preprocessing
+bool GLOC_PREPROCESS_WHITE_BALANCE = false;
+bool GLOC_PREPROCESS_DENOISE = false;
+int GLOC_PREPROCESS_DENOISE_D = 5;
+double GLOC_PREPROCESS_DENOISE_SIGMA_COLOR = 40.0;
+double GLOC_PREPROCESS_DENOISE_SIGMA_SPACE = 40.0;
+bool GLOC_PREPROCESS_DENOISE_COLOR = false;
+double GLOC_PREPROCESS_DENOISE_H_LUMINANCE = 2.5;
+double GLOC_PREPROCESS_DENOISE_H_COLOR = 10.0;
+bool GLOC_PREPROCESS_GAMMA = false;
+double GLOC_PREPROCESS_GAMMA_VALUE = 2.2;
+bool GLOC_PREPROCESS_TONEMAP = false;
+double GLOC_PREPROCESS_TONEMAP_GAMMA = 0.78;
+double GLOC_PREPROCESS_TONEMAP_HIGHLIGHT = 0.65;
+double GLOC_PREPROCESS_TONEMAP_SHADOW_LIFT = 0.08;
+bool GLOC_PREPROCESS_CLAHE = true;
+double GLOC_PREPROCESS_CLAHE_CLIP_LIMIT = 5.0;
+int GLOC_PREPROCESS_CLAHE_GRID_SIZE = 5;
+bool GLOC_PREPROCESS_CLARITY = false;
+double GLOC_PREPROCESS_CLARITY_AMOUNT = 0.40;
+double GLOC_PREPROCESS_CLARITY_SIGMA = 15.0;
+bool GLOC_PREPROCESS_SHARPEN = false;
+double GLOC_PREPROCESS_SHARPEN_SIGMA = 1.0;
+double GLOC_PREPROCESS_SHARPEN_AMOUNT = 1.5;
 
 // Helper: read a value only when the node is non-empty/non-null.
 template <typename T>
@@ -71,6 +101,24 @@ static void read_if(const cv::FileStorage &fs,
     const cv::FileNode n = fs[key];
     if (!n.empty())
         n >> out;
+}
+
+// Bool specialization: read as int (0/1) then convert.
+// Supports both YAML boolean (true/false) and integer (0/1).
+template <>
+void read_if<bool>(const cv::FileStorage &fs,
+                   const std::string &key, bool &out)
+{
+    const cv::FileNode n = fs[key];
+    if (n.empty())
+        return;
+    if (n.isInt())
+        out = static_cast<int>(n) != 0;
+    else if (n.isString())
+    {
+        const std::string s = static_cast<std::string>(n);
+        out = (s == "true" || s == "1" || s == "yes");
+    }
 }
 
 void readParameters(std::string config_file)
@@ -90,7 +138,7 @@ void readParameters(std::string config_file)
         std::cerr << "ERROR: Wrong path to settings" << std::endl;
     }
 
-    gloc::GLOC_ENABLED = fsSettings["gloc_enabled"];
+    read_if(fsSettings, "gloc_enabled", gloc::GLOC_ENABLED);
 
     fsSettings["gloc_colmap_sparse_folder"] >> gloc::GLOC_COLMAP_SPARSE_FOLDER;
     fsSettings["gloc_colmap_img_folder"] >> gloc::GLOC_COLMAP_IMG_FOLDER;
@@ -138,6 +186,49 @@ void readParameters(std::string config_file)
     read_if(fsSettings, "gloc_init_iters", gloc::GLOC_INIT_ITERS);
     read_if(fsSettings, "gloc_min_inlier_ratio", gloc::GLOC_MIN_INLIER_RATIO);
     read_if(fsSettings, "gloc_max_depth_m", gloc::GLOC_MAX_DEPTH_M);
+    read_if(fsSettings, "gloc_use_4dof", gloc::GLOC_USE_4DOF);
+    read_if(fsSettings, "gloc_fix_rel_poses", gloc::GLOC_FIX_REL_POSES);
+    read_if(fsSettings, "gloc_debug_folder", gloc::GLOC_DEBUG_FOLDER);
+
+    // Preprocessing
+    read_if(fsSettings, "gloc_preprocess_white_balance", gloc::GLOC_PREPROCESS_WHITE_BALANCE);
+    read_if(fsSettings, "gloc_preprocess_denoise", gloc::GLOC_PREPROCESS_DENOISE);
+    read_if(fsSettings, "gloc_preprocess_denoise_d", gloc::GLOC_PREPROCESS_DENOISE_D);
+    read_if(fsSettings, "gloc_preprocess_denoise_sigma_color", gloc::GLOC_PREPROCESS_DENOISE_SIGMA_COLOR);
+    read_if(fsSettings, "gloc_preprocess_denoise_sigma_space", gloc::GLOC_PREPROCESS_DENOISE_SIGMA_SPACE);
+    read_if(fsSettings, "gloc_preprocess_denoise_color", gloc::GLOC_PREPROCESS_DENOISE_COLOR);
+    read_if(fsSettings, "gloc_preprocess_denoise_h_luminance", gloc::GLOC_PREPROCESS_DENOISE_H_LUMINANCE);
+    read_if(fsSettings, "gloc_preprocess_denoise_h_color", gloc::GLOC_PREPROCESS_DENOISE_H_COLOR);
+    read_if(fsSettings, "gloc_preprocess_gamma", gloc::GLOC_PREPROCESS_GAMMA);
+    read_if(fsSettings, "gloc_preprocess_gamma_value", gloc::GLOC_PREPROCESS_GAMMA_VALUE);
+    read_if(fsSettings, "gloc_preprocess_tonemap", gloc::GLOC_PREPROCESS_TONEMAP);
+    read_if(fsSettings, "gloc_preprocess_tonemap_gamma", gloc::GLOC_PREPROCESS_TONEMAP_GAMMA);
+    read_if(fsSettings, "gloc_preprocess_tonemap_highlight", gloc::GLOC_PREPROCESS_TONEMAP_HIGHLIGHT);
+    read_if(fsSettings, "gloc_preprocess_tonemap_shadow_lift", gloc::GLOC_PREPROCESS_TONEMAP_SHADOW_LIFT);
+    read_if(fsSettings, "gloc_preprocess_clahe", gloc::GLOC_PREPROCESS_CLAHE);
+    read_if(fsSettings, "gloc_preprocess_clahe_clip_limit", gloc::GLOC_PREPROCESS_CLAHE_CLIP_LIMIT);
+    read_if(fsSettings, "gloc_preprocess_clahe_grid_size", gloc::GLOC_PREPROCESS_CLAHE_GRID_SIZE);
+    read_if(fsSettings, "gloc_preprocess_clarity", gloc::GLOC_PREPROCESS_CLARITY);
+    read_if(fsSettings, "gloc_preprocess_clarity_amount", gloc::GLOC_PREPROCESS_CLARITY_AMOUNT);
+    read_if(fsSettings, "gloc_preprocess_clarity_sigma", gloc::GLOC_PREPROCESS_CLARITY_SIGMA);
+    read_if(fsSettings, "gloc_preprocess_sharpen", gloc::GLOC_PREPROCESS_SHARPEN);
+    read_if(fsSettings, "gloc_preprocess_sharpen_sigma", gloc::GLOC_PREPROCESS_SHARPEN_SIGMA);
+    read_if(fsSettings, "gloc_preprocess_sharpen_amount", gloc::GLOC_PREPROCESS_SHARPEN_AMOUNT);
+
+    // Validate debug folder — clear if it doesn't exist on disk so the
+    // empty-string guard in saveDebugImages disables saving automatically.
+    if (!gloc::GLOC_DEBUG_FOLDER.empty() &&
+        !std::filesystem::exists(gloc::GLOC_DEBUG_FOLDER))
+    {
+        printf("GLOC_DEBUG_FOLDER '%s' does not exist — debug images disabled.\n",
+               gloc::GLOC_DEBUG_FOLDER.c_str());
+        gloc::GLOC_DEBUG_FOLDER.clear();
+    }
+    else if (!gloc::GLOC_DEBUG_FOLDER.empty() &&
+             gloc::GLOC_DEBUG_FOLDER.back() != '/')
+    {
+        gloc::GLOC_DEBUG_FOLDER += '/';
+    }
 
     printf("GLOC_ENABLED              : %d\n", gloc::GLOC_ENABLED);
     printf("GLOC_COLMAP_SPARSE_FOLDER : %s\n", gloc::GLOC_COLMAP_SPARSE_FOLDER.c_str());
@@ -172,6 +263,18 @@ void readParameters(std::string config_file)
     printf("GLOC_INIT_ITERS           : %d\n", gloc::GLOC_INIT_ITERS);
     printf("GLOC_MIN_INLIER_RATIO     : %.2f\n", gloc::GLOC_MIN_INLIER_RATIO);
     printf("GLOC_MAX_DEPTH_M          : %.1f\n", gloc::GLOC_MAX_DEPTH_M);
+    printf("GLOC_USE_4DOF             : %d\n", gloc::GLOC_USE_4DOF);
+    printf("GLOC_FIX_REL_POSES        : %d\n", gloc::GLOC_FIX_REL_POSES);
+    printf("GLOC_DEBUG_FOLDER         : %s\n", gloc::GLOC_DEBUG_FOLDER.c_str());
+    printf("GLOC_PREPROCESS_WHITE_BAL : %d\n", gloc::GLOC_PREPROCESS_WHITE_BALANCE);
+    printf("GLOC_PREPROCESS_DENOISE   : %d\n", gloc::GLOC_PREPROCESS_DENOISE);
+    printf("GLOC_PREPROCESS_TONEMAP   : %d\n", gloc::GLOC_PREPROCESS_TONEMAP);
+    printf("GLOC_PREPROCESS_CLAHE     : %d (clip=%.1f grid=%d)\n",
+           gloc::GLOC_PREPROCESS_CLAHE,
+           gloc::GLOC_PREPROCESS_CLAHE_CLIP_LIMIT,
+           gloc::GLOC_PREPROCESS_CLAHE_GRID_SIZE);
+    printf("GLOC_PREPROCESS_CLARITY   : %d\n", gloc::GLOC_PREPROCESS_CLARITY);
+    printf("GLOC_PREPROCESS_SHARPEN   : %d\n", gloc::GLOC_PREPROCESS_SHARPEN);
 }
 
 }; // namespace gloc
