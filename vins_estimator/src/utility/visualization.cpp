@@ -17,7 +17,7 @@ namespace vins_multi
 
 ros::Publisher pub_odometry, pub_latest_odometry, pub_latest_odometry_world;
 ros::Publisher pub_gloc_map_frustums, pub_gloc_map_path;
-ros::Publisher pub_gloc_opt_poses, pub_gloc_opt_path, pub_gloc_kf_status;
+ros::Publisher pub_gloc_opt_poses, pub_gloc_opt_path, pub_gloc_kf_status, pub_gloc_match_lines;
 ros::Publisher pub_path;
 std::vector<ros::Publisher> pub_point_cloud;
 ros::Publisher pub_margin_cloud;
@@ -64,6 +64,8 @@ void registerPub(ros::NodeHandle &n)
         "gloc/opt_path", 10);
     pub_gloc_kf_status = n.advertise<visualization_msgs::MarkerArray>(
         "gloc/kf_status", 10);
+    pub_gloc_match_lines = n.advertise<visualization_msgs::Marker>(
+        "gloc/match_lines", 10);
     pub_path = n.advertise<nav_msgs::Path>("path", 1000);
     pub_odometry = n.advertise<nav_msgs::Odometry>("odomimu_lowhz", 1000);
     // pub_key_poses = n.advertise<visualization_msgs::Marker>("key_poses", 1000);
@@ -868,7 +870,7 @@ void pubKeyframes(const Estimator &estimator)
 
 bool hasGlocOptimizedSubscribers()
 {
-    return pub_gloc_opt_poses.getNumSubscribers() > 0 || pub_gloc_opt_path.getNumSubscribers() > 0 || pub_gloc_kf_status.getNumSubscribers() > 0;
+    return pub_gloc_opt_poses.getNumSubscribers() > 0 || pub_gloc_opt_path.getNumSubscribers() > 0 || pub_gloc_kf_status.getNumSubscribers() > 0 || pub_gloc_match_lines.getNumSubscribers() > 0;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -983,6 +985,55 @@ void pubGlocOptimized(const std::vector<geometry_msgs::Pose> &poses,
         }
         pub_gloc_opt_path.publish(path);
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// pubGlocMatchLines
+//
+// Publishes magenta lines connecting each query camera position to its matched
+// COLMAP train image camera centre in world frame.
+//
+// query_train_pairs: vector of (query_pos_world, train_pos_world)
+// Topic: gloc/match_lines  (single LINE_LIST marker)
+// ─────────────────────────────────────────────────────────────────────────────
+
+void pubGlocMatchLines(
+    const std::vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>> &query_train_pairs)
+{
+    if (pub_gloc_match_lines.getNumSubscribers() == 0)
+        return;
+
+    visualization_msgs::Marker m;
+    m.header.frame_id = "world";
+    m.header.stamp = ros::Time::now();
+    m.ns = "gloc_match_lines";
+    m.id = 0;
+    m.type = visualization_msgs::Marker::LINE_LIST;
+    m.action = visualization_msgs::Marker::ADD;
+    m.scale.x = 0.1;
+    m.pose.orientation.w = 1.0;
+
+    // Magenta
+    m.color.r = 1.0f;
+    m.color.g = 0.0f;
+    m.color.b = 1.0f;
+    m.color.a = 1.0f;
+
+    m.points.reserve(query_train_pairs.size() * 2);
+    for (const auto &[q_pos, t_pos] : query_train_pairs)
+    {
+        geometry_msgs::Point pq, pt;
+        pq.x = q_pos.x();
+        pq.y = q_pos.y();
+        pq.z = q_pos.z();
+        pt.x = t_pos.x();
+        pt.y = t_pos.y();
+        pt.z = t_pos.z();
+        m.points.push_back(pq);
+        m.points.push_back(pt);
+    }
+
+    pub_gloc_match_lines.publish(m);
 }
 
 } // namespace vins_multi

@@ -259,7 +259,8 @@ gloc_match_min_inliers: 50
 gloc_subsample_min_dist_px: 10.0    # 0 = disabled;
 
 # Optimization
-gloc_min_pairs: 3               # min valid slots before calling optimizer
+gloc_min_pairs: 3               # min valid slots after first snap
+gloc_min_pairs_first_snap: 6    # min valid slots for first snap (stricter)
 gloc_rel_pose_k: 1              # chain half-width (1 = adjacent only)
 gloc_w_epipolar: 1.0            # weight for Sampson epipolar term
 gloc_w_reproj: 1.0              # weight for inverse-depth reprojection term

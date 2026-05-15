@@ -50,6 +50,7 @@ float GLOC_SUBSAMPLE_MIN_DIST_PX = 0.0f;
 
 // Stage 2 — Ceres optimization
 int GLOC_MIN_PAIRS = 3;
+int GLOC_MIN_PAIRS_FIRST_SNAP = 8;
 int GLOC_REL_POSE_K = 1;
 double GLOC_W_EPIPOLAR = 1.0;
 double GLOC_W_REPROJ = 1.0;
@@ -125,6 +126,7 @@ void readParameters(std::string config_file)
     read_if(fsSettings, "gloc_match_min_inliers", gloc::GLOC_MATCH_MIN_INLIERS);
     read_if(fsSettings, "gloc_subsample_min_dist_px", gloc::GLOC_SUBSAMPLE_MIN_DIST_PX);
     read_if(fsSettings, "gloc_min_pairs", gloc::GLOC_MIN_PAIRS);
+    read_if(fsSettings, "gloc_min_pairs_first_snap", gloc::GLOC_MIN_PAIRS_FIRST_SNAP);
     read_if(fsSettings, "gloc_rel_pose_k", gloc::GLOC_REL_POSE_K);
     read_if(fsSettings, "gloc_w_epipolar", gloc::GLOC_W_EPIPOLAR);
     read_if(fsSettings, "gloc_w_reproj", gloc::GLOC_W_REPROJ);
@@ -158,6 +160,7 @@ void readParameters(std::string config_file)
     printf("GLOC_MATCH_MIN_INLIERS    : %d\n", gloc::GLOC_MATCH_MIN_INLIERS);
     printf("GLOC_SUBSAMPLE_MIN_DIST   : %.1f\n", gloc::GLOC_SUBSAMPLE_MIN_DIST_PX);
     printf("GLOC_MIN_PAIRS            : %d\n", gloc::GLOC_MIN_PAIRS);
+    printf("GLOC_MIN_PAIRS_FIRST_SNAP : %d\n", gloc::GLOC_MIN_PAIRS_FIRST_SNAP);
     printf("GLOC_REL_POSE_K           : %d\n", gloc::GLOC_REL_POSE_K);
     printf("GLOC_W_EPIPOLAR           : %.2f\n", gloc::GLOC_W_EPIPOLAR);
     printf("GLOC_W_REPROJ             : %.2f\n", gloc::GLOC_W_REPROJ);

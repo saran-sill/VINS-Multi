@@ -89,4 +89,12 @@ bool hasGlocOptimizedSubscribers();
 void pubGlocKeyframeStatus(
     const std::vector<std::pair<Eigen::Vector3d, int>> &kf_status_vec);
 
+// Exposed for direct subscriber checks in non-visualization code.
+extern ros::Publisher pub_gloc_match_lines;
+
+// Publish magenta lines from query camera positions to matched train image
+// camera centres in world frame. Topic: gloc/match_lines
+void pubGlocMatchLines(
+    const std::vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>> &query_train_pairs);
+
 } // namespace vins_multi

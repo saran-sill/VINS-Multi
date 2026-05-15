@@ -84,7 +84,10 @@ void readParameters(std::string config_file);
 
 // Minimum number of valid keyframe-slots (pipeline_done && best_train_idx>=0)
 // required before the optimizer is called.
+// GLOC_MIN_PAIRS_FIRST_SNAP is used before the first successful snap (stricter).
+// GLOC_MIN_PAIRS is used once snapped (more relaxed).
 extern int GLOC_MIN_PAIRS;
+extern int GLOC_MIN_PAIRS_FIRST_SNAP;
 
 // Relative-pose chain half-width: keyframe i is connected to i+1 .. i+k_rel.
 // 1 = adjacent only, 2 = i+1 and i+2, etc.

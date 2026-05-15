@@ -1137,10 +1137,12 @@ bool Gloc::runOptimization(std::vector<KeyframeGlocState> &working_set)
                 !slot.pt_pairs_undistorted.empty())
                 ++valid_slot_count;
 
-    if (valid_slot_count < GLOC_MIN_PAIRS)
+    const int min_pairs = snapped_ ? GLOC_MIN_PAIRS : GLOC_MIN_PAIRS_FIRST_SNAP;
+
+    if (valid_slot_count < min_pairs)
     {
-        ROS_DEBUG("[Gloc::runOptimization] Only %d valid slots (need %d) — skip",
-                  valid_slot_count, GLOC_MIN_PAIRS);
+        ROS_DEBUG("[Gloc::runOptimization] Only %d valid slots (need %d%s) — skip",
+                  valid_slot_count, min_pairs, snapped_ ? "" : " first-snap");
         return false;
     }
 
@@ -1712,6 +1714,46 @@ bool Gloc::runOptimization(std::vector<KeyframeGlocState> &working_set)
             kf_status_vec.push_back({pos, status});
         }
         vins_multi::pubGlocKeyframeStatus(kf_status_vec);
+
+        // ── Match lines: query cam → train cam ───────────────────────────────
+        if (vins_multi::pub_gloc_match_lines.getNumSubscribers() > 0)
+        {
+            std::vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>> match_pairs;
+
+            for (int i = 0; i < X; ++i)
+            {
+                const Eigen::Map<const Vec3d> ov(omega_kf[i].data());
+                const double norm = ov.norm();
+                const Mat3d R_world_body = Eigen::AngleAxisd(
+                                               norm, norm > 1e-8 ? (ov / norm).eval() : Vec3d::UnitZ())
+                                               .toRotationMatrix();
+                const Vec3d t_world_body(t_kf[i][0], t_kf[i][1], t_kf[i][2]);
+
+                for (std::size_t g = 0; g < working_set[i].per_gloc.size(); ++g)
+                {
+                    const auto &slot = working_set[i].per_gloc[g];
+                    if (!slot.pipeline_done || slot.best_train_idx < 0)
+                        continue;
+
+                    // Query camera position in world:
+                    // o_query = R_world_body * (-t_cam_body) + t_world_body
+                    const Mat3d R_cb = vins_multi::GLOC_CAM_MODULES[g].ric_[0].toRotationMatrix();
+                    const Vec3d t_cb = vins_multi::GLOC_CAM_MODULES[g].tic_[0];
+                    const Vec3d o_query = R_world_body * (-t_cb) + t_world_body;
+
+                    // Train camera centre in world
+                    const std::size_t ti =
+                        static_cast<std::size_t>(slot.best_train_idx);
+                    const colmap::Image &train_img = map_.images[ti];
+                    const Mat3d R_j = train_img.q_c_w.toRotationMatrix();
+                    const Vec3d o_train = -(R_j.transpose() * train_img.t_c_w);
+
+                    match_pairs.push_back({o_query, o_train});
+                }
+            }
+
+            vins_multi::pubGlocMatchLines(match_pairs);
+        }
     }
 
     // Notify registered consumer (e.g. estimator) on the gloc worker thread.
