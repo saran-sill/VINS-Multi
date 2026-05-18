@@ -19,6 +19,7 @@ ros::Publisher pub_odometry, pub_latest_odometry, pub_latest_odometry_world;
 ros::Publisher pub_gloc_map_frustums, pub_gloc_map_path;
 ros::Publisher pub_gloc_opt_poses, pub_gloc_opt_path, pub_gloc_kf_status, pub_gloc_match_lines;
 ros::Publisher pub_gloc_vote_lines;
+ros::Publisher pub_gloc_corr_lines;
 ros::Publisher pub_path;
 std::vector<ros::Publisher> pub_point_cloud;
 ros::Publisher pub_margin_cloud;
@@ -69,6 +70,8 @@ void registerPub(ros::NodeHandle &n)
         "gloc/match_lines", 10);
     pub_gloc_vote_lines = n.advertise<visualization_msgs::Marker>(
         "gloc/vote_lines", 10);
+    pub_gloc_corr_lines = n.advertise<visualization_msgs::Marker>(
+        "gloc/corr_lines", 10);
     pub_path = n.advertise<nav_msgs::Path>("path", 1000);
     pub_odometry = n.advertise<nav_msgs::Odometry>("odomimu_lowhz", 1000);
     // pub_key_poses = n.advertise<visualization_msgs::Marker>("key_poses", 1000);
@@ -1049,9 +1052,9 @@ void pubGlocMatchLines(
     m.scale.x = 0.1;
     m.pose.orientation.w = 1.0;
 
-    // Magenta
-    m.color.r = 1.0f;
-    m.color.g = 0.0f;
+    // Light blue
+    m.color.r = 0.4f;
+    m.color.g = 0.8f;
     m.color.b = 1.0f;
     m.color.a = 1.0f;
 
@@ -1094,10 +1097,10 @@ void pubGlocVoteLines(
     m.id = 0;
     m.type = visualization_msgs::Marker::LINE_LIST;
     m.action = visualization_msgs::Marker::ADD;
-    m.scale.x = 0.025;
+    m.scale.x = 0.05;
     m.pose.orientation.w = 1.0;
 
-    // Cyan
+    // Yellow
     m.color.r = 1.0f;
     m.color.g = 1.0f;
     m.color.b = 0.0f;
@@ -1118,6 +1121,53 @@ void pubGlocVoteLines(
     }
 
     pub_gloc_vote_lines.publish(m);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// pubGlocCorrLines
+//
+// Publishes magenta lines after runCorrespondences — query body position
+// (P_local used directly as world) to matched train image camera centre.
+// Only slots that passed geometric verification are included.
+// Topic: gloc/corr_lines
+// ─────────────────────────────────────────────────────────────────────────────
+void pubGlocCorrLines(
+    const std::vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>> &query_train_pairs)
+{
+    if (pub_gloc_corr_lines.getNumSubscribers() == 0)
+        return;
+
+    visualization_msgs::Marker m;
+    m.header.frame_id = "world";
+    m.header.stamp = ros::Time::now();
+    m.ns = "gloc_corr_lines";
+    m.id = 0;
+    m.type = visualization_msgs::Marker::LINE_LIST;
+    m.action = visualization_msgs::Marker::ADD;
+    m.scale.x = 0.08;
+    m.pose.orientation.w = 1.0;
+
+    // Magenta
+    m.color.r = 1.0f;
+    m.color.g = 0.0f;
+    m.color.b = 1.0f;
+    m.color.a = 1.0f;
+
+    m.points.reserve(query_train_pairs.size() * 2);
+    for (const auto &[q_pos, t_pos] : query_train_pairs)
+    {
+        geometry_msgs::Point pq, pt;
+        pq.x = q_pos.x();
+        pq.y = q_pos.y();
+        pq.z = q_pos.z();
+        pt.x = t_pos.x();
+        pt.y = t_pos.y();
+        pt.z = t_pos.z();
+        m.points.push_back(pq);
+        m.points.push_back(pt);
+    }
+
+    pub_gloc_corr_lines.publish(m);
 }
 
 } // namespace vins_multi

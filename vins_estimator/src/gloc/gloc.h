@@ -292,6 +292,12 @@ struct PerModuleResolution
     // ORB features extracted from `image`.
     dbow3::ImageFeatures query_feats;
 
+    // Query keypoints undistorted into the virtual camera frame.
+    // Populated once in runOrbAndDbow (alongside ORB extraction) and reused
+    // in runCorrespondences for all train matches — avoids repeating the
+    // expensive liftProjective() call (~55ms for 2000 keypoints) per match.
+    std::vector<cv::KeyPoint> undistorted_query_kps;
+
     // DBoW3 top-N candidates: (score, train_image_index into map_.images).
     // Populated during ORB/DBoW stage; entries are sorted descending by score.
     std::vector<std::pair<double, size_t>> dbow_candidates;

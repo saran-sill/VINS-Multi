@@ -1,6 +1,7 @@
 #include "gloc.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <iostream>
@@ -1004,8 +1005,44 @@ void Gloc::processLoop()
             vins_multi::pubGlocVoteLines(vote_pairs);
         }
 
-        // runCorrespondences(working_set, working_snapshot_id);  // DEBUG: disabled
+        // runCorrespondences(working_set, working_snapshot_id);
         writeBackToStateMap(working_set);
+
+        // ── Correspondence line visualization (magenta, gloc/corr_lines) ─────
+        // Draw magenta lines from query body position to matched train image
+        // camera centre for slots that passed geometric verification.
+        if (vins_multi::pub_gloc_corr_lines.getNumSubscribers() > 0)
+        {
+            std::vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>> corr_pairs;
+            for (const auto &kf : working_set)
+            {
+                for (std::size_t g = 0; g < kf.per_gloc.size(); ++g)
+                {
+                    const auto &slot = kf.per_gloc[g];
+                    if (!slot.pipeline_done || slot.best_train_idx < 0 ||
+                        slot.pt_pairs_undistorted.empty())
+                        continue;
+
+                    const Eigen::Vector3d q_pos = kf.P_local;
+
+                    for (int match_k = 0;
+                         match_k < static_cast<int>(slot.voted_train_idxs.size()); ++match_k)
+                    {
+                        if (match_k >= static_cast<int>(slot.multi_pt_pairs_undistorted.size()) ||
+                            slot.multi_pt_pairs_undistorted[match_k].empty())
+                            continue;
+
+                        const colmap::Image &train_img =
+                            map_.images[static_cast<std::size_t>(slot.voted_train_idxs[match_k])];
+                        const Eigen::Matrix3d R_j = train_img.q_c_w.toRotationMatrix();
+                        const Eigen::Vector3d o_j = -(R_j.transpose() * train_img.t_c_w);
+                        corr_pairs.push_back({q_pos, o_j});
+                    }
+                }
+            }
+            vins_multi::pubGlocCorrLines(corr_pairs);
+        }
+
         // runOptimization(working_set);  // DEBUG: disabled
     }
 
@@ -1170,6 +1207,26 @@ void Gloc::runOrbAndDbow(std::vector<KeyframeGlocState> &working_set)
                 beblid_extractor_->compute(gray,
                                            slot.query_feats.keypoints,
                                            slot.query_feats.beblid_descriptors);
+            }
+
+            // ── Cache undistorted query keypoints ────────────────────────────
+            // liftProjective is expensive (~55ms for 2000 pts). Compute once
+            // here and reuse across all train matches in runCorrespondences.
+            if (g < query_cameras_.size() && query_cameras_[g])
+            {
+                const auto &kp0 = slot.query_feats.keypoints;
+                const double cx = slot.query_feats.image_size.width / 2.0;
+                const double cy = slot.query_feats.image_size.height / 2.0;
+                slot.undistorted_query_kps.resize(kp0.size());
+                for (std::size_t qi = 0; qi < kp0.size(); ++qi)
+                {
+                    Eigen::Vector3d ray;
+                    query_cameras_[g]->liftProjective(
+                        Eigen::Vector2d(kp0[qi].pt.x, kp0[qi].pt.y), ray);
+                    slot.undistorted_query_kps[qi].pt = cv::Point2f(
+                        (float)(vins_multi::FOCAL_LENGTH * ray.x() / ray.z() + cx),
+                        (float)(vins_multi::FOCAL_LENGTH * ray.y() / ray.z() + cy));
+                }
             }
 
             // ── DBoW3 query ──────────────────────────────────────────────────
@@ -1528,17 +1585,31 @@ void Gloc::runCorrespondences(std::vector<KeyframeGlocState> &working_set,
             const double query_cx = slot.query_feats.image_size.width / 2.0;
             const double query_cy = slot.query_feats.image_size.height / 2.0;
 
-            // Pre-undistort query keypoints once (reused across all train matches)
-            std::vector<cv::KeyPoint> undist_kp0(kp0.size());
-            for (std::size_t qi = 0; qi < kp0.size(); ++qi)
+            // Use cached undistorted query keypoints computed in runOrbAndDbow.
+            // Fall back to computing here if cache is missing (shouldn't happen).
+            std::vector<cv::KeyPoint> undist_kp0_fallback;
+            const std::vector<cv::KeyPoint> *undist_kp0_ptr = nullptr;
+            if (!slot.undistorted_query_kps.empty())
             {
-                Eigen::Vector3d ray;
-                query_cam->liftProjective(
-                    Eigen::Vector2d(kp0[qi].pt.x, kp0[qi].pt.y), ray);
-                undist_kp0[qi].pt = cv::Point2f(
-                    (float)(vins_multi::FOCAL_LENGTH * ray.x() / ray.z() + query_cx),
-                    (float)(vins_multi::FOCAL_LENGTH * ray.y() / ray.z() + query_cy));
+                undist_kp0_ptr = &slot.undistorted_query_kps;
             }
+            else
+            {
+                GLOC_WARN("[corr] undistorted_query_kps cache missing for kf_t=%.4f g=%zu - recomputing",
+                          kf_state.t_kf, g);
+                undist_kp0_fallback.resize(kp0.size());
+                for (std::size_t qi = 0; qi < kp0.size(); ++qi)
+                {
+                    Eigen::Vector3d ray;
+                    query_cam->liftProjective(
+                        Eigen::Vector2d(kp0[qi].pt.x, kp0[qi].pt.y), ray);
+                    undist_kp0_fallback[qi].pt = cv::Point2f(
+                        (float)(vins_multi::FOCAL_LENGTH * ray.x() / ray.z() + query_cx),
+                        (float)(vins_multi::FOCAL_LENGTH * ray.y() / ray.z() + query_cy));
+                }
+                undist_kp0_ptr = &undist_kp0_fallback;
+            }
+            const std::vector<cv::KeyPoint> &undist_kp0 = *undist_kp0_ptr;
 
             const bool use_beblid = GLOC_USE_BEBLID &&
                                     !slot.query_feats.beblid_descriptors.empty();
@@ -1570,6 +1641,9 @@ void Gloc::runCorrespondences(std::vector<KeyframeGlocState> &working_set,
                         ? train_feats.beblid_descriptors
                         : train_feats.orb_descriptors;
 
+                // ── Time: GMS matching ────────────────────────────────────────
+                auto t_gms0 = std::chrono::steady_clock::now();
+
                 // Matching
                 std::vector<cv::DMatch> matches;
                 auto *gms = dynamic_cast<PointFeatureMatcherGMS *>(feat_matcher_.get());
@@ -1583,11 +1657,13 @@ void Gloc::runCorrespondences(std::vector<KeyframeGlocState> &working_set,
                                                GLOC_MATCH_LOWE_RATIO,
                                                GLOC_MATCH_MAX_DIST);
 
+                auto t_gms1 = std::chrono::steady_clock::now();
                 const int n_after_gms = static_cast<int>(matches.size());
-                GLOC_DEBUG("[corr] kf_t=%.4f g=%zu train=%zu [%d/%d]: "
-                           "q_kp=%zu t_kp=%zu after_gms=%d",
+                GLOC_DEBUG("[corr_time] kf_t=%.4f g=%zu train=%zu [%d/%d]: "
+                           "gms=%.1fms q_kp=%zu t_kp=%zu after_gms=%d",
                            kf_state.t_kf, g, ti, match_k + 1,
                            static_cast<int>(slot.voted_train_idxs.size()),
+                           std::chrono::duration<double, std::milli>(t_gms1 - t_gms0).count(),
                            kp0.size(), train_feats.keypoints.size(), n_after_gms);
 
                 if (matches.empty())
@@ -1599,16 +1675,23 @@ void Gloc::runCorrespondences(std::vector<KeyframeGlocState> &working_set,
                     continue;
                 }
 
-                // Spatial subsampling
+                // ── Time: spatial subsampling ─────────────────────────────────
+                auto t_sub0 = std::chrono::steady_clock::now();
+
                 if (GLOC_SUBSAMPLE_MIN_DIST_PX > 0.0f)
                 {
                     std::vector<cv::DMatch> spread;
                     subsampleMatchesMinDist(kp0, matches, spread,
                                             GLOC_SUBSAMPLE_MIN_DIST_PX);
                     matches.swap(spread);
-                    GLOC_DEBUG("[corr] kf_t=%.4f g=%zu train=%zu: after_subsample=%d",
-                               kf_state.t_kf, g, ti, static_cast<int>(matches.size()));
                 }
+
+                auto t_sub1 = std::chrono::steady_clock::now();
+                GLOC_DEBUG("[corr_time] kf_t=%.4f g=%zu train=%zu: "
+                           "subsample=%.1fms after=%d",
+                           kf_state.t_kf, g, ti,
+                           std::chrono::duration<double, std::milli>(t_sub1 - t_sub0).count(),
+                           static_cast<int>(matches.size()));
 
                 if (matches.empty())
                 {
@@ -1617,7 +1700,9 @@ void Gloc::runCorrespondences(std::vector<KeyframeGlocState> &working_set,
                     continue;
                 }
 
-                // Undistort train keypoints
+                // ── Time: undistort train keypoints ───────────────────────────
+                auto t_tu0 = std::chrono::steady_clock::now();
+
                 auto tcal_it = map_.calibs.find(map_.images[ti].camera_id);
                 if (tcal_it == map_.calibs.end())
                 {
@@ -1644,11 +1729,26 @@ void Gloc::runCorrespondences(std::vector<KeyframeGlocState> &working_set,
                         (float)(vins_multi::FOCAL_LENGTH * yn + train_cy));
                 }
 
-                // Geometric verification
+                auto t_tu1 = std::chrono::steady_clock::now();
+                GLOC_DEBUG("[corr_time] kf_t=%.4f g=%zu train=%zu: "
+                           "undistort_train=%.1fms",
+                           kf_state.t_kf, g, ti,
+                           std::chrono::duration<double, std::milli>(t_tu1 - t_tu0).count());
+
+                // ── Time: geometric verification ──────────────────────────────
+                auto t_geom0 = std::chrono::steady_clock::now();
+
                 PointFeatureMatcher::geometricTest(undist_kp0, undist_kp1, matches,
                                                    GLOC_MATCH_GEOM_REPROJ_TH,
                                                    GLOC_MATCH_GEOM_CONFIDENCE,
                                                    GLOC_MATCH_GEOM_SAMPSON_SQ);
+
+                auto t_geom1 = std::chrono::steady_clock::now();
+                GLOC_DEBUG("[corr_time] kf_t=%.4f g=%zu train=%zu: "
+                           "geom=%.1fms after=%d",
+                           kf_state.t_kf, g, ti,
+                           std::chrono::duration<double, std::milli>(t_geom1 - t_geom0).count(),
+                           static_cast<int>(matches.size()));
 
                 if (static_cast<int>(matches.size()) < GLOC_MATCH_MIN_INLIERS)
                 {
@@ -1731,6 +1831,7 @@ void Gloc::writeBackToStateMap(const std::vector<KeyframeGlocState> &working_set
 
             auto &dst = it->second.per_gloc[g];
             dst.query_feats = src.query_feats;
+            dst.undistorted_query_kps = src.undistorted_query_kps;
             dst.preprocessed_image = src.preprocessed_image;
             dst.dbow_candidates = src.dbow_candidates;
             dst.best_train_idx = src.best_train_idx;

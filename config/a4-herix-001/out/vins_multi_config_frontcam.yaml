@@ -292,7 +292,7 @@ gloc_beblid_scale_factor: 1.0
 gloc_beblid_n_bits: 256             # 256 or 512
 
 # Feature matching
-gloc_use_gms: true                     # 0=BruteForce, 1=GMS
+gloc_use_gms: false                     # 0=BruteForce, 1=GMS
 gloc_gms_threshold: 6.0
 gloc_gms_with_rotation: true
 gloc_gms_with_scale: false
@@ -301,8 +301,8 @@ gloc_match_max_dist: 64
 gloc_match_geom_reproj_th: 5.0
 gloc_match_geom_confidence: 0.995
 gloc_match_geom_sampson_sq: -1.0    # negative = disabled
-gloc_match_min_inliers: 50
-gloc_subsample_min_dist_px: 10.0    # 0 = disabled;
+gloc_match_min_inliers: 20
+gloc_subsample_min_dist_px: 35.0    # 0 = disabled;
 
 # Optimization
 gloc_min_pairs: 3               # min valid slots after first snap
