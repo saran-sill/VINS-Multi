@@ -1097,7 +1097,7 @@ void pubGlocVoteLines(
     m.id = 0;
     m.type = visualization_msgs::Marker::LINE_LIST;
     m.action = visualization_msgs::Marker::ADD;
-    m.scale.x = 0.05;
+    m.scale.x = 0.025;
     m.pose.orientation.w = 1.0;
 
     // Yellow

@@ -4,16 +4,22 @@
 #include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <future>
 #include <iostream>
+#include <mutex>
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
 
 #include "../utility/visualization.h"
 #include "colmap_util.h"
 #include "estimator/parameters.h" // for vins_multi::GLOC_CAM_MODULES
 #include <geometry_msgs/Point.h>
 #include <geometry_msgs/Pose.h>
+
+#include "camodocal/camera_models/CameraFactory.h"
+#include "camodocal/camera_models/EquidistantCamera.h"
 
 namespace fs = std::filesystem;
 
@@ -206,6 +212,57 @@ static cv::Mat gloc_preprocessImage(const cv::Mat &image)
         cv::cvtColor(result, result, cv::COLOR_BGR2GRAY);
 
     return result;
+}
+
+static void buildUndistMap(const camodocal::CameraPtr &cam,
+                           int W, int H, double focal,
+                           cv::Mat &map_x, cv::Mat &map_y)
+{
+    map_x.create(H, W, CV_32F);
+    map_y.create(H, W, CV_32F);
+
+    auto eq = boost::dynamic_pointer_cast<camodocal::EquidistantCamera>(cam);
+    if (eq)
+    {
+        const auto &p = eq->getParameters();
+
+        // Build a CameraCalib matching COLMAP OpenCVFisheye (model_id=5)
+        // camodocal: k2,k3,k4,k5 → COLMAP dist: [k1,k2,k3,k4]
+        colmap::CameraCalib cal;
+        cal.model_id = 5;
+        cal.fx = p.mu();  cal.fy = p.mv();
+        cal.cx = p.u0();  cal.cy = p.v0();
+        cal.width  = W;
+        cal.height = H;
+        cal.dist = {p.k2(), p.k3(), p.k4(), p.k5()};
+
+        const double cx = W / 2.0, cy = H / 2.0;
+
+        for (int r = 0; r < H; ++r)
+            for (int c = 0; c < W; ++c)
+            {
+                // Pixel → undistorted pixel via colmap::undistort_point
+                const Eigen::Vector2d undist = colmap::undistort_point(
+                    Eigen::Vector2d(c, r), cal);
+                // Undistorted pixel → normalised → virtual camera
+                const double xn = (undist.x() - cal.cx) / cal.fx;
+                const double yn = (undist.y() - cal.cy) / cal.fy;
+                map_x.at<float>(r, c) = static_cast<float>(focal * xn + cx);
+                map_y.at<float>(r, c) = static_cast<float>(focal * yn + cy);
+            }
+    }
+    else
+    {
+        const double cx = W / 2.0, cy = H / 2.0;
+        for (int r = 0; r < H; ++r)
+            for (int c = 0; c < W; ++c)
+            {
+                Eigen::Vector3d ray;
+                cam->liftProjective(Eigen::Vector2d(c, r), ray);
+                map_x.at<float>(r, c) = static_cast<float>(focal * ray.x() / ray.z() + cx);
+                map_y.at<float>(r, c) = static_cast<float>(focal * ray.y() / ray.z() + cy);
+            }
+    }
 }
 
 namespace gloc
@@ -490,6 +547,23 @@ bool Gloc::init()
         }
         query_cameras_.push_back(cam);
         GLOC_INFO("[init] Loaded query camera model from %s", mod.calib_file_[0].c_str());
+
+        // Precompute undistortion map — replaces per-point liftProjective calls
+        // in runOrbAndDbow with O(1) table lookup. Built once at init.
+        {
+            cv::Mat map_x, map_y;
+            buildUndistMap(cam,
+                           static_cast<int>(mod.img_width_),
+                           static_cast<int>(mod.img_height_),
+                           vins_multi::FOCAL_LENGTH,
+                           map_x, map_y);
+            undist_map_x_.push_back(std::move(map_x));
+            undist_map_y_.push_back(std::move(map_y));
+            GLOC_INFO("[init] Built undistortion map for g=%zu (%dx%d)",
+                      query_cameras_.size() - 1,
+                      static_cast<int>(mod.img_width_),
+                      static_cast<int>(mod.img_height_));
+        }
     }
 
     // ── Construct shared ORB extractor ───────────────────────────────────────
@@ -971,8 +1045,16 @@ void Gloc::processLoop()
                 continue;
             }
         }
+        auto _t0 = std::chrono::steady_clock::now();
         runOrbAndDbow(working_set);
+        auto _t1 = std::chrono::steady_clock::now();
         runConsensusVoting(working_set);
+        auto _t2 = std::chrono::steady_clock::now();
+
+        GLOC_DEBUG("[pipeline_time] orb_dbow=%.0fms voting=%.0fms ws=%d",
+                   std::chrono::duration<double, std::milli>(_t1 - _t0).count(),
+                   std::chrono::duration<double, std::milli>(_t2 - _t1).count(),
+                   static_cast<int>(working_set.size()));
 
         // ── DEBUG: visualize vote results ─────────────────────────────────────
         // Draw lines between each keyframe's local position (used directly as
@@ -1005,7 +1087,7 @@ void Gloc::processLoop()
             vins_multi::pubGlocVoteLines(vote_pairs);
         }
 
-        // runCorrespondences(working_set, working_snapshot_id);
+        // runCorrespondences(working_set, working_snapshot_id);  // DEBUG: disabled
         writeBackToStateMap(working_set);
 
         // ── Correspondence line visualization (magenta, gloc/corr_lines) ─────
@@ -1178,6 +1260,9 @@ void Gloc::runOrbAndDbow(std::vector<KeyframeGlocState> &working_set)
             slot.preprocessed_image = gloc_preprocessImage(slot.image);
 
             // ── ORB extraction ───────────────────────────────────────────────
+            auto _orb_t0 = std::chrono::steady_clock::now();
+
+            // ── ORB extraction ───────────────────────────────────────────────
             cv::Mat gray;
             if (slot.preprocessed_image.channels() == 1)
                 gray = slot.preprocessed_image;
@@ -1210,26 +1295,28 @@ void Gloc::runOrbAndDbow(std::vector<KeyframeGlocState> &working_set)
             }
 
             // ── Cache undistorted query keypoints ────────────────────────────
-            // liftProjective is expensive (~55ms for 2000 pts). Compute once
-            // here and reuse across all train matches in runCorrespondences.
-            if (g < query_cameras_.size() && query_cameras_[g])
+            // Use precomputed undistortion map (built at init) — O(1) nearest-
+            // neighbour lookup per point instead of iterative liftProjective.
+            if (g < undist_map_x_.size())
             {
                 const auto &kp0 = slot.query_feats.keypoints;
-                const double cx = slot.query_feats.image_size.width / 2.0;
-                const double cy = slot.query_feats.image_size.height / 2.0;
+                const cv::Mat &mx = undist_map_x_[g];
+                const cv::Mat &my = undist_map_y_[g];
                 slot.undistorted_query_kps.resize(kp0.size());
                 for (std::size_t qi = 0; qi < kp0.size(); ++qi)
                 {
-                    Eigen::Vector3d ray;
-                    query_cameras_[g]->liftProjective(
-                        Eigen::Vector2d(kp0[qi].pt.x, kp0[qi].pt.y), ray);
+                    const int ix = std::max(0, std::min(mx.cols - 1,
+                                                        static_cast<int>(kp0[qi].pt.x + 0.5f)));
+                    const int iy = std::max(0, std::min(mx.rows - 1,
+                                                        static_cast<int>(kp0[qi].pt.y + 0.5f)));
                     slot.undistorted_query_kps[qi].pt = cv::Point2f(
-                        (float)(vins_multi::FOCAL_LENGTH * ray.x() / ray.z() + cx),
-                        (float)(vins_multi::FOCAL_LENGTH * ray.y() / ray.z() + cy));
+                        mx.at<float>(iy, ix),
+                        my.at<float>(iy, ix));
                 }
             }
 
             // ── DBoW3 query ──────────────────────────────────────────────────
+            auto _dbow_t0 = std::chrono::steady_clock::now();
             DBoW3::QueryResults dbow_ret;
             map_.db.query(slot.query_feats.orb_descriptors,
                           dbow_ret,
@@ -1255,6 +1342,12 @@ void Gloc::runOrbAndDbow(std::vector<KeyframeGlocState> &working_set)
 
             if (static_cast<int>(slot.dbow_candidates.size()) > GLOC_DBOW3_MAX_RESULTS)
                 slot.dbow_candidates.resize(GLOC_DBOW3_MAX_RESULTS);
+
+            auto _dbow_t1 = std::chrono::steady_clock::now();
+            GLOC_DEBUG("[orb_time] kf_t=%.4f g=%zu dbow=%.0fms candidates=%zu",
+                       kf_state.t_kf, g,
+                       std::chrono::duration<double, std::milli>(_dbow_t1 - _dbow_t0).count(),
+                       slot.dbow_candidates.size());
 
             // Release raw and preprocessed images immediately — they are only
             // needed for ORB extraction (done above) and debug saving (done in
@@ -1288,25 +1381,14 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
 {
     // ── Overview ──────────────────────────────────────────────────────────────
     //
-    // The old pairwise-distance vote was too weak: candidates could win votes
-    // from keyframes pointing to completely different map regions.
+    // Only runs on keyframes that are NOT yet pipeline_done (new keyframes).
+    // pipeline_done keyframes already have valid voted_train_idxs — we never
+    // re-vote them. They do contribute their dbow_candidates as voters to
+    // help constrain the translation hypothesis for new keyframes.
     //
-    // New approach: find the assignment {keyframe_i → train_ni} that is
-    // globally consistent with a single rigid transform T (R, t) mapping
-    // VINS local positions to COLMAP world positions.
-    //
-    // Algorithm (per gloc module g):
-    //   1. Collect all (keyframe, candidate) pairs that have dbow results.
-    //   2. RANSAC: sample 1 pair (i, ni) → estimate T as translation-only
-    //      t = train_pos[ni] - P_local[i]  (yaw unknown, use distance only
-    //      for inlier check so we stay rotation-agnostic).
-    //   3. For every other keyframe j, find its best candidate nj such that
-    //      |train_pos[nj] - (P_local[j] + t)| < GLOC_VOTE_EPS_M (inlier).
-    //   4. Keep the hypothesis with the most inliers (>= GLOC_VOTE_MIN_VOTES).
-    //   5. Assign best_train_idx from the winning hypothesis.
-    //
-    // Using a single sample per hypothesis (translation only) keeps the search
-    // tractable while being far more selective than pairwise distance checks.
+    // For each new keyframe, find the best-scoring candidate whose implied
+    // translation t = train_pos - P_local is consistent with the translation
+    // implied by the majority of other keyframes (done or new) via RANSAC.
     // ─────────────────────────────────────────────────────────────────────────
 
     const int X = static_cast<int>(working_set.size());
@@ -1323,7 +1405,23 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
 
     for (std::size_t g = 0; g < n_modules; ++g)
     {
-        // ── 1. Build flat list of all (kf_idx, cand_idx, local_pos, world_pos)
+        // Collect new keyframes that need voting
+        std::vector<int> new_kf_idxs;
+        for (int i = 0; i < X; ++i)
+        {
+            const auto &slot = working_set[i].per_gloc[g];
+            if (!slot.pipeline_done &&
+                slot.verdict == LookupVerdict::Found &&
+                !slot.dbow_candidates.empty())
+                new_kf_idxs.push_back(i);
+        }
+
+        if (new_kf_idxs.empty())
+            continue;
+
+        // ── 1. Build voter pool from ALL keyframes (new + done) ───────────────
+        // Done keyframes provide stable translation anchors.
+        // New keyframes provide candidates to be assigned.
         struct Cand
         {
             int kf_idx;
@@ -1336,23 +1434,16 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
         for (int i = 0; i < X; ++i)
         {
             const auto &slot = working_set[i].per_gloc[g];
+            if (slot.dbow_candidates.empty())
+                continue;
             for (int ni = 0; ni < static_cast<int>(slot.dbow_candidates.size()); ++ni)
-            {
                 all_cands.push_back({i, ni,
                                      working_set[i].P_local,
                                      train_world_pos(slot.dbow_candidates[ni].second),
                                      slot.dbow_candidates[ni].first});
-            }
         }
 
-        if (all_cands.empty())
-        {
-            for (int i = 0; i < X; ++i)
-                working_set[i].per_gloc[g].best_train_idx = -1;
-            continue;
-        }
-
-        // ── 1b. Pre-filter: reject candidates too far from local pose ─────────
+        // ── 1b. Pre-filter by max distance ────────────────────────────────────
         if (GLOC_VOTE_MAX_DIST_M > 0.0)
         {
             all_cands.erase(
@@ -1361,37 +1452,38 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
                                    return (c.P_world - c.P_local).norm() > GLOC_VOTE_MAX_DIST_M;
                                }),
                 all_cands.end());
-
-            if (all_cands.empty())
-            {
-                GLOC_DEBUG("[vote] g=%zu all candidates rejected by max_dist filter", g);
-                for (int i = 0; i < X; ++i)
-                    working_set[i].per_gloc[g].best_train_idx = -1;
-                continue;
-            }
         }
 
-        // ── 2. RANSAC over single-sample translation hypotheses ───────────────
-        // For each candidate as a hypothesis seed, compute t = P_world - P_local
-        // then count inliers across all other keyframes.
-        // For each keyframe, pick the best-scoring inlier candidate.
+        if (all_cands.empty())
+        {
+            GLOC_DEBUG("[vote] g=%zu all candidates rejected by max_dist filter", g);
+            for (int i : new_kf_idxs)
+            {
+                working_set[i].per_gloc[g].best_train_idx = -1;
+                working_set[i].per_gloc[g].voted_train_idxs.clear();
+            }
+            continue;
+        }
 
+        // ── 2. RANSAC — seed from ALL candidates, assign only new keyframes ───
         int best_inlier_count = 0;
-        std::vector<int> best_assignment(X, -1); // kf_idx -> cand_idx
+        std::vector<int> best_assignment(X, -1); // kf_idx -> cand_idx (new kfs only)
 
         for (const auto &seed : all_cands)
         {
             const Eigen::Vector3d t_hyp = seed.P_world - seed.P_local;
 
-            // For each keyframe find its best inlier candidate under this hypothesis
+            // Count inliers across ALL keyframes (for hypothesis strength)
             std::vector<int> assignment(X, -1);
             int inlier_count = 0;
 
             for (int i = 0; i < X; ++i)
             {
                 const auto &slot = working_set[i].per_gloc[g];
-                const Eigen::Vector3d predicted = working_set[i].P_local + t_hyp;
+                if (slot.dbow_candidates.empty())
+                    continue;
 
+                const Eigen::Vector3d predicted = working_set[i].P_local + t_hyp;
                 int best_ni = -1;
                 double best_score = -1.0;
                 for (int ni = 0; ni < static_cast<int>(slot.dbow_candidates.size()); ++ni)
@@ -1421,18 +1513,22 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
             }
         }
 
-        // ── 3. Apply best assignment if it meets the minimum inlier threshold
+        // ── 3. Apply assignment to NEW keyframes only ─────────────────────────
         if (best_inlier_count >= min_inliers)
         {
-            GLOC_DEBUG("[vote] g=%zu best hypothesis: %d/%d inliers", g, best_inlier_count, X);
+            GLOC_DEBUG("[vote] g=%zu hypothesis: %d/%d inliers, assigning %zu new kfs",
+                       g, best_inlier_count, X, new_kf_idxs.size());
 
-            // Compute the winning translation hypothesis
+            // Winning translation from highest-scoring inlier
             Eigen::Vector3d t_win = Eigen::Vector3d::Zero();
             for (int i = 0; i < X; ++i)
                 if (best_assignment[i] >= 0)
+                {
                     t_win = train_world_pos(working_set[i].per_gloc[g].dbow_candidates[best_assignment[i]].second) - working_set[i].P_local;
+                    break;
+                }
 
-            for (int i = 0; i < X; ++i)
+            for (int i : new_kf_idxs)
             {
                 auto &slot = working_set[i].per_gloc[g];
                 slot.voted_train_idxs.clear();
@@ -1442,15 +1538,12 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
                     slot.best_train_idx = static_cast<int>(
                         slot.dbow_candidates[best_assignment[i]].second);
 
-                    // Collect ALL inlier candidates under the winning translation,
-                    // sorted by DBoW3 score descending, capped at GLOC_VOTE_MAX_MATCHES.
                     const Eigen::Vector3d predicted = working_set[i].P_local + t_win;
                     std::vector<std::pair<double, int>> inlier_cands;
                     for (const auto &[sc, ti] : slot.dbow_candidates)
-                    {
                         if ((train_world_pos(ti) - predicted).norm() < GLOC_VOTE_EPS_M)
                             inlier_cands.push_back({sc, static_cast<int>(ti)});
-                    }
+
                     std::sort(inlier_cands.begin(), inlier_cands.end(),
                               [](const auto &a, const auto &b) { return a.first > b.first; });
                     const int n_keep = std::min(static_cast<int>(inlier_cands.size()),
@@ -1476,7 +1569,7 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
         {
             GLOC_DEBUG("[vote] g=%zu rejected: best inliers %d < %d",
                        g, best_inlier_count, min_inliers);
-            for (int i = 0; i < X; ++i)
+            for (int i : new_kf_idxs)
             {
                 working_set[i].per_gloc[g].best_train_idx = -1;
                 working_set[i].per_gloc[g].voted_train_idxs.clear();
@@ -1484,8 +1577,6 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
         }
     }
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
 // subsampleMatchesMinDist  (file-local helper)
 //
 // Greedy spatial subsampling: sorts matches by descriptor distance (best
@@ -1579,14 +1670,10 @@ void Gloc::runCorrespondences(std::vector<KeyframeGlocState> &working_set,
                 continue;
             }
 
-            const camodocal::CameraPtr &query_cam = query_cameras_[g];
-
             const auto &kp0 = slot.query_feats.keypoints;
-            const double query_cx = slot.query_feats.image_size.width / 2.0;
-            const double query_cy = slot.query_feats.image_size.height / 2.0;
 
             // Use cached undistorted query keypoints computed in runOrbAndDbow.
-            // Fall back to computing here if cache is missing (shouldn't happen).
+            // Fall back to map lookup if cache is missing (shouldn't happen).
             std::vector<cv::KeyPoint> undist_kp0_fallback;
             const std::vector<cv::KeyPoint> *undist_kp0_ptr = nullptr;
             if (!slot.undistorted_query_kps.empty())
@@ -1598,14 +1685,16 @@ void Gloc::runCorrespondences(std::vector<KeyframeGlocState> &working_set,
                 GLOC_WARN("[corr] undistorted_query_kps cache missing for kf_t=%.4f g=%zu - recomputing",
                           kf_state.t_kf, g);
                 undist_kp0_fallback.resize(kp0.size());
-                for (std::size_t qi = 0; qi < kp0.size(); ++qi)
+                if (g < undist_map_x_.size())
                 {
-                    Eigen::Vector3d ray;
-                    query_cam->liftProjective(
-                        Eigen::Vector2d(kp0[qi].pt.x, kp0[qi].pt.y), ray);
-                    undist_kp0_fallback[qi].pt = cv::Point2f(
-                        (float)(vins_multi::FOCAL_LENGTH * ray.x() / ray.z() + query_cx),
-                        (float)(vins_multi::FOCAL_LENGTH * ray.y() / ray.z() + query_cy));
+                    const cv::Mat &mx = undist_map_x_[g];
+                    const cv::Mat &my = undist_map_y_[g];
+                    for (std::size_t qi = 0; qi < kp0.size(); ++qi)
+                    {
+                        const int ix = std::max(0, std::min(mx.cols - 1, static_cast<int>(kp0[qi].pt.x + 0.5f)));
+                        const int iy = std::max(0, std::min(mx.rows - 1, static_cast<int>(kp0[qi].pt.y + 0.5f)));
+                        undist_kp0_fallback[qi].pt = cv::Point2f(mx.at<float>(iy, ix), my.at<float>(iy, ix));
+                    }
                 }
                 undist_kp0_ptr = &undist_kp0_fallback;
             }
@@ -1613,8 +1702,6 @@ void Gloc::runCorrespondences(std::vector<KeyframeGlocState> &working_set,
 
             const bool use_beblid = GLOC_USE_BEBLID &&
                                     !slot.query_feats.beblid_descriptors.empty();
-            const cv::Mat &desc0 = use_beblid ? slot.query_feats.beblid_descriptors
-                                              : slot.query_feats.orb_descriptors;
 
             // ── Multi-match loop over voted_train_idxs ────────────────────────
             slot.multi_pt_pairs_distorted.clear();
@@ -1636,26 +1723,32 @@ void Gloc::runCorrespondences(std::vector<KeyframeGlocState> &working_set,
                 }
 
                 const dbow3::ImageFeatures &train_feats = map_.feats[ti];
-                const cv::Mat &desc1 =
-                    (use_beblid && !train_feats.beblid_descriptors.empty())
-                        ? train_feats.beblid_descriptors
-                        : train_feats.orb_descriptors;
+                const bool use_beblid_this_match =
+                    use_beblid && !train_feats.beblid_descriptors.empty();
+                const cv::Mat &desc0_match = use_beblid_this_match
+                                                 ? slot.query_feats.beblid_descriptors
+                                                 : slot.query_feats.orb_descriptors;
+                const cv::Mat &desc1 = use_beblid_this_match
+                                           ? train_feats.beblid_descriptors
+                                           : train_feats.orb_descriptors;
 
                 // ── Time: GMS matching ────────────────────────────────────────
                 auto t_gms0 = std::chrono::steady_clock::now();
 
-                // Matching
+                // Single-direction knnMatch + Lowe ratio — half the cost of
+                // robustMatch (which does two passes for symmetric filtering).
+                // Geometric verification below handles residual outliers.
                 std::vector<cv::DMatch> matches;
-                auto *gms = dynamic_cast<PointFeatureMatcherGMS *>(feat_matcher_.get());
-                if (gms)
-                    gms->matchGMS(slot.query_feats.image_size,
-                                  train_feats.image_size,
-                                  kp0, train_feats.keypoints,
-                                  desc0, desc1, matches, GLOC_MATCH_MAX_DIST);
-                else
-                    feat_matcher_->robustMatch(desc0, desc1, matches,
-                                               GLOC_MATCH_LOWE_RATIO,
-                                               GLOC_MATCH_MAX_DIST);
+                std::vector<std::vector<cv::DMatch>> knn_matches;
+                feat_matcher_->knnMatch(desc0_match, desc1, knn_matches, 2);
+                for (const auto &m : knn_matches)
+                {
+                    if (m.size() < 2)
+                        continue;
+                    if (m[0].distance < GLOC_MATCH_LOWE_RATIO * m[1].distance &&
+                        m[0].distance <= GLOC_MATCH_MAX_DIST)
+                        matches.push_back(m[0]);
+                }
 
                 auto t_gms1 = std::chrono::steady_clock::now();
                 const int n_after_gms = static_cast<int>(matches.size());

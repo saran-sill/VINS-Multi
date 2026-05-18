@@ -287,7 +287,7 @@ gloc_orb_wta_k: 2
 gloc_orb_score_type: 0
 gloc_orb_patch_size: 31
 gloc_orb_fast_threshold: 10
-gloc_use_beblid: true                  # 0=ORB descriptors, 1=BEBLID descriptors
+gloc_use_beblid: false                  # 0=ORB descriptors, 1=BEBLID descriptors
 gloc_beblid_scale_factor: 1.0
 gloc_beblid_n_bits: 256             # 256 or 512
 

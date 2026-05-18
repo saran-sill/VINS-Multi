@@ -514,6 +514,13 @@ class Gloc
     // Used in runCorrespondences to undistort query keypoints.
     std::vector<camodocal::CameraPtr> query_cameras_;
 
+    // Per-module precomputed undistortion maps (built once in init()).
+    // undist_map_x_[g](row, col) and undist_map_y_[g](row, col) map each
+    // pixel to its undistorted virtual-camera x/y coordinate, allowing O(1)
+    // lookup instead of iterative liftProjective (~27µs per point).
+    std::vector<cv::Mat> undist_map_x_; // CV_32F, virtual-camera x
+    std::vector<cv::Mat> undist_map_y_; // CV_32F, virtual-camera y
+
     // ── Process loop ─────────────────────────────────────────────────────────
 
     // Entry point for process_thread_.

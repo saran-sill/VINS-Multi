@@ -39,7 +39,6 @@ Panels:
         - /VIO1/OdomLow1/Shape1
         - /GLOC1
         - /GLOC1/OdomIMUWorld1/Shape1
-        - /GLOC1/VoteLines1/Status1
       Splitter Ratio: 0.5821678042411804
     Tree Height: 620
 Preferences:
@@ -571,21 +570,21 @@ Visualization Manager:
           Unreliable: false
           Value: true
         - Class: rviz/Marker
-          Enabled: false
+          Enabled: true
           Marker Topic: /herix/gloc/vote_lines
           Name: VoteLines
           Namespaces:
             {}
           Queue Size: 100
-          Value: false
+          Value: true
         - Class: rviz/Marker
-          Enabled: true
+          Enabled: false
           Marker Topic: /herix/gloc/corr_lines
           Name: CorrLines
           Namespaces:
-            gloc_corr_lines: true
+            {}
           Queue Size: 100
-          Value: true
+          Value: false
       Enabled: true
       Name: GLOC
   Enabled: true
