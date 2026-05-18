@@ -617,6 +617,10 @@ void Gloc::onSnapshotChanged(const Snapshot &snapshot)
 
         last_snapshot_id_ = snapshot.snapshot_id;
 
+        // Record the sensor time of the very first snapshot for startup delay.
+        if (first_snapshot_time_ < 0.0 && !snapshot.keyframes.empty())
+            first_snapshot_time_ = snapshot.keyframes.front().t_kf;
+
         // ── Phase 1: reconcile state_map_ with snapshot ─────────────────────
         //
         // Build a set of snapshot t_kf values for fast "is this key still
@@ -938,12 +942,62 @@ void Gloc::processLoop()
         if (working_set.empty())
             continue;
 
+        // ── Startup delay ─────────────────────────────────────────────────────
+        // Don't run the pipeline until GLOC_STARTUP_DELAY_S seconds have
+        // elapsed since the first snapshot. Gives VINS time to build a stable
+        // sliding window before gloc attempts retrieval.
+        if (GLOC_STARTUP_DELAY_S > 0.0)
+        {
+            const double current_t = working_set.back().t_kf;
+            double first_t;
+            {
+                std::lock_guard<std::mutex> lk(state_mutex_);
+                first_t = first_snapshot_time_;
+            }
+            if (first_t >= 0.0 && (current_t - first_t) < GLOC_STARTUP_DELAY_S)
+            {
+                GLOC_DEBUG("[processLoop] startup delay: %.1fs / %.1fs",
+                           current_t - first_t, GLOC_STARTUP_DELAY_S);
+                continue;
+            }
+        }
         runOrbAndDbow(working_set);
         runConsensusVoting(working_set);
-        runCorrespondences(working_set, working_snapshot_id);
-        writeBackToStateMap(working_set);
 
-        runOptimization(working_set);
+        // ── DEBUG: visualize vote results ─────────────────────────────────────
+        // Draw lines between each keyframe's local position (used directly as
+        // world position) and its voted train image camera centre in world.
+        if (vins_multi::pub_gloc_vote_lines.getNumSubscribers() > 0)
+        {
+            std::vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>> vote_pairs;
+            for (const auto &kf : working_set)
+            {
+                for (std::size_t g = 0; g < kf.per_gloc.size(); ++g)
+                {
+                    const auto &slot = kf.per_gloc[g];
+                    if (slot.voted_train_idxs.empty())
+                        continue;
+
+                    // Query position: local pose used directly as world coords
+                    const Eigen::Vector3d q_pos = kf.P_local;
+
+                    // Draw one line per voted match
+                    for (int ti : slot.voted_train_idxs)
+                    {
+                        const colmap::Image &train_img =
+                            map_.images[static_cast<std::size_t>(ti)];
+                        const Eigen::Matrix3d R_j = train_img.q_c_w.toRotationMatrix();
+                        const Eigen::Vector3d o_j = -(R_j.transpose() * train_img.t_c_w);
+                        vote_pairs.push_back({q_pos, o_j});
+                    }
+                }
+            }
+            vins_multi::pubGlocVoteLines(vote_pairs);
+        }
+
+        // runCorrespondences(working_set, working_snapshot_id);  // DEBUG: disabled
+        writeBackToStateMap(working_set);
+        // runOptimization(working_set);  // DEBUG: disabled
     }
 
     GLOC_INFO("[processLoop] Exiting.");
@@ -1157,9 +1211,33 @@ void Gloc::runOrbAndDbow(std::vector<KeyframeGlocState> &working_set)
 
 void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
 {
+    // ── Overview ──────────────────────────────────────────────────────────────
+    //
+    // The old pairwise-distance vote was too weak: candidates could win votes
+    // from keyframes pointing to completely different map regions.
+    //
+    // New approach: find the assignment {keyframe_i → train_ni} that is
+    // globally consistent with a single rigid transform T (R, t) mapping
+    // VINS local positions to COLMAP world positions.
+    //
+    // Algorithm (per gloc module g):
+    //   1. Collect all (keyframe, candidate) pairs that have dbow results.
+    //   2. RANSAC: sample 1 pair (i, ni) → estimate T as translation-only
+    //      t = train_pos[ni] - P_local[i]  (yaw unknown, use distance only
+    //      for inlier check so we stay rotation-agnostic).
+    //   3. For every other keyframe j, find its best candidate nj such that
+    //      |train_pos[nj] - (P_local[j] + t)| < GLOC_VOTE_EPS_M (inlier).
+    //   4. Keep the hypothesis with the most inliers (>= GLOC_VOTE_MIN_VOTES).
+    //   5. Assign best_train_idx from the winning hypothesis.
+    //
+    // Using a single sample per hypothesis (translation only) keeps the search
+    // tractable while being far more selective than pairwise distance checks.
+    // ─────────────────────────────────────────────────────────────────────────
+
     const int X = static_cast<int>(working_set.size());
-    const int min_votes_threshold = (GLOC_VOTE_MIN_VOTES < 0) ? static_cast<int>(std::ceil((X - 1) / 2.0))
-                                                              : GLOC_VOTE_MIN_VOTES;
+    const int min_inliers = (GLOC_VOTE_MIN_VOTES < 0)
+                                ? static_cast<int>(std::ceil((X - 1) / 2.0))
+                                : GLOC_VOTE_MIN_VOTES;
 
     const std::size_t n_modules = working_set.empty() ? 0 : working_set[0].per_gloc.size();
 
@@ -1170,84 +1248,163 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
 
     for (std::size_t g = 0; g < n_modules; ++g)
     {
-        // votes[i][n] = number of distinct other keyframes that agree with
-        // candidate n of keyframe i.
-        std::vector<std::vector<int>> votes(X);
-        for (int i = 0; i < X; ++i)
-            votes[i].assign(
-                working_set[i].per_gloc[g].dbow_candidates.size(), 0);
-
+        // ── 1. Build flat list of all (kf_idx, cand_idx, local_pos, world_pos)
+        struct Cand
+        {
+            int kf_idx;
+            int cand_idx;
+            Eigen::Vector3d P_local;
+            Eigen::Vector3d P_world;
+            double score;
+        };
+        std::vector<Cand> all_cands;
         for (int i = 0; i < X; ++i)
         {
-            const auto &slot_i = working_set[i].per_gloc[g];
-            if (slot_i.dbow_candidates.empty())
-                continue;
-
-            for (int ni = 0; ni < static_cast<int>(slot_i.dbow_candidates.size()); ++ni)
+            const auto &slot = working_set[i].per_gloc[g];
+            for (int ni = 0; ni < static_cast<int>(slot.dbow_candidates.size()); ++ni)
             {
-                const Eigen::Vector3d pos_in = train_world_pos(slot_i.dbow_candidates[ni].second);
-
-                std::set<int> agreeing_kfs;
-                for (int j = 0; j < X; ++j)
-                {
-                    if (j == i)
-                        continue;
-
-                    const auto &slot_j = working_set[j].per_gloc[g];
-                    if (slot_j.dbow_candidates.empty())
-                        continue;
-
-                    const double local_dist = (working_set[i].P_local - working_set[j].P_local).norm();
-
-                    for (const auto &[score_jm, train_jm] : slot_j.dbow_candidates)
-                    {
-                        const double world_dist = (pos_in - train_world_pos(train_jm)).norm();
-
-                        if (std::abs(world_dist - local_dist) < GLOC_VOTE_EPS_M)
-                        {
-                            agreeing_kfs.insert(j);
-                            break; // one agreement per other keyframe is enough
-                        }
-                    }
-                }
-
-                votes[i][ni] = static_cast<int>(agreeing_kfs.size());
+                all_cands.push_back({i, ni,
+                                     working_set[i].P_local,
+                                     train_world_pos(slot.dbow_candidates[ni].second),
+                                     slot.dbow_candidates[ni].first});
             }
         }
 
-        // Elect the highest-score surviving candidate per keyframe.
-        for (int i = 0; i < X; ++i)
+        if (all_cands.empty())
         {
-            auto &slot = working_set[i].per_gloc[g];
+            for (int i = 0; i < X; ++i)
+                working_set[i].per_gloc[g].best_train_idx = -1;
+            continue;
+        }
 
-            int best_ni = -1;
-            double best_score = -1.0;
+        // ── 1b. Pre-filter: reject candidates too far from local pose ─────────
+        if (GLOC_VOTE_MAX_DIST_M > 0.0)
+        {
+            all_cands.erase(
+                std::remove_if(all_cands.begin(), all_cands.end(),
+                               [](const Cand &c) {
+                                   return (c.P_world - c.P_local).norm() > GLOC_VOTE_MAX_DIST_M;
+                               }),
+                all_cands.end());
 
-            for (int ni = 0; ni < static_cast<int>(slot.dbow_candidates.size()); ++ni)
+            if (all_cands.empty())
             {
-                if (votes[i][ni] < min_votes_threshold)
-                    continue;
+                GLOC_DEBUG("[vote] g=%zu all candidates rejected by max_dist filter", g);
+                for (int i = 0; i < X; ++i)
+                    working_set[i].per_gloc[g].best_train_idx = -1;
+                continue;
+            }
+        }
 
-                const double score = slot.dbow_candidates[ni].first;
-                if (score > best_score)
+        // ── 2. RANSAC over single-sample translation hypotheses ───────────────
+        // For each candidate as a hypothesis seed, compute t = P_world - P_local
+        // then count inliers across all other keyframes.
+        // For each keyframe, pick the best-scoring inlier candidate.
+
+        int best_inlier_count = 0;
+        std::vector<int> best_assignment(X, -1); // kf_idx -> cand_idx
+
+        for (const auto &seed : all_cands)
+        {
+            const Eigen::Vector3d t_hyp = seed.P_world - seed.P_local;
+
+            // For each keyframe find its best inlier candidate under this hypothesis
+            std::vector<int> assignment(X, -1);
+            int inlier_count = 0;
+
+            for (int i = 0; i < X; ++i)
+            {
+                const auto &slot = working_set[i].per_gloc[g];
+                const Eigen::Vector3d predicted = working_set[i].P_local + t_hyp;
+
+                int best_ni = -1;
+                double best_score = -1.0;
+                for (int ni = 0; ni < static_cast<int>(slot.dbow_candidates.size()); ++ni)
                 {
-                    best_score = score;
-                    best_ni = ni;
+                    const Eigen::Vector3d wp = train_world_pos(slot.dbow_candidates[ni].second);
+                    if ((wp - predicted).norm() < GLOC_VOTE_EPS_M)
+                    {
+                        const double sc = slot.dbow_candidates[ni].first;
+                        if (sc > best_score)
+                        {
+                            best_score = sc;
+                            best_ni = ni;
+                        }
+                    }
+                }
+                if (best_ni >= 0)
+                {
+                    assignment[i] = best_ni;
+                    ++inlier_count;
                 }
             }
 
-            if (best_ni >= 0)
+            if (inlier_count > best_inlier_count)
             {
-                slot.best_train_idx = static_cast<int>(slot.dbow_candidates[best_ni].second);
-                GLOC_DEBUG("[vote] kf_t=%.4f g=%zu -> train=%d votes=%d score=%.4f",
-                           working_set[i].t_kf, g, slot.best_train_idx,
-                           votes[i][best_ni], best_score);
+                best_inlier_count = inlier_count;
+                best_assignment = assignment;
             }
-            else
+        }
+
+        // ── 3. Apply best assignment if it meets the minimum inlier threshold
+        if (best_inlier_count >= min_inliers)
+        {
+            GLOC_DEBUG("[vote] g=%zu best hypothesis: %d/%d inliers", g, best_inlier_count, X);
+
+            // Compute the winning translation hypothesis
+            Eigen::Vector3d t_win = Eigen::Vector3d::Zero();
+            for (int i = 0; i < X; ++i)
+                if (best_assignment[i] >= 0)
+                    t_win = train_world_pos(working_set[i].per_gloc[g].dbow_candidates[best_assignment[i]].second) - working_set[i].P_local;
+
+            for (int i = 0; i < X; ++i)
             {
-                slot.best_train_idx = -1;
-                GLOC_DEBUG("[vote] kf_t=%.4f g=%zu -> rejected by voting",
-                           working_set[i].t_kf, g);
+                auto &slot = working_set[i].per_gloc[g];
+                slot.voted_train_idxs.clear();
+
+                if (best_assignment[i] >= 0)
+                {
+                    slot.best_train_idx = static_cast<int>(
+                        slot.dbow_candidates[best_assignment[i]].second);
+
+                    // Collect ALL inlier candidates under the winning translation,
+                    // sorted by DBoW3 score descending, capped at GLOC_VOTE_MAX_MATCHES.
+                    const Eigen::Vector3d predicted = working_set[i].P_local + t_win;
+                    std::vector<std::pair<double, int>> inlier_cands;
+                    for (const auto &[sc, ti] : slot.dbow_candidates)
+                    {
+                        if ((train_world_pos(ti) - predicted).norm() < GLOC_VOTE_EPS_M)
+                            inlier_cands.push_back({sc, static_cast<int>(ti)});
+                    }
+                    std::sort(inlier_cands.begin(), inlier_cands.end(),
+                              [](const auto &a, const auto &b) { return a.first > b.first; });
+                    const int n_keep = std::min(static_cast<int>(inlier_cands.size()),
+                                                GLOC_VOTE_MAX_MATCHES);
+                    for (int k = 0; k < n_keep; ++k)
+                        slot.voted_train_idxs.push_back(inlier_cands[k].second);
+
+                    GLOC_DEBUG("[vote] kf_t=%.4f g=%zu -> %d match(es), best train=%d score=%.4f",
+                               working_set[i].t_kf, g,
+                               static_cast<int>(slot.voted_train_idxs.size()),
+                               slot.best_train_idx,
+                               slot.dbow_candidates[best_assignment[i]].first);
+                }
+                else
+                {
+                    slot.best_train_idx = -1;
+                    GLOC_DEBUG("[vote] kf_t=%.4f g=%zu -> no inlier candidate",
+                               working_set[i].t_kf, g);
+                }
+            }
+        }
+        else
+        {
+            GLOC_DEBUG("[vote] g=%zu rejected: best inliers %d < %d",
+                       g, best_inlier_count, min_inliers);
+            for (int i = 0; i < X; ++i)
+            {
+                working_set[i].per_gloc[g].best_train_idx = -1;
+                working_set[i].per_gloc[g].voted_train_idxs.clear();
             }
         }
     }
@@ -1347,185 +1504,184 @@ void Gloc::runCorrespondences(std::vector<KeyframeGlocState> &working_set,
                 continue;
             }
 
-            const std::size_t ti = static_cast<std::size_t>(slot.best_train_idx);
-
-            if (ti >= map_.feats.size() ||
-                map_.feats[ti].orb_descriptors.empty())
-            {
-                GLOC_WARN("[corr] train_idx=%zu has no cached features - skipping", ti);
-                slot.pipeline_done = true;
-                continue;
-            }
-
-            const dbow3::ImageFeatures &train_feats = map_.feats[ti];
-
-            // ── Raw descriptor matching ──────────────────────────────────────
-            //
-            // Pick descriptor type based on config. Fall back to ORB if BEBLID
-            // was requested but the train image has no beblid_descriptors cached
-            // (e.g. the feature cache was built without BEBLID).
-            const bool use_beblid = GLOC_USE_BEBLID &&
-                                    !slot.query_feats.beblid_descriptors.empty() &&
-                                    !train_feats.beblid_descriptors.empty();
-
-            const cv::Mat &desc0 = use_beblid ? slot.query_feats.beblid_descriptors
-                                              : slot.query_feats.orb_descriptors;
-            const cv::Mat &desc1 = use_beblid ? train_feats.beblid_descriptors
-                                              : train_feats.orb_descriptors;
-
-            std::vector<cv::DMatch> matches;
-            auto *gms = dynamic_cast<PointFeatureMatcherGMS *>(feat_matcher_.get());
-            if (gms)
-            {
-                gms->matchGMS(slot.query_feats.image_size,
-                              train_feats.image_size,
-                              slot.query_feats.keypoints,
-                              train_feats.keypoints,
-                              desc0, desc1,
-                              matches,
-                              GLOC_MATCH_MAX_DIST);
-            }
-            else
-            {
-                feat_matcher_->robustMatch(desc0, desc1, matches,
-                                           GLOC_MATCH_LOWE_RATIO,
-                                           GLOC_MATCH_MAX_DIST);
-            }
-
-            const int n_after_gms = static_cast<int>(matches.size());
-            GLOC_DEBUG("[corr] kf_t=%.4f g=%zu train=%zu: "
-                       "q_kp=%zu t_kp=%zu after_gms=%d",
-                       kf_state.t_kf, g, ti,
-                       slot.query_feats.keypoints.size(),
-                       train_feats.keypoints.size(),
-                       n_after_gms);
-
-            if (matches.empty())
-            {
-                GLOC_DEBUG("[corr] kf_t=%.4f g=%zu train=%zu: 0 matches after GMS - skip",
-                           kf_state.t_kf, g, ti);
-                slot.pipeline_done = true;
-                continue;
-            }
-
-            // ── Spatial subsampling (optional) ───────────────────────────────
-            if (GLOC_SUBSAMPLE_MIN_DIST_PX > 0.0f)
-            {
-                std::vector<cv::DMatch> spread;
-                subsampleMatchesMinDist(slot.query_feats.keypoints,
-                                        matches, spread,
-                                        GLOC_SUBSAMPLE_MIN_DIST_PX);
-                matches.swap(spread);
-            }
-
-            const int n_after_subsample = static_cast<int>(matches.size());
-            if (n_after_subsample < n_after_gms)
-                GLOC_DEBUG("[corr] kf_t=%.4f g=%zu train=%zu: after_subsample=%d",
-                           kf_state.t_kf, g, ti, n_after_subsample);
-
-            if (matches.empty())
-            {
-                slot.pipeline_done = true;
-                continue;
-            }
-
-            // ── Undistort matched keypoints ──────────────────────────────────
-            //
-            // Query: liftProjective via the camodocal model loaded from
-            //        GLOC_CAM_MODULES[g].calib_file_[0] - handles any distortion
-            //        model (pinhole, equidistant, scaramuzza, etc.).
-            // Train: colmap::undistort_point with the COLMAP map calibration.
-            auto tcal_it = map_.calibs.find(map_.images[ti].camera_id);
-            if (tcal_it == map_.calibs.end())
-            {
-                GLOC_WARN("[corr] no calibration for train camera_id=%u",
-                          map_.images[ti].camera_id);
-                slot.pipeline_done = true;
-                continue;
-            }
-            const colmap::CameraCalib &train_cal = tcal_it->second;
-
-            if (g >= query_cameras_.size() || !query_cameras_[g])
-            {
-                GLOC_WARN("[corr] no query camera model for g=%zu", g);
-                slot.pipeline_done = true;
-                continue;
-            }
             const camodocal::CameraPtr &query_cam = query_cameras_[g];
 
             const auto &kp0 = slot.query_feats.keypoints;
-            const auto &kp1 = train_feats.keypoints;
-            std::vector<cv::KeyPoint> undist_kp0(kp0.size());
-            std::vector<cv::KeyPoint> undist_kp1(kp1.size());
-
-            // Virtual-camera principal point for each side.
-            // Following the same convention as FeatureTracker::rejectWithF,
-            // both sides are projected into a synthetic camera with
-            // fx=fy=FOCAL_LENGTH and principal point at image centre.
-            // This puts query and train in the same consistent pixel space
-            // regardless of their actual intrinsics.
             const double query_cx = slot.query_feats.image_size.width / 2.0;
             const double query_cy = slot.query_feats.image_size.height / 2.0;
-            const double train_cx = train_cal.width / 2.0;
-            const double train_cy = train_cal.height / 2.0;
 
-            for (const auto &m : matches)
+            // Pre-undistort query keypoints once (reused across all train matches)
+            std::vector<cv::KeyPoint> undist_kp0(kp0.size());
+            for (std::size_t qi = 0; qi < kp0.size(); ++qi)
             {
-                // ── Query: liftProjective -> virtual camera ───────────────────
                 Eigen::Vector3d ray;
-                query_cam->liftProjective(Eigen::Vector2d(kp0[m.queryIdx].pt.x, kp0[m.queryIdx].pt.y), ray);
-                undist_kp0[m.queryIdx].pt = cv::Point2f((float)(vins_multi::FOCAL_LENGTH * ray.x() / ray.z() + query_cx),
-                                                        (float)(vins_multi::FOCAL_LENGTH * ray.y() / ray.z() + query_cy));
-
-                // ── Train: colmap undistort -> normalised -> virtual camera ────
-                const Eigen::Vector2d u1 = colmap::undistort_point(Eigen::Vector2d(kp1[m.trainIdx].pt.x, kp1[m.trainIdx].pt.y), train_cal);
-                const double xn = (u1.x() - train_cal.cx) / train_cal.fx;
-                const double yn = (u1.y() - train_cal.cy) / train_cal.fy;
-                undist_kp1[m.trainIdx].pt = cv::Point2f((float)(vins_multi::FOCAL_LENGTH * xn + train_cx),
-                                                        (float)(vins_multi::FOCAL_LENGTH * yn + train_cy));
+                query_cam->liftProjective(
+                    Eigen::Vector2d(kp0[qi].pt.x, kp0[qi].pt.y), ray);
+                undist_kp0[qi].pt = cv::Point2f(
+                    (float)(vins_multi::FOCAL_LENGTH * ray.x() / ray.z() + query_cx),
+                    (float)(vins_multi::FOCAL_LENGTH * ray.y() / ray.z() + query_cy));
             }
 
-            // ── Geometric verification ───────────────────────────────────────
-            PointFeatureMatcher::geometricTest(undist_kp0, undist_kp1, matches,
-                                               GLOC_MATCH_GEOM_REPROJ_TH,
-                                               GLOC_MATCH_GEOM_CONFIDENCE,
-                                               GLOC_MATCH_GEOM_SAMPSON_SQ);
+            const bool use_beblid = GLOC_USE_BEBLID &&
+                                    !slot.query_feats.beblid_descriptors.empty();
+            const cv::Mat &desc0 = use_beblid ? slot.query_feats.beblid_descriptors
+                                              : slot.query_feats.orb_descriptors;
 
-            if (static_cast<int>(matches.size()) < GLOC_MATCH_MIN_INLIERS)
+            // ── Multi-match loop over voted_train_idxs ────────────────────────
+            slot.multi_pt_pairs_distorted.clear();
+            slot.multi_pt_pairs_undistorted.clear();
+            bool any_success = false;
+
+            for (int match_k = 0;
+                 match_k < static_cast<int>(slot.voted_train_idxs.size()); ++match_k)
             {
-                GLOC_DEBUG("[corr] kf_t=%.4f g=%zu train=%zu: "
-                           "gms=%d -> geom=%d (need %d) - REJECT",
-                           kf_state.t_kf, g, ti,
-                           n_after_gms,
-                           static_cast<int>(matches.size()),
-                           GLOC_MATCH_MIN_INLIERS);
+                const std::size_t ti =
+                    static_cast<std::size_t>(slot.voted_train_idxs[match_k]);
 
-                saveDebugImages(GLOC_DEBUG_FOLDER, snapshot_id,
-                                kf_state.t_kf, g, ti,
-                                slot.preprocessed_image, kp0, kp1, matches,
-                                "FEW_INLIERS_" + std::to_string(matches.size()),
-                                map_);
+                if (ti >= map_.feats.size() || map_.feats[ti].orb_descriptors.empty())
+                {
+                    GLOC_WARN("[corr] train_idx=%zu has no cached features - skip", ti);
+                    slot.multi_pt_pairs_distorted.emplace_back();
+                    slot.multi_pt_pairs_undistorted.emplace_back();
+                    continue;
+                }
 
-                slot.best_train_idx = -1;
-                slot.pipeline_done = true;
-                continue;
+                const dbow3::ImageFeatures &train_feats = map_.feats[ti];
+                const cv::Mat &desc1 =
+                    (use_beblid && !train_feats.beblid_descriptors.empty())
+                        ? train_feats.beblid_descriptors
+                        : train_feats.orb_descriptors;
+
+                // Matching
+                std::vector<cv::DMatch> matches;
+                auto *gms = dynamic_cast<PointFeatureMatcherGMS *>(feat_matcher_.get());
+                if (gms)
+                    gms->matchGMS(slot.query_feats.image_size,
+                                  train_feats.image_size,
+                                  kp0, train_feats.keypoints,
+                                  desc0, desc1, matches, GLOC_MATCH_MAX_DIST);
+                else
+                    feat_matcher_->robustMatch(desc0, desc1, matches,
+                                               GLOC_MATCH_LOWE_RATIO,
+                                               GLOC_MATCH_MAX_DIST);
+
+                const int n_after_gms = static_cast<int>(matches.size());
+                GLOC_DEBUG("[corr] kf_t=%.4f g=%zu train=%zu [%d/%d]: "
+                           "q_kp=%zu t_kp=%zu after_gms=%d",
+                           kf_state.t_kf, g, ti, match_k + 1,
+                           static_cast<int>(slot.voted_train_idxs.size()),
+                           kp0.size(), train_feats.keypoints.size(), n_after_gms);
+
+                if (matches.empty())
+                {
+                    GLOC_DEBUG("[corr] kf_t=%.4f g=%zu train=%zu: 0 matches after GMS - skip",
+                               kf_state.t_kf, g, ti);
+                    slot.multi_pt_pairs_distorted.emplace_back();
+                    slot.multi_pt_pairs_undistorted.emplace_back();
+                    continue;
+                }
+
+                // Spatial subsampling
+                if (GLOC_SUBSAMPLE_MIN_DIST_PX > 0.0f)
+                {
+                    std::vector<cv::DMatch> spread;
+                    subsampleMatchesMinDist(kp0, matches, spread,
+                                            GLOC_SUBSAMPLE_MIN_DIST_PX);
+                    matches.swap(spread);
+                    GLOC_DEBUG("[corr] kf_t=%.4f g=%zu train=%zu: after_subsample=%d",
+                               kf_state.t_kf, g, ti, static_cast<int>(matches.size()));
+                }
+
+                if (matches.empty())
+                {
+                    slot.multi_pt_pairs_distorted.emplace_back();
+                    slot.multi_pt_pairs_undistorted.emplace_back();
+                    continue;
+                }
+
+                // Undistort train keypoints
+                auto tcal_it = map_.calibs.find(map_.images[ti].camera_id);
+                if (tcal_it == map_.calibs.end())
+                {
+                    GLOC_WARN("[corr] no calibration for train camera_id=%u",
+                              map_.images[ti].camera_id);
+                    slot.multi_pt_pairs_distorted.emplace_back();
+                    slot.multi_pt_pairs_undistorted.emplace_back();
+                    continue;
+                }
+                const colmap::CameraCalib &train_cal = tcal_it->second;
+                const double train_cx = train_cal.width / 2.0;
+                const double train_cy = train_cal.height / 2.0;
+                const auto &kp1 = train_feats.keypoints;
+                std::vector<cv::KeyPoint> undist_kp1(kp1.size());
+                for (const auto &m : matches)
+                {
+                    const Eigen::Vector2d u1 = colmap::undistort_point(
+                        Eigen::Vector2d(kp1[m.trainIdx].pt.x, kp1[m.trainIdx].pt.y),
+                        train_cal);
+                    const double xn = (u1.x() - train_cal.cx) / train_cal.fx;
+                    const double yn = (u1.y() - train_cal.cy) / train_cal.fy;
+                    undist_kp1[m.trainIdx].pt = cv::Point2f(
+                        (float)(vins_multi::FOCAL_LENGTH * xn + train_cx),
+                        (float)(vins_multi::FOCAL_LENGTH * yn + train_cy));
+                }
+
+                // Geometric verification
+                PointFeatureMatcher::geometricTest(undist_kp0, undist_kp1, matches,
+                                                   GLOC_MATCH_GEOM_REPROJ_TH,
+                                                   GLOC_MATCH_GEOM_CONFIDENCE,
+                                                   GLOC_MATCH_GEOM_SAMPSON_SQ);
+
+                if (static_cast<int>(matches.size()) < GLOC_MATCH_MIN_INLIERS)
+                {
+                    GLOC_DEBUG("[corr] kf_t=%.4f g=%zu train=%zu: "
+                               "gms=%d -> geom=%d (need %d) - REJECT",
+                               kf_state.t_kf, g, ti, n_after_gms,
+                               static_cast<int>(matches.size()), GLOC_MATCH_MIN_INLIERS);
+                    slot.multi_pt_pairs_distorted.emplace_back();
+                    slot.multi_pt_pairs_undistorted.emplace_back();
+                    if (match_k == 0)
+                    {
+                        slot.best_train_idx = -1;
+                        saveDebugImages(GLOC_DEBUG_FOLDER, snapshot_id,
+                                        kf_state.t_kf, g, ti,
+                                        slot.preprocessed_image, kp0, kp1, matches,
+                                        "FEW_INLIERS_" + std::to_string(matches.size()),
+                                        map_);
+                    }
+                    continue;
+                }
+
+                // Store correspondences
+                std::vector<std::pair<Eigen::Vector2f, Eigen::Vector2f>> pd, pu;
+                PointFeatureMatcher::matchesToPointCorrespondences(
+                    kp0, kp1, matches, pd, 1.0f);
+                PointFeatureMatcher::matchesToPointCorrespondences(
+                    undist_kp0, undist_kp1, matches, pu, 1.0f);
+
+                slot.multi_pt_pairs_distorted.push_back(pd);
+                slot.multi_pt_pairs_undistorted.push_back(pu);
+
+                GLOC_DEBUG("[corr] kf_t=%.4f g=%zu train=%zu [%d/%d] -> %zu corr",
+                           kf_state.t_kf, g, ti, match_k + 1,
+                           static_cast<int>(slot.voted_train_idxs.size()), pd.size());
+
+                if (match_k == 0)
+                {
+                    slot.pt_pairs_distorted = pd;
+                    slot.pt_pairs_undistorted = pu;
+                    saveDebugImages(GLOC_DEBUG_FOLDER, snapshot_id,
+                                    kf_state.t_kf, g, ti,
+                                    slot.preprocessed_image, kp0, kp1, matches,
+                                    "", map_);
+                }
+                any_success = true;
             }
 
-            // ── Store correspondences ────────────────────────────────────────
-            PointFeatureMatcher::matchesToPointCorrespondences(
-                kp0, kp1, matches, slot.pt_pairs_distorted, 1.0f);
-            PointFeatureMatcher::matchesToPointCorrespondences(
-                undist_kp0, undist_kp1, matches, slot.pt_pairs_undistorted, 1.0f);
+            if (!any_success && slot.best_train_idx >= 0)
+                slot.best_train_idx = -1;
 
             slot.pipeline_done = true;
-
-            GLOC_DEBUG("[corr] kf_t=%.4f g=%zu -> %zu corr (train=%zu)",
-                       kf_state.t_kf, g, slot.pt_pairs_distorted.size(), ti);
-
-            saveDebugImages(GLOC_DEBUG_FOLDER, snapshot_id,
-                            kf_state.t_kf, g, ti,
-                            slot.preprocessed_image, kp0, kp1, matches,
-                            "", map_);
         }
     }
 }
@@ -1560,8 +1716,11 @@ void Gloc::writeBackToStateMap(const std::vector<KeyframeGlocState> &working_set
             dst.preprocessed_image = src.preprocessed_image;
             dst.dbow_candidates = src.dbow_candidates;
             dst.best_train_idx = src.best_train_idx;
+            dst.voted_train_idxs = src.voted_train_idxs;
             dst.pt_pairs_distorted = src.pt_pairs_distorted;
             dst.pt_pairs_undistorted = src.pt_pairs_undistorted;
+            dst.multi_pt_pairs_distorted = src.multi_pt_pairs_distorted;
+            dst.multi_pt_pairs_undistorted = src.multi_pt_pairs_undistorted;
             dst.pipeline_done = true;
         }
     }
@@ -1770,86 +1929,96 @@ bool Gloc::runOptimization_6DOF(std::vector<KeyframeGlocState> &working_set)
         {
             const auto &slot = kf.per_gloc[g];
             if (!slot.pipeline_done || slot.best_train_idx < 0 ||
-                slot.pt_pairs_undistorted.empty())
+                slot.multi_pt_pairs_undistorted.empty())
                 continue;
 
-            const std::size_t ti = static_cast<std::size_t>(slot.best_train_idx);
-            const colmap::Image &train_img = map_.images[ti];
-            const colmap::CameraCalib &train_cal = map_.calibs.at(train_img.camera_id);
-
-            const Mat3d R_j = train_img.q_c_w.toRotationMatrix();
-            const Vec3d t_j = train_img.t_c_w;
-            const Vec3d o_j = -(R_j.transpose() * t_j); // train centre in world
-
-            // Cam extrinsic: R_cam_body, t_cam_body from imu_T_cam
-            const Mat3d R_cb = vins_multi::GLOC_CAM_MODULES[g].ric_[0].toRotationMatrix();
-            const Vec3d t_cb = vins_multi::GLOC_CAM_MODULES[g].tic_[0];
-
-            // Virtual camera intrinsics
-            const double fx_q = vins_multi::FOCAL_LENGTH;
-            const double fy_q = vins_multi::FOCAL_LENGTH;
-            const double cx_q = slot.query_feats.image_size.width / 2.0;
-            const double cy_q = slot.query_feats.image_size.height / 2.0;
-
-            // Flatten to row-major arrays
-            double R_j_arr[9], Rcr_arr[9], t_j_arr[3], tcr_arr[3];
-            for (int r = 0; r < 3; ++r)
-                for (int c = 0; c < 3; ++c)
-                {
-                    R_j_arr[r * 3 + c] = R_j(r, c);
-                    Rcr_arr[r * 3 + c] = R_cb(r, c);
-                }
-            t_j_arr[0] = t_j.x();
-            t_j_arr[1] = t_j.y();
-            t_j_arr[2] = t_j.z();
-            tcr_arr[0] = t_cb.x();
-            tcr_arr[1] = t_cb.y();
-            tcr_arr[2] = t_cb.z();
-
-            for (const auto &[pq, pt] : slot.pt_pairs_undistorted)
+            for (int match_k = 0;
+                 match_k < static_cast<int>(slot.voted_train_idxs.size()); ++match_k)
             {
-                // Train normalised bearing from COLMAP calibration
-                const Vec3d m_t((pt.x() - train_cal.cx) / train_cal.fx,
-                                (pt.y() - train_cal.cy) / train_cal.fy,
-                                1.0);
-                const Vec3d Rtm = R_j.transpose() * m_t;
+                if (match_k >= static_cast<int>(slot.multi_pt_pairs_undistorted.size()) ||
+                    slot.multi_pt_pairs_undistorted[match_k].empty())
+                    continue;
 
-                // ── Reprojection functor ─────────────────────────────────────
-                GlocReprojCost rep{};
-                rep.Rtm[0] = Rtm.x();
-                rep.Rtm[1] = Rtm.y();
-                rep.Rtm[2] = Rtm.z();
-                rep.oj[0] = o_j.x();
-                rep.oj[1] = o_j.y();
-                rep.oj[2] = o_j.z();
-                rep.pq[0] = pq.x();
-                rep.pq[1] = pq.y();
-                std::memcpy(rep.Rcr, Rcr_arr, sizeof(Rcr_arr));
-                std::memcpy(rep.tcr, tcr_arr, sizeof(tcr_arr));
-                rep.fx = fx_q;
-                rep.fy = fy_q;
-                rep.cx_ = cx_q;
-                rep.cy_ = cy_q;
+                const std::size_t ti =
+                    static_cast<std::size_t>(slot.voted_train_idxs[match_k]);
 
-                // ── Epipolar functor ─────────────────────────────────────────
-                GlocEpipolarCost epi{};
-                epi.x_q[0] = (pq.x() - cx_q) / fx_q;
-                epi.x_q[1] = (pq.y() - cy_q) / fy_q;
-                epi.x_q[2] = 1.0;
-                epi.x_t[0] = m_t.x();
-                epi.x_t[1] = m_t.y();
-                epi.x_t[2] = m_t.z();
-                std::memcpy(epi.R_j, R_j_arr, sizeof(R_j_arr));
-                epi.t_j[0] = t_j_arr[0];
-                epi.t_j[1] = t_j_arr[1];
-                epi.t_j[2] = t_j_arr[2];
-                std::memcpy(epi.Rcr, Rcr_arr, sizeof(Rcr_arr));
-                std::memcpy(epi.tcr, tcr_arr, sizeof(tcr_arr));
-                epi.scale = std::sqrt(fx_q * fy_q);
+                const colmap::Image &train_img = map_.images[ti];
+                const colmap::CameraCalib &train_cal = map_.calibs.at(train_img.camera_id);
 
-                flat_obs.push_back({rep, epi, i, static_cast<int>(g)});
-                rhos.push_back(0.1);
-            }
+                const Mat3d R_j = train_img.q_c_w.toRotationMatrix();
+                const Vec3d t_j = train_img.t_c_w;
+                const Vec3d o_j = -(R_j.transpose() * t_j); // train centre in world
+
+                // Cam extrinsic: R_cam_body, t_cam_body from imu_T_cam
+                const Mat3d R_cb = vins_multi::GLOC_CAM_MODULES[g].ric_[0].toRotationMatrix();
+                const Vec3d t_cb = vins_multi::GLOC_CAM_MODULES[g].tic_[0];
+
+                // Virtual camera intrinsics
+                const double fx_q = vins_multi::FOCAL_LENGTH;
+                const double fy_q = vins_multi::FOCAL_LENGTH;
+                const double cx_q = slot.query_feats.image_size.width / 2.0;
+                const double cy_q = slot.query_feats.image_size.height / 2.0;
+
+                // Flatten to row-major arrays
+                double R_j_arr[9], Rcr_arr[9], t_j_arr[3], tcr_arr[3];
+                for (int r = 0; r < 3; ++r)
+                    for (int c = 0; c < 3; ++c)
+                    {
+                        R_j_arr[r * 3 + c] = R_j(r, c);
+                        Rcr_arr[r * 3 + c] = R_cb(r, c);
+                    }
+                t_j_arr[0] = t_j.x();
+                t_j_arr[1] = t_j.y();
+                t_j_arr[2] = t_j.z();
+                tcr_arr[0] = t_cb.x();
+                tcr_arr[1] = t_cb.y();
+                tcr_arr[2] = t_cb.z();
+
+                for (const auto &[pq, pt] : slot.multi_pt_pairs_undistorted[match_k])
+                {
+                    // Train normalised bearing from COLMAP calibration
+                    const Vec3d m_t((pt.x() - train_cal.cx) / train_cal.fx,
+                                    (pt.y() - train_cal.cy) / train_cal.fy,
+                                    1.0);
+                    const Vec3d Rtm = R_j.transpose() * m_t;
+
+                    // ── Reprojection functor ─────────────────────────────────────
+                    GlocReprojCost rep{};
+                    rep.Rtm[0] = Rtm.x();
+                    rep.Rtm[1] = Rtm.y();
+                    rep.Rtm[2] = Rtm.z();
+                    rep.oj[0] = o_j.x();
+                    rep.oj[1] = o_j.y();
+                    rep.oj[2] = o_j.z();
+                    rep.pq[0] = pq.x();
+                    rep.pq[1] = pq.y();
+                    std::memcpy(rep.Rcr, Rcr_arr, sizeof(Rcr_arr));
+                    std::memcpy(rep.tcr, tcr_arr, sizeof(tcr_arr));
+                    rep.fx = fx_q;
+                    rep.fy = fy_q;
+                    rep.cx_ = cx_q;
+                    rep.cy_ = cy_q;
+
+                    // ── Epipolar functor ─────────────────────────────────────────
+                    GlocEpipolarCost epi{};
+                    epi.x_q[0] = (pq.x() - cx_q) / fx_q;
+                    epi.x_q[1] = (pq.y() - cy_q) / fy_q;
+                    epi.x_q[2] = 1.0;
+                    epi.x_t[0] = m_t.x();
+                    epi.x_t[1] = m_t.y();
+                    epi.x_t[2] = m_t.z();
+                    std::memcpy(epi.R_j, R_j_arr, sizeof(R_j_arr));
+                    epi.t_j[0] = t_j_arr[0];
+                    epi.t_j[1] = t_j_arr[1];
+                    epi.t_j[2] = t_j_arr[2];
+                    std::memcpy(epi.Rcr, Rcr_arr, sizeof(Rcr_arr));
+                    std::memcpy(epi.tcr, tcr_arr, sizeof(tcr_arr));
+                    epi.scale = std::sqrt(fx_q * fy_q);
+
+                    flat_obs.push_back({rep, epi, i, static_cast<int>(g)});
+                    rhos.push_back(0.1);
+                }
+            } // end match_k loop
         }
     }
 
@@ -2532,76 +2701,86 @@ bool Gloc::runOptimization_4DOF(std::vector<KeyframeGlocState> &working_set)
         {
             const auto &slot = kf.per_gloc[g];
             if (!slot.pipeline_done || slot.best_train_idx < 0 ||
-                slot.pt_pairs_undistorted.empty())
+                slot.multi_pt_pairs_undistorted.empty())
                 continue;
 
-            const std::size_t ti = static_cast<std::size_t>(slot.best_train_idx);
-            const colmap::Image &train_img = map_.images[ti];
-            const colmap::CameraCalib &train_cal = map_.calibs.at(train_img.camera_id);
-            const Mat3d R_j = train_img.q_c_w.toRotationMatrix();
-            const Vec3d t_j = train_img.t_c_w;
-            const Vec3d o_j = -(R_j.transpose() * t_j);
-            const Mat3d R_cb = vins_multi::GLOC_CAM_MODULES[g].ric_[0].toRotationMatrix();
-            const Vec3d t_cb = vins_multi::GLOC_CAM_MODULES[g].tic_[0];
-            const double fx_q = vins_multi::FOCAL_LENGTH;
-            const double fy_q = vins_multi::FOCAL_LENGTH;
-            const double cx_q = slot.query_feats.image_size.width / 2.0;
-            const double cy_q = slot.query_feats.image_size.height / 2.0;
-
-            double R_j_arr[9], Rcr_arr[9], t_j_arr[3], tcr_arr[3];
-            for (int r = 0; r < 3; ++r)
-                for (int c = 0; c < 3; ++c)
-                {
-                    R_j_arr[r * 3 + c] = R_j(r, c);
-                    Rcr_arr[r * 3 + c] = R_cb(r, c);
-                }
-            t_j_arr[0] = t_j.x();
-            t_j_arr[1] = t_j.y();
-            t_j_arr[2] = t_j.z();
-            tcr_arr[0] = t_cb.x();
-            tcr_arr[1] = t_cb.y();
-            tcr_arr[2] = t_cb.z();
-
-            for (const auto &[pq, pt] : slot.pt_pairs_undistorted)
+            for (int match_k = 0;
+                 match_k < static_cast<int>(slot.voted_train_idxs.size()); ++match_k)
             {
-                const Vec3d m_t((pt.x() - train_cal.cx) / train_cal.fx,
-                                (pt.y() - train_cal.cy) / train_cal.fy, 1.0);
-                const Vec3d Rtm = R_j.transpose() * m_t;
+                if (match_k >= static_cast<int>(slot.multi_pt_pairs_undistorted.size()) ||
+                    slot.multi_pt_pairs_undistorted[match_k].empty())
+                    continue;
 
-                GlocReprojCost rep{};
-                rep.Rtm[0] = Rtm.x();
-                rep.Rtm[1] = Rtm.y();
-                rep.Rtm[2] = Rtm.z();
-                rep.oj[0] = o_j.x();
-                rep.oj[1] = o_j.y();
-                rep.oj[2] = o_j.z();
-                rep.pq[0] = pq.x();
-                rep.pq[1] = pq.y();
-                std::memcpy(rep.Rcr, Rcr_arr, sizeof(Rcr_arr));
-                std::memcpy(rep.tcr, tcr_arr, sizeof(tcr_arr));
-                rep.fx = fx_q;
-                rep.fy = fy_q;
-                rep.cx_ = cx_q;
-                rep.cy_ = cy_q;
+                const std::size_t ti =
+                    static_cast<std::size_t>(slot.voted_train_idxs[match_k]);
 
-                GlocEpipolarCost epi{};
-                epi.x_q[0] = (pq.x() - cx_q) / fx_q;
-                epi.x_q[1] = (pq.y() - cy_q) / fy_q;
-                epi.x_q[2] = 1.0;
-                epi.x_t[0] = m_t.x();
-                epi.x_t[1] = m_t.y();
-                epi.x_t[2] = m_t.z();
-                std::memcpy(epi.R_j, R_j_arr, sizeof(R_j_arr));
-                epi.t_j[0] = t_j_arr[0];
-                epi.t_j[1] = t_j_arr[1];
-                epi.t_j[2] = t_j_arr[2];
-                std::memcpy(epi.Rcr, Rcr_arr, sizeof(Rcr_arr));
-                std::memcpy(epi.tcr, tcr_arr, sizeof(tcr_arr));
-                epi.scale = std::sqrt(fx_q * fy_q);
+                const colmap::Image &train_img = map_.images[ti];
+                const colmap::CameraCalib &train_cal = map_.calibs.at(train_img.camera_id);
+                const Mat3d R_j = train_img.q_c_w.toRotationMatrix();
+                const Vec3d t_j = train_img.t_c_w;
+                const Vec3d o_j = -(R_j.transpose() * t_j);
+                const Mat3d R_cb = vins_multi::GLOC_CAM_MODULES[g].ric_[0].toRotationMatrix();
+                const Vec3d t_cb = vins_multi::GLOC_CAM_MODULES[g].tic_[0];
+                const double fx_q = vins_multi::FOCAL_LENGTH;
+                const double fy_q = vins_multi::FOCAL_LENGTH;
+                const double cx_q = slot.query_feats.image_size.width / 2.0;
+                const double cy_q = slot.query_feats.image_size.height / 2.0;
 
-                flat_obs.push_back({rep, epi, i, static_cast<int>(g)});
-                rhos.push_back(0.1);
-            }
+                double R_j_arr[9], Rcr_arr[9], t_j_arr[3], tcr_arr[3];
+                for (int r = 0; r < 3; ++r)
+                    for (int c = 0; c < 3; ++c)
+                    {
+                        R_j_arr[r * 3 + c] = R_j(r, c);
+                        Rcr_arr[r * 3 + c] = R_cb(r, c);
+                    }
+                t_j_arr[0] = t_j.x();
+                t_j_arr[1] = t_j.y();
+                t_j_arr[2] = t_j.z();
+                tcr_arr[0] = t_cb.x();
+                tcr_arr[1] = t_cb.y();
+                tcr_arr[2] = t_cb.z();
+
+                for (const auto &[pq, pt] : slot.multi_pt_pairs_undistorted[match_k])
+                {
+                    const Vec3d m_t((pt.x() - train_cal.cx) / train_cal.fx,
+                                    (pt.y() - train_cal.cy) / train_cal.fy, 1.0);
+                    const Vec3d Rtm = R_j.transpose() * m_t;
+
+                    GlocReprojCost rep{};
+                    rep.Rtm[0] = Rtm.x();
+                    rep.Rtm[1] = Rtm.y();
+                    rep.Rtm[2] = Rtm.z();
+                    rep.oj[0] = o_j.x();
+                    rep.oj[1] = o_j.y();
+                    rep.oj[2] = o_j.z();
+                    rep.pq[0] = pq.x();
+                    rep.pq[1] = pq.y();
+                    std::memcpy(rep.Rcr, Rcr_arr, sizeof(Rcr_arr));
+                    std::memcpy(rep.tcr, tcr_arr, sizeof(tcr_arr));
+                    rep.fx = fx_q;
+                    rep.fy = fy_q;
+                    rep.cx_ = cx_q;
+                    rep.cy_ = cy_q;
+
+                    GlocEpipolarCost epi{};
+                    epi.x_q[0] = (pq.x() - cx_q) / fx_q;
+                    epi.x_q[1] = (pq.y() - cy_q) / fy_q;
+                    epi.x_q[2] = 1.0;
+                    epi.x_t[0] = m_t.x();
+                    epi.x_t[1] = m_t.y();
+                    epi.x_t[2] = m_t.z();
+                    std::memcpy(epi.R_j, R_j_arr, sizeof(R_j_arr));
+                    epi.t_j[0] = t_j_arr[0];
+                    epi.t_j[1] = t_j_arr[1];
+                    epi.t_j[2] = t_j_arr[2];
+                    std::memcpy(epi.Rcr, Rcr_arr, sizeof(Rcr_arr));
+                    std::memcpy(epi.tcr, tcr_arr, sizeof(tcr_arr));
+                    epi.scale = std::sqrt(fx_q * fy_q);
+
+                    flat_obs.push_back({rep, epi, i, static_cast<int>(g)});
+                    rhos.push_back(0.1);
+                }
+            } // end match_k loop
         }
     }
 
@@ -2998,19 +3177,6 @@ bool Gloc::runOptimization_4DOF(std::vector<KeyframeGlocState> &working_set)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// runOptimization  (dispatcher)
-// ─────────────────────────────────────────────────────────────────────────────
-bool Gloc::runOptimization(std::vector<KeyframeGlocState> &working_set)
-{
-    if (GLOC_FIX_REL_POSES)
-        return GLOC_USE_4DOF ? runOptimization_FixedRel_4DOF(working_set)
-                             : runOptimization_FixedRel_6DOF(working_set);
-    else
-        return GLOC_USE_4DOF ? runOptimization_4DOF(working_set)
-                             : runOptimization_6DOF(working_set);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // runOptimization_FixedRel  (shared implementation)
 //
 // Relative poses between keyframes are fixed (trusted from VINS). The sole
@@ -3148,87 +3314,97 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
         {
             const auto &slot = kf.per_gloc[g];
             if (!slot.pipeline_done || slot.best_train_idx < 0 ||
-                slot.pt_pairs_undistorted.empty())
+                slot.multi_pt_pairs_undistorted.empty())
                 continue;
 
-            const std::size_t ti = static_cast<std::size_t>(slot.best_train_idx);
-            const colmap::Image &train_img = map_.images[ti];
-            const colmap::CameraCalib &train_cal = map_.calibs.at(train_img.camera_id);
-            const Mat3d R_j = train_img.q_c_w.toRotationMatrix();
-            const Vec3d t_j = train_img.t_c_w;
-            const Vec3d o_j = -(R_j.transpose() * t_j);
-            const Mat3d R_cb = vins_multi::GLOC_CAM_MODULES[g].ric_[0].toRotationMatrix();
-            const Vec3d t_cb = vins_multi::GLOC_CAM_MODULES[g].tic_[0];
-            const double fx_q = vins_multi::FOCAL_LENGTH;
-            const double fy_q = vins_multi::FOCAL_LENGTH;
-            const double cx_q = slot.query_feats.image_size.width / 2.0;
-            const double cy_q = slot.query_feats.image_size.height / 2.0;
-
-            // Bake in per-keyframe VINS local pose
-            const Mat3d R_lb = kf.R_local.toRotationMatrix();
-            double R_lb_arr[9], R_j_arr[9], Rcr_arr[9], t_j_arr[3], tcr_arr[3];
-            for (int r = 0; r < 3; ++r)
-                for (int c = 0; c < 3; ++c)
-                {
-                    R_lb_arr[r * 3 + c] = R_lb(r, c);
-                    R_j_arr[r * 3 + c] = R_j(r, c);
-                    Rcr_arr[r * 3 + c] = R_cb(r, c);
-                }
-            t_j_arr[0] = t_j.x();
-            t_j_arr[1] = t_j.y();
-            t_j_arr[2] = t_j.z();
-            tcr_arr[0] = t_cb.x();
-            tcr_arr[1] = t_cb.y();
-            tcr_arr[2] = t_cb.z();
-
-            for (const auto &[pq, pt] : slot.pt_pairs_undistorted)
+            for (int match_k = 0;
+                 match_k < static_cast<int>(slot.voted_train_idxs.size()); ++match_k)
             {
-                const Vec3d m_t((pt.x() - train_cal.cx) / train_cal.fx,
-                                (pt.y() - train_cal.cy) / train_cal.fy, 1.0);
-                const Vec3d Rtm = R_j.transpose() * m_t;
+                if (match_k >= static_cast<int>(slot.multi_pt_pairs_undistorted.size()) ||
+                    slot.multi_pt_pairs_undistorted[match_k].empty())
+                    continue;
 
-                GlocFixedRelReprojCost rep{};
-                std::memcpy(rep.R_local_body, R_lb_arr, sizeof(R_lb_arr));
-                rep.P_local[0] = kf.P_local.x();
-                rep.P_local[1] = kf.P_local.y();
-                rep.P_local[2] = kf.P_local.z();
-                rep.Rtm[0] = Rtm.x();
-                rep.Rtm[1] = Rtm.y();
-                rep.Rtm[2] = Rtm.z();
-                rep.oj[0] = o_j.x();
-                rep.oj[1] = o_j.y();
-                rep.oj[2] = o_j.z();
-                rep.pq[0] = pq.x();
-                rep.pq[1] = pq.y();
-                std::memcpy(rep.Rcr, Rcr_arr, sizeof(Rcr_arr));
-                std::memcpy(rep.tcr, tcr_arr, sizeof(tcr_arr));
-                rep.fx = fx_q;
-                rep.fy = fy_q;
-                rep.cx_ = cx_q;
-                rep.cy_ = cy_q;
+                const std::size_t ti =
+                    static_cast<std::size_t>(slot.voted_train_idxs[match_k]);
 
-                GlocFixedRelEpipolarCost epi{};
-                std::memcpy(epi.R_local_body, R_lb_arr, sizeof(R_lb_arr));
-                epi.P_local[0] = kf.P_local.x();
-                epi.P_local[1] = kf.P_local.y();
-                epi.P_local[2] = kf.P_local.z();
-                epi.x_q[0] = (pq.x() - cx_q) / fx_q;
-                epi.x_q[1] = (pq.y() - cy_q) / fy_q;
-                epi.x_q[2] = 1.0;
-                epi.x_t[0] = m_t.x();
-                epi.x_t[1] = m_t.y();
-                epi.x_t[2] = m_t.z();
-                std::memcpy(epi.R_j, R_j_arr, sizeof(R_j_arr));
-                epi.t_j[0] = t_j_arr[0];
-                epi.t_j[1] = t_j_arr[1];
-                epi.t_j[2] = t_j_arr[2];
-                std::memcpy(epi.Rcr, Rcr_arr, sizeof(Rcr_arr));
-                std::memcpy(epi.tcr, tcr_arr, sizeof(tcr_arr));
-                epi.scale = std::sqrt(fx_q * fy_q);
+                const colmap::Image &train_img = map_.images[ti];
+                const colmap::CameraCalib &train_cal = map_.calibs.at(train_img.camera_id);
+                const Mat3d R_j = train_img.q_c_w.toRotationMatrix();
+                const Vec3d t_j = train_img.t_c_w;
+                const Vec3d o_j = -(R_j.transpose() * t_j);
+                const Mat3d R_cb = vins_multi::GLOC_CAM_MODULES[g].ric_[0].toRotationMatrix();
+                const Vec3d t_cb = vins_multi::GLOC_CAM_MODULES[g].tic_[0];
+                const double fx_q = vins_multi::FOCAL_LENGTH;
+                const double fy_q = vins_multi::FOCAL_LENGTH;
+                const double cx_q = slot.query_feats.image_size.width / 2.0;
+                const double cy_q = slot.query_feats.image_size.height / 2.0;
 
-                flat_obs.push_back({rep, epi, i});
-                rhos.push_back(0.1);
-            }
+                // Bake in per-keyframe VINS local pose
+                const Mat3d R_lb = kf.R_local.toRotationMatrix();
+                double R_lb_arr[9], R_j_arr[9], Rcr_arr[9], t_j_arr[3], tcr_arr[3];
+                for (int r = 0; r < 3; ++r)
+                    for (int c = 0; c < 3; ++c)
+                    {
+                        R_lb_arr[r * 3 + c] = R_lb(r, c);
+                        R_j_arr[r * 3 + c] = R_j(r, c);
+                        Rcr_arr[r * 3 + c] = R_cb(r, c);
+                    }
+                t_j_arr[0] = t_j.x();
+                t_j_arr[1] = t_j.y();
+                t_j_arr[2] = t_j.z();
+                tcr_arr[0] = t_cb.x();
+                tcr_arr[1] = t_cb.y();
+                tcr_arr[2] = t_cb.z();
+
+                for (const auto &[pq, pt] : slot.multi_pt_pairs_undistorted[match_k])
+                {
+                    const Vec3d m_t((pt.x() - train_cal.cx) / train_cal.fx,
+                                    (pt.y() - train_cal.cy) / train_cal.fy, 1.0);
+                    const Vec3d Rtm = R_j.transpose() * m_t;
+
+                    GlocFixedRelReprojCost rep{};
+                    std::memcpy(rep.R_local_body, R_lb_arr, sizeof(R_lb_arr));
+                    rep.P_local[0] = kf.P_local.x();
+                    rep.P_local[1] = kf.P_local.y();
+                    rep.P_local[2] = kf.P_local.z();
+                    rep.Rtm[0] = Rtm.x();
+                    rep.Rtm[1] = Rtm.y();
+                    rep.Rtm[2] = Rtm.z();
+                    rep.oj[0] = o_j.x();
+                    rep.oj[1] = o_j.y();
+                    rep.oj[2] = o_j.z();
+                    rep.pq[0] = pq.x();
+                    rep.pq[1] = pq.y();
+                    std::memcpy(rep.Rcr, Rcr_arr, sizeof(Rcr_arr));
+                    std::memcpy(rep.tcr, tcr_arr, sizeof(tcr_arr));
+                    rep.fx = fx_q;
+                    rep.fy = fy_q;
+                    rep.cx_ = cx_q;
+                    rep.cy_ = cy_q;
+
+                    GlocFixedRelEpipolarCost epi{};
+                    std::memcpy(epi.R_local_body, R_lb_arr, sizeof(R_lb_arr));
+                    epi.P_local[0] = kf.P_local.x();
+                    epi.P_local[1] = kf.P_local.y();
+                    epi.P_local[2] = kf.P_local.z();
+                    epi.x_q[0] = (pq.x() - cx_q) / fx_q;
+                    epi.x_q[1] = (pq.y() - cy_q) / fy_q;
+                    epi.x_q[2] = 1.0;
+                    epi.x_t[0] = m_t.x();
+                    epi.x_t[1] = m_t.y();
+                    epi.x_t[2] = m_t.z();
+                    std::memcpy(epi.R_j, R_j_arr, sizeof(R_j_arr));
+                    epi.t_j[0] = t_j_arr[0];
+                    epi.t_j[1] = t_j_arr[1];
+                    epi.t_j[2] = t_j_arr[2];
+                    std::memcpy(epi.Rcr, Rcr_arr, sizeof(Rcr_arr));
+                    std::memcpy(epi.tcr, tcr_arr, sizeof(tcr_arr));
+                    epi.scale = std::sqrt(fx_q * fy_q);
+
+                    flat_obs.push_back({rep, epi, i});
+                    rhos.push_back(0.1);
+                }
+            } // end match_k loop
         }
     }
 
@@ -3533,6 +3709,19 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
     }
 
     return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// runOptimization  (dispatcher)
+// ─────────────────────────────────────────────────────────────────────────────
+bool Gloc::runOptimization(std::vector<KeyframeGlocState> &working_set)
+{
+    if (GLOC_FIX_REL_POSES)
+        return GLOC_USE_4DOF ? runOptimization_FixedRel_4DOF(working_set)
+                             : runOptimization_FixedRel_6DOF(working_set);
+    else
+        return GLOC_USE_4DOF ? runOptimization_4DOF(working_set)
+                             : runOptimization_6DOF(working_set);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

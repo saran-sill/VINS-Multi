@@ -41,6 +41,20 @@ extern double GLOC_VOTE_EPS_M;
 // X is the current working-set size (majority rule).
 extern int GLOC_VOTE_MIN_VOTES;
 
+// Maximum distance (metres) between a keyframe's VINS local position and a
+// candidate train image's world position. Candidates farther than this are
+// rejected before RANSAC. Set to <=0 to disable. Default: -1 (disabled).
+extern double GLOC_VOTE_MAX_DIST_M;
+
+// Maximum number of train image matches to keep per keyframe slot after
+// consensus voting, ranked by DBoW3 score. 1 = original single-match
+// behaviour. Default: 1.
+extern int GLOC_VOTE_MAX_MATCHES;
+
+// Seconds to wait after the first onSnapshotChanged before processing any
+// working_set. Gives VINS time to build a stable window. Default: 0 (disabled).
+extern double GLOC_STARTUP_DELAY_S;
+
 // ── ORB feature extraction ───────────────────────────────────────────────────
 
 extern int GLOC_ORB_NFEATURES;

@@ -18,6 +18,7 @@ namespace vins_multi
 ros::Publisher pub_odometry, pub_latest_odometry, pub_latest_odometry_world;
 ros::Publisher pub_gloc_map_frustums, pub_gloc_map_path;
 ros::Publisher pub_gloc_opt_poses, pub_gloc_opt_path, pub_gloc_kf_status, pub_gloc_match_lines;
+ros::Publisher pub_gloc_vote_lines;
 ros::Publisher pub_path;
 std::vector<ros::Publisher> pub_point_cloud;
 ros::Publisher pub_margin_cloud;
@@ -66,6 +67,8 @@ void registerPub(ros::NodeHandle &n)
         "gloc/kf_status", 10);
     pub_gloc_match_lines = n.advertise<visualization_msgs::Marker>(
         "gloc/match_lines", 10);
+    pub_gloc_vote_lines = n.advertise<visualization_msgs::Marker>(
+        "gloc/vote_lines", 10);
     pub_path = n.advertise<nav_msgs::Path>("path", 1000);
     pub_odometry = n.advertise<nav_msgs::Odometry>("odomimu_lowhz", 1000);
     // pub_key_poses = n.advertise<visualization_msgs::Marker>("key_poses", 1000);
@@ -353,6 +356,22 @@ void pubLatestOdometry(const Estimator &estimator)
     odometry.twist.twist.angular.z = omega_center.z();
 
     pub_latest_odometry.publish(odometry);
+
+    // ── World→odom TF at IMU rate ─────────────────────────────────────────────
+    // Broadcast at every IMU update so RViz can transform odomimu into world
+    // without extrapolation errors. Use try_lock to avoid blocking the IMU
+    // thread; fall back to the cached last-known transform on contention.
+    {
+        static Eigen::Matrix3d cached_R = Eigen::Matrix3d::Identity();
+        static Eigen::Vector3d cached_t = Eigen::Vector3d::Zero();
+        if (estimator.t_map_mutex_.try_lock())
+        {
+            cached_R = estimator.t_map_local_R_;
+            cached_t = estimator.t_map_local_t_;
+            estimator.t_map_mutex_.unlock();
+        }
+        broadcastWorldOdomTF(cached_R, cached_t, odometry.header.stamp);
+    }
 
     // ── World-frame odometry (odomimu_world) ──────────────────────────────────
     // Published only when gloc has snapped a valid T_map_local.
@@ -1051,6 +1070,54 @@ void pubGlocMatchLines(
     }
 
     pub_gloc_match_lines.publish(m);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// pubGlocVoteLines
+//
+// Visualizes consensus voting results after runOrbAndDbow + runConsensusVoting.
+// Draws lines in world frame between:
+//   - query keyframe local position (used directly as world position)
+//   - matched train image camera centre in COLMAP world
+// Published on gloc/vote_lines (cyan lines).
+// ─────────────────────────────────────────────────────────────────────────────
+void pubGlocVoteLines(
+    const std::vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>> &query_train_pairs)
+{
+    if (pub_gloc_vote_lines.getNumSubscribers() == 0)
+        return;
+
+    visualization_msgs::Marker m;
+    m.header.frame_id = "world";
+    m.header.stamp = ros::Time::now();
+    m.ns = "gloc_vote_lines";
+    m.id = 0;
+    m.type = visualization_msgs::Marker::LINE_LIST;
+    m.action = visualization_msgs::Marker::ADD;
+    m.scale.x = 0.025;
+    m.pose.orientation.w = 1.0;
+
+    // Cyan
+    m.color.r = 1.0f;
+    m.color.g = 1.0f;
+    m.color.b = 0.0f;
+    m.color.a = 1.0f;
+
+    m.points.reserve(query_train_pairs.size() * 2);
+    for (const auto &[q_pos, t_pos] : query_train_pairs)
+    {
+        geometry_msgs::Point pq, pt;
+        pq.x = q_pos.x();
+        pq.y = q_pos.y();
+        pq.z = q_pos.z();
+        pt.x = t_pos.x();
+        pt.y = t_pos.y();
+        pt.z = t_pos.z();
+        m.points.push_back(pq);
+        m.points.push_back(pt);
+    }
+
+    pub_gloc_vote_lines.publish(m);
 }
 
 } // namespace vins_multi

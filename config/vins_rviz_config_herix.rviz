@@ -36,7 +36,6 @@ Panels:
         - /Status1
         - /TF1/Frames1
         - /VIO1
-        - /VIO1/OdomHigh1/Status1
         - /VIO1/OdomHigh1/Shape1
         - /VIO1/OdomLow1/Shape1
         - /GLOC1
@@ -195,7 +194,7 @@ Visualization Manager:
           Marker Topic: /herix/camera_pose_visual_1
           Name: CameraMarker1
           Namespaces:
-            CameraPoseVisualization: true
+            {}
           Queue Size: 100
           Value: true
         - Class: rviz/MarkerArray
@@ -456,13 +455,13 @@ Visualization Manager:
     - Class: rviz/Group
       Displays:
         - Class: rviz/MarkerArray
-          Enabled: false
+          Enabled: true
           Marker Topic: /herix/gloc/map_frustums
           Name: MapCamFrustums
           Namespaces:
             {}
           Queue Size: 100
-          Value: false
+          Value: true
         - Alpha: 1
           Buffer Length: 1
           Class: rviz/Path
@@ -533,7 +532,7 @@ Visualization Manager:
           Marker Topic: /herix/gloc/kf_status
           Name: OptKfStatus
           Namespaces:
-            gloc_kf_status: true
+            {}
           Queue Size: 100
           Value: true
         - Angle Tolerance: 0.05000000074505806
@@ -571,6 +570,14 @@ Visualization Manager:
           Topic: /herix/odomimu_world
           Unreliable: false
           Value: true
+        - Class: rviz/Marker
+          Enabled: true
+          Marker Topic: /herix/gloc/vote_lines
+          Name: VoteLines
+          Namespaces:
+            {}
+          Queue Size: 100
+          Value: true
       Enabled: true
       Name: GLOC
   Enabled: true
@@ -599,7 +606,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz/Orbit
-      Distance: 57.13618469238281
+      Distance: 35.068260192871094
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
@@ -607,17 +614,17 @@ Visualization Manager:
         Value: false
       Field of View: 0.7853981852531433
       Focal Point:
-        X: 7.551945209503174
-        Y: 5.2011189460754395
-        Z: -9.825080871582031
+        X: 10.49022388458252
+        Y: 12.032578468322754
+        Z: -4.271449089050293
       Focal Shape Fixed Size: false
       Focal Shape Size: 0.0010000000474974513
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.259797066450119
+      Pitch: 0.8097968697547913
       Target Frame: <Fixed Frame>
-      Yaw: 3.131298542022705
+      Yaw: 3.5662968158721924
     Saved: ~
 Window Geometry:
   Displays:

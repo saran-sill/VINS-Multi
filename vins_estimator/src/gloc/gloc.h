@@ -300,12 +300,24 @@ struct PerModuleResolution
     // voting.  -1 means this slot was rejected by the vote filter.
     int best_train_idx{-1};
 
+    // All accepted train image indices after consensus voting, sorted
+    // descending by DBoW3 score. best_train_idx == voted_train_idxs[0]
+    // when non-empty. Size capped at GLOC_VOTE_MAX_MATCHES.
+    std::vector<int> voted_train_idxs;
+
     // 2D-2D point correspondences between this query image and the winning
     // train image.  In original (distorted) pixel coordinates.
     std::vector<std::pair<Eigen::Vector2f, Eigen::Vector2f>> pt_pairs_distorted;
 
     // Same correspondences with lens distortion removed.
     std::vector<std::pair<Eigen::Vector2f, Eigen::Vector2f>> pt_pairs_undistorted;
+
+    // Per-match correspondences for all voted_train_idxs entries.
+    // multi_pt_pairs_distorted[k]   ↔ voted_train_idxs[k]
+    // multi_pt_pairs_undistorted[k] ↔ voted_train_idxs[k]
+    // Index 0 duplicates pt_pairs_* for backward compatibility.
+    std::vector<std::vector<std::pair<Eigen::Vector2f, Eigen::Vector2f>>> multi_pt_pairs_distorted;
+    std::vector<std::vector<std::pair<Eigen::Vector2f, Eigen::Vector2f>>> multi_pt_pairs_undistorted;
 
     bool isTerminal() const
     {
@@ -604,6 +616,9 @@ class Gloc
     std::map<double, KeyframeGlocState> state_map_;
     bool snapshot_fresh_{false};
     uint64_t last_snapshot_id_{0};
+    // Sensor timestamp of the first snapshot received. Used to enforce
+    // a startup delay before processing begins.
+    double first_snapshot_time_{-1.0};
 
     // ── Thread state ─────────────────────────────────────────────────────────
 
