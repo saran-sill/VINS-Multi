@@ -573,7 +573,16 @@ void Gloc::pushCameraImage(unsigned int gloc_unique_id,
         return;
     }
 
-    ring_buffers_[gloc_unique_id]->push(t, image);
+    // Store as grayscale — ORB extraction and debug saving both work on
+    // grayscale. Converting here cuts ring-buffer RAM usage by 3×
+    // (1920×1200×1 byte instead of ×3 bytes per slot).
+    cv::Mat gray;
+    if (image.channels() == 1)
+        gray = image;
+    else
+        cv::cvtColor(image, gray, cv::COLOR_BGR2GRAY);
+
+    ring_buffers_[gloc_unique_id]->push(t, gray);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1189,6 +1198,15 @@ void Gloc::runOrbAndDbow(std::vector<KeyframeGlocState> &working_set)
 
             if (static_cast<int>(slot.dbow_candidates.size()) > GLOC_DBOW3_MAX_RESULTS)
                 slot.dbow_candidates.resize(GLOC_DBOW3_MAX_RESULTS);
+
+            // Release raw and preprocessed images immediately — they are only
+            // needed for ORB extraction (done above) and debug saving (done in
+            // runCorrespondences). Holding them wastes ~7MB per slot per round.
+            // Debug saving in runCorrespondences uses slot.preprocessed_image;
+            // if GLOC_DEBUG_FOLDER is set we keep it, otherwise release both.
+            slot.image.release();
+            if (GLOC_DEBUG_FOLDER.empty())
+                slot.preprocessed_image.release();
         }
     }
 }
@@ -1721,6 +1739,13 @@ void Gloc::writeBackToStateMap(const std::vector<KeyframeGlocState> &working_set
             dst.pt_pairs_undistorted = src.pt_pairs_undistorted;
             dst.multi_pt_pairs_distorted = src.multi_pt_pairs_distorted;
             dst.multi_pt_pairs_undistorted = src.multi_pt_pairs_undistorted;
+
+            // Free the raw and preprocessed images — they are no longer needed
+            // once pipeline_done. Descriptors and dbow_candidates are kept:
+            // descriptors are needed by runCorrespondences; dbow_candidates
+            // are used as voters in runConsensusVoting for future rounds.
+            dst.image.release();
+            dst.preprocessed_image.release();
             dst.pipeline_done = true;
         }
     }

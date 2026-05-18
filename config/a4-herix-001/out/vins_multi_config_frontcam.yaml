@@ -135,7 +135,7 @@ cam_module:
         # resolution drains the buffer, so a few slots is usually plenty.
         # Tune up if your gloc camera arrives noticeably later than VINS
         # keyframes.
-        image_ring_buffer_capacity: 60
+        image_ring_buffer_capacity: 75
         depth: 0
         stereo: 1
         image_width: 1280
