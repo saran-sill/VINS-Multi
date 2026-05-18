@@ -286,7 +286,8 @@ public:
                               std::vector<cv::DMatch> &matches,
                               const float &ransac_reproj_th = 3.0,
                               const float &ransac_confidence = 0.99,
-                              const float &sampson_error_sq_th = 4.0);
+                              const float &sampson_error_sq_th = 4.0,
+                              const bool use_magsac = false);
 
     static void geometricTest(const std::vector<cv::KeyPoint> &keypoints0,
                               const std::vector<cv::KeyPoint> &keypoints1,
@@ -330,7 +331,7 @@ public:
 class PointFeatureMatcherFLANN : public PointFeatureMatcher
 {
 public:
-    PointFeatureMatcherFLANN();
+    PointFeatureMatcherFLANN(int normType = cv::NORM_HAMMING);
     ~PointFeatureMatcherFLANN();
 };
 

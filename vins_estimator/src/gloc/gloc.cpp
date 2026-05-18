@@ -609,8 +609,9 @@ bool Gloc::init()
     }
     else
     {
-        feat_matcher_ = std::make_unique<PointFeatureMatcherBruteForce>(
-            cv::NORM_HAMMING);
+        // feat_matcher_ = std::make_unique<PointFeatureMatcherBruteForce>(cv::NORM_HAMMING);
+        feat_matcher_ = std::make_unique<PointFeatureMatcherFLANN>(cv::NORM_HAMMING);
+
         GLOC_INFO("[init] Matcher: BruteForce Hamming");
     }
 
@@ -1087,7 +1088,7 @@ void Gloc::processLoop()
             vins_multi::pubGlocVoteLines(vote_pairs);
         }
 
-        // runCorrespondences(working_set, working_snapshot_id);  // DEBUG: disabled
+        runCorrespondences(working_set, working_snapshot_id);  // DEBUG: disabled
         writeBackToStateMap(working_set);
 
         // ── Correspondence line visualization (magenta, gloc/corr_lines) ─────
@@ -1744,6 +1745,8 @@ void Gloc::runCorrespondences(std::vector<KeyframeGlocState> &working_set,
                 for (const auto &m : knn_matches)
                 {
                     if (m.size() < 2)
+                        continue;
+                    if (m[1].distance < 1e-6f) // degenerate — skip (LSH artefact)
                         continue;
                     if (m[0].distance < GLOC_MATCH_LOWE_RATIO * m[1].distance &&
                         m[0].distance <= GLOC_MATCH_MAX_DIST)

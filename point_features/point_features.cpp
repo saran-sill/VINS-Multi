@@ -713,7 +713,8 @@ void PointFeatureMatcher::geometricTest(const std::vector<cv::KeyPoint> &keypoin
                                         std::vector<cv::DMatch> &matches,
                                         const float &ransac_reproj_th,
                                         const float &ransac_confidence,
-                                        const float &sampson_error_sq_th)
+                                        const float &sampson_error_sq_th,
+                                        const bool use_magsac)
 {
     if (matches.size() < 8)
         return;
@@ -742,8 +743,15 @@ void PointFeatureMatcher::geometricTest(const std::vector<cv::KeyPoint> &keypoin
 
     // Fundamental matrix with RANSAC
     std::vector<uchar> mask;
-    // cv::Mat F = cv::findFundamentalMat(points0, points1, cv::RANSAC, ransac_reproj_th, ransac_confidence, mask);
-    cv::Mat F = cv::findFundamentalMat(points0, points1, cv::USAC_MAGSAC, ransac_reproj_th, ransac_confidence, mask);
+    cv::Mat F;
+    if (!use_magsac)
+    {
+        F = cv::findFundamentalMat(points0, points1, cv::RANSAC, ransac_reproj_th, ransac_confidence, mask);
+    }
+    else
+    {
+        F = cv::findFundamentalMat(points0, points1, cv::USAC_MAGSAC, ransac_reproj_th, ransac_confidence, mask);
+    }
 
     if (F.empty())
         return;
@@ -1075,10 +1083,20 @@ PointFeatureMatcherBruteForce::~PointFeatureMatcherBruteForce()
 //-----------------------------------------------------------------
 // PointFeatureMatcherFLANN
 //-----------------------------------------------------------------
-PointFeatureMatcherFLANN::PointFeatureMatcherFLANN()
+PointFeatureMatcherFLANN::PointFeatureMatcherFLANN(int normType)
     : PointFeatureMatcher()
 {
-    m_matcher = cv::FlannBasedMatcher::create();
+    if (normType == cv::NORM_HAMMING || normType == cv::NORM_HAMMING2)
+    {
+        m_matcher = cv::makePtr<cv::FlannBasedMatcher>(
+            cv::makePtr<cv::flann::LshIndexParams>(12, 20, 2));
+    }
+    else
+    {
+        // L2 / float descriptors (SIFT, SURF, etc.) — KD-tree is correct here
+        m_matcher = cv::makePtr<cv::FlannBasedMatcher>(
+            cv::makePtr<cv::flann::KDTreeIndexParams>(4));
+    }
 }
 
 PointFeatureMatcherFLANN::~PointFeatureMatcherFLANN()
