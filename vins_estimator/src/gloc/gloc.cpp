@@ -512,33 +512,56 @@ bool Gloc::init()
     if (!loadDatabase())
         return false;
 
-    // ── Precompute undistorted train keypoints ───────────────────────────────
+    // ── Precompute undistorted train keypoints (parallel) ────────────────────
     GLOC_INFO("[init] Precomputing undistorted train keypoints for %zu images ...",
               map_.feats.size());
     map_.undist_train_kps.resize(map_.feats.size());
-    for (std::size_t ti = 0; ti < map_.feats.size(); ++ti)
+
     {
-        const auto &kp1 = map_.feats[ti].keypoints;
-        auto cal_it = map_.calibs.find(map_.images[ti].camera_id);
-        if (cal_it == map_.calibs.end() || kp1.empty())
+        const std::size_t n = map_.feats.size();
+        const std::size_t n_threads = std::max(1u, std::thread::hardware_concurrency());
+        const std::size_t chunk = (n + n_threads - 1) / n_threads;
+
+        std::vector<std::future<void>> futs;
+        futs.reserve(n_threads);
+
+        for (std::size_t t = 0; t < n_threads; ++t)
         {
-            map_.undist_train_kps[ti] = kp1; // fallback: use raw
-            continue;
+            const std::size_t begin = t * chunk;
+            const std::size_t end = std::min(begin + chunk, n);
+            if (begin >= end)
+                break;
+
+            futs.push_back(std::async(std::launch::async, [&, begin, end]() {
+                for (std::size_t ti = begin; ti < end; ++ti)
+                {
+                    const auto &kp1 = map_.feats[ti].keypoints;
+                    auto cal_it = map_.calibs.find(map_.images[ti].camera_id);
+                    if (cal_it == map_.calibs.end() || kp1.empty())
+                    {
+                        map_.undist_train_kps[ti] = kp1;
+                        continue;
+                    }
+                    const colmap::CameraCalib &cal = cal_it->second;
+                    const double cx = cal.width / 2.0;
+                    const double cy = cal.height / 2.0;
+                    std::vector<cv::KeyPoint> undist(kp1.size());
+                    for (std::size_t j = 0; j < kp1.size(); ++j)
+                    {
+                        const Eigen::Vector2d u = colmap::undistort_point(
+                            Eigen::Vector2d(kp1[j].pt.x, kp1[j].pt.y), cal);
+                        undist[j].pt = cv::Point2f(
+                            (float)(vins_multi::FOCAL_LENGTH * (u.x() - cal.cx) / cal.fx + cx),
+                            (float)(vins_multi::FOCAL_LENGTH * (u.y() - cal.cy) / cal.fy + cy));
+                    }
+                    map_.undist_train_kps[ti] = std::move(undist);
+                }
+            }));
         }
-        const colmap::CameraCalib &cal = cal_it->second;
-        const double cx = cal.width / 2.0;
-        const double cy = cal.height / 2.0;
-        std::vector<cv::KeyPoint> undist(kp1.size());
-        for (std::size_t j = 0; j < kp1.size(); ++j)
-        {
-            const Eigen::Vector2d u = colmap::undistort_point(
-                Eigen::Vector2d(kp1[j].pt.x, kp1[j].pt.y), cal);
-            undist[j].pt = cv::Point2f(
-                (float)(vins_multi::FOCAL_LENGTH * (u.x() - cal.cx) / cal.fx + cx),
-                (float)(vins_multi::FOCAL_LENGTH * (u.y() - cal.cy) / cal.fy + cy));
-        }
-        map_.undist_train_kps[ti] = std::move(undist);
+        for (auto &f : futs)
+            f.get();
     }
+
     GLOC_INFO("[init] Train keypoint undistortion cache ready.");
 
     // Allocate one ring buffer per gloc-side camera module. The gloc-side
@@ -1234,7 +1257,8 @@ void Gloc::processLoop()
 
                     // Query position: Use optimized world pose if available, else local
                     Eigen::Vector3d q_pos = kf.P_local;
-                    if (opt_success) {
+                    if (opt_success)
+                    {
                         q_pos = vis_R * q_pos + vis_t;
                     }
 
@@ -1269,7 +1293,8 @@ void Gloc::processLoop()
 
                     // Query position: Use optimized world pose if available, else local
                     Eigen::Vector3d q_pos = kf.P_local;
-                    if (opt_success) {
+                    if (opt_success)
+                    {
                         q_pos = vis_R * q_pos + vis_t;
                     }
 
@@ -3693,6 +3718,11 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
     std::array<double, 3> t_map;
 
     bool snapped_local;
+    // Fixed seeds captured before any solve — used by the world prior.
+    // Must not be inside build_problem (lambda captures omega_map/t_map by
+    // ref so a seed taken there would track the variable being optimised).
+    std::array<double, 3> omega_map_seed{};
+    std::array<double, 3> t_map_seed{};
     {
         std::lock_guard<std::mutex> lk(snap_mutex_);
         snapped_local = snapped_;
@@ -3703,6 +3733,9 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
             const Vec3d ov = aa.axis() * aa.angle();
             omega_map = {ov.x(), ov.y(), ov.z()};
             t_map = {T_map_local_t_.x(), T_map_local_t_.y(), T_map_local_t_.z()};
+            // Capture fixed seeds NOW, before the lambda or any solve modifies them
+            omega_map_seed = omega_map;
+            t_map_seed = t_map;
         }
     }
 
@@ -3730,7 +3763,7 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
             const Vec3d oj = -(R_cw.transpose() * t_cw);
 
             const Mat3d R_bw = R_imu_cam * R_cw; // R_body_world
-            const Mat3d R_wb = R_bw.transpose();  // R_world_body
+            const Mat3d R_wb = R_bw.transpose(); // R_world_body
             const Vec3d t_wb = oj - R_cw.transpose() *
                                         R_imu_cam.transpose() * t_imu_cam;
 
@@ -3918,6 +3951,39 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
             // SetParameterLowerBound/UpperBound on Z breaks Schur elimination.
             prob.AddParameterBlock(t_map.data(), 3,
                                    new ceres::SubsetParameterization(3, {2}));
+        }
+
+        // ── World prior (snapped only) ────────────────────────────────────────
+        // Anchors omega_map and t_map to omega_map_seed / t_map_seed which
+        // were captured from T_map_local BEFORE this lambda was defined —
+        // so the seed is fixed and independent of the optimisation variable.
+        if (snapped_local && GLOC_W_WORLD_PRIOR > 0.0)
+        {
+            using PriorCost3 = GlocFixedRelPriorCost<3>;
+
+            // omega: 1 radian ≈ FOCAL_LENGTH pixels at unit depth — scale accordingly
+            const double omega_scale = vins_multi::FOCAL_LENGTH;
+            // t: 1 metre at typical depth D ≈ FOCAL_LENGTH/D pixels — use D=5m as ref
+            const double t_scale = vins_multi::FOCAL_LENGTH / 5.0;
+
+            // omega prior
+            {
+                auto *cost = new ceres::AutoDiffCostFunction<PriorCost3, 3, 3>(
+                    new PriorCost3(omega_map_seed.data(), omega_scale));
+                prob.AddResidualBlock(cost,
+                                      new ceres::ScaledLoss(nullptr, GLOC_W_WORLD_PRIOR,
+                                                            ceres::TAKE_OWNERSHIP),
+                                      omega_map.data());
+            }
+            // t prior
+            {
+                auto *cost = new ceres::AutoDiffCostFunction<PriorCost3, 3, 3>(
+                    new PriorCost3(t_map_seed.data(), t_scale));
+                prob.AddResidualBlock(cost,
+                                      new ceres::ScaledLoss(nullptr, GLOC_W_WORLD_PRIOR,
+                                                            ceres::TAKE_OWNERSHIP),
+                                      t_map.data());
+            }
         }
 
         for (int k = 0; k < N; ++k)

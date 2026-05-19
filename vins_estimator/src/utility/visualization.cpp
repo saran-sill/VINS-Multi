@@ -16,7 +16,8 @@ using namespace Eigen;
 namespace vins_multi
 {
 
-ros::Publisher pub_odometry, pub_latest_odometry, pub_latest_odometry_world;
+ros::Publisher pub_odometry, pub_latest_odometry, pub_latest_odometry_world,
+    pub_latest_odometry_raw;
 ros::Publisher pub_gloc_map_frustums, pub_gloc_map_path;
 ros::Publisher pub_gloc_opt_poses, pub_gloc_opt_path, pub_gloc_kf_status, pub_gloc_match_lines;
 ros::Publisher pub_gloc_vote_lines;
@@ -55,6 +56,7 @@ void registerPub(ros::NodeHandle &n)
 {
     pub_latest_odometry = n.advertise<nav_msgs::Odometry>("odomimu", 1000);
     pub_latest_odometry_world = n.advertise<nav_msgs::Odometry>("odomimu_world", 1000);
+    pub_latest_odometry_raw = n.advertise<nav_msgs::Odometry>("odomimu_raw", 1000);
 
     // Latched — published once after map load, any late subscriber still receives.
     pub_gloc_map_frustums = n.advertise<visualization_msgs::MarkerArray>(
@@ -377,46 +379,26 @@ void pubLatestOdometry(const Estimator &estimator)
 
     pub_latest_odometry.publish(odometry);
 
-    // ── World→odom TF at IMU rate ─────────────────────────────────────────────
-    // Broadcast at every IMU update so RViz can transform odomimu into world
-    // without extrapolation errors. Use try_lock to avoid blocking the IMU
-    // thread; fall back to the cached last-known transform on contention.
-    {
-        static Eigen::Matrix3d cached_R = Eigen::Matrix3d::Identity();
-        static Eigen::Vector3d cached_t = Eigen::Vector3d::Zero();
-        static bool cached_valid = false;
-        if (estimator.t_map_mutex_.try_lock())
-        {
-            cached_R = estimator.t_map_local_R_;
-            cached_t = estimator.t_map_local_t_;
-            cached_valid = estimator.t_map_snapped_;
-            estimator.t_map_mutex_.unlock();
-        }
-        if (cached_valid)
-            broadcastWorldOdomTF(
-                gloc::GLOC_USE_4DOF ? yawOnlyR(cached_R) : cached_R,
-                cached_t, odometry.header.stamp);
-    }
+    nav_msgs::Odometry odomimu_raw = odometry;
+    odomimu_raw.header.frame_id = "world";
+    pub_latest_odometry_raw.publish(odomimu_raw);
 
-    // ── World-frame odometry (odomimu_world) ──────────────────────────────────
-    // Published only when gloc has snapped a valid T_map_local.
-    // Convention:  X_world = T_map_local_R_ * X_local + T_map_local_t_
+    // ── World-frame odometry ──────────────────────────────────────────────────
+    // Both topics use: X_world = T_map_local_R_ * X_local + T_map_local_t_
+    // Before snap T_map_local is identity so world == odom.
     {
         std::lock_guard<std::mutex> lk(estimator.t_map_mutex_);
-        if (estimator.t_map_snapped_)
-        {
-            const Eigen::Matrix3d Rm = gloc::GLOC_USE_4DOF
-                                           ? yawOnlyR(estimator.t_map_local_R_)
-                                           : estimator.t_map_local_R_;
-            const Eigen::Vector3d &tm = estimator.t_map_local_t_;
+        const Eigen::Matrix3d &Rm = estimator.t_map_local_R_;
+        const Eigen::Vector3d &tm = estimator.t_map_local_t_;
 
+        const Eigen::Vector3d t_world = Rm * w_T_center + tm;
+        const Eigen::Matrix3d R_world = Rm * w_R_center;
+        const Eigen::Quaterniond q_world(R_world);
+
+        // odomimu_world — always published (was gated on t_map_snapped_)
+        {
             nav_msgs::Odometry odom_world = odometry;
             odom_world.header.frame_id = "world";
-
-            const Eigen::Vector3d t_world = Rm * w_T_center + tm;
-            const Eigen::Matrix3d R_world = Rm * w_R_center;
-            const Eigen::Quaterniond q_world(R_world);
-
             odom_world.pose.pose.position.x = t_world.x();
             odom_world.pose.pose.position.y = t_world.y();
             odom_world.pose.pose.position.z = t_world.z();
@@ -424,9 +406,26 @@ void pubLatestOdometry(const Estimator &estimator)
             odom_world.pose.pose.orientation.y = q_world.y();
             odom_world.pose.pose.orientation.z = q_world.z();
             odom_world.pose.pose.orientation.w = q_world.w();
-
             pub_latest_odometry_world.publish(odom_world);
         }
+    }
+
+    // ── World→odom TF at IMU rate ─────────────────────────────────────────────
+    // Broadcast at every IMU update so RViz can transform odomimu into world
+    // without extrapolation errors. Use try_lock to avoid blocking the IMU
+    // thread; fall back to the cached last-known transform on contention.
+    {
+        static Eigen::Matrix3d cached_R = Eigen::Matrix3d::Identity();
+        static Eigen::Vector3d cached_t = Eigen::Vector3d::Zero();
+        if (estimator.t_map_mutex_.try_lock())
+        {
+            cached_R = estimator.t_map_local_R_;
+            cached_t = estimator.t_map_local_t_;
+            estimator.t_map_mutex_.unlock();
+
+            broadcastWorldOdomTF(cached_R, cached_t, odometry.header.stamp);
+        }
+
     }
 
     last_pos = w_T_center;
@@ -769,9 +768,9 @@ void pubTF(const Estimator &estimator)
     // during bag replay or when gloc solves are slow.
     {
         std::lock_guard<std::mutex> lk(estimator.t_map_mutex_);
-        broadcastWorldOdomTF(
-            gloc::GLOC_USE_4DOF ? yawOnlyR(estimator.t_map_local_R_) : estimator.t_map_local_R_,
-            estimator.t_map_local_t_, stamp);
+        broadcastWorldOdomTF(estimator.t_map_local_R_,
+                             estimator.t_map_local_t_,
+                             stamp);
     }
     // body frame
     Vector3d correct_t;
@@ -1073,7 +1072,7 @@ void pubGlocMatchLines(
     m.id = 0;
     m.type = visualization_msgs::Marker::LINE_LIST;
     m.action = visualization_msgs::Marker::ADD;
-    m.scale.x = 0.1;
+    m.scale.x = 0.025;
     m.pose.orientation.w = 1.0;
 
     // Light blue
@@ -1121,7 +1120,7 @@ void pubGlocVoteLines(
     m.id = 0;
     m.type = visualization_msgs::Marker::LINE_LIST;
     m.action = visualization_msgs::Marker::ADD;
-    m.scale.x = 0.025;
+    m.scale.x = 0.02;
     m.pose.orientation.w = 1.0;
 
     // Yellow
@@ -1168,7 +1167,7 @@ void pubGlocCorrLines(
     m.id = 0;
     m.type = visualization_msgs::Marker::LINE_LIST;
     m.action = visualization_msgs::Marker::ADD;
-    m.scale.x = 0.08;
+    m.scale.x = 0.03;
     m.pose.orientation.w = 1.0;
 
     // Magenta

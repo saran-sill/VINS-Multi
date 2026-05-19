@@ -274,7 +274,7 @@ gloc_preprocess_sharpen_sigma: 1.0
 gloc_preprocess_sharpen_amount: 1.5
 
 # DBoW3 retrieval
-gloc_dbow3_max_results: 5
+gloc_dbow3_max_results: 3
 gloc_dbow3_min_score: 0.005
 
 # Consensus voting
@@ -284,7 +284,7 @@ gloc_vote_max_dist_m: 3.0          # reject candidates >XXm from current VINS po
 gloc_vote_max_matches: 2           # keep top-3 inlier matches per keyframe (default: 1)
 
 # ORB feature extraction
-gloc_orb_nfeatures: 1500
+gloc_orb_nfeatures: 1000
 gloc_orb_scale_factor: 1.2
 gloc_orb_nlevels: 3
 gloc_orb_edge_threshold: 31
@@ -316,9 +316,9 @@ gloc_min_pairs_first_snap: 3    # min valid slots for first snap (stricter)
 gloc_rel_pose_k: 2              # chain half-width (1 = adjacent only)
 gloc_w_epipolar: 1.0            # weight for Sampson epipolar term
 gloc_w_reproj: 1.0              # weight for inverse-depth reprojection term
-gloc_w_rel_pose: 200.0            # weight for relative local pose term
-gloc_w_world_prior: 0.0        # weight for world prior (when snapped)
-gloc_huber_delta: 5.0           # Huber loss delta (virtual pixels)
+gloc_w_rel_pose: 1.0            # weight for relative local pose term
+gloc_w_world_prior: 2.0        # weight for world prior (when snapped)
+gloc_huber_delta: 1.0           # Huber loss delta (virtual pixels)
 gloc_inlier_thresh_px: 10.0     # reprojection inlier threshold (virtual pixels)
 gloc_max_iters: 150             # main solver iterations
 gloc_init_iters: 20             # initialization pass iterations (before main solve)

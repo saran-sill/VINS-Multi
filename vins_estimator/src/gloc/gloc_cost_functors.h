@@ -637,3 +637,30 @@ struct GlocFixedRelEpipolarCost
         return true;
     }
 };
+
+// GlocFixedRelPriorCost
+//
+// Simple L2 prior: penalises a parameter block deviating from its seed.
+//   residual[i] = param[i] - seed[i]
+// Used in runOptimization_FixedRel to anchor omega_map and t_map.
+// ─────────────────────────────────────────────────────────────────────────────
+template <int N>
+struct GlocFixedRelPriorCost
+{
+    double seed[N];
+    double scale; // multiply residual to match reprojection pixel units
+
+    explicit GlocFixedRelPriorCost(const double *s, double scale_ = 1.0)
+        : scale(scale_)
+    {
+        std::copy(s, s + N, seed);
+    }
+
+    template <typename T>
+    bool operator()(const T *__restrict__ param, T *__restrict__ res) const
+    {
+        for (int i = 0; i < N; ++i)
+            res[i] = T(scale) * (param[i] - T(seed[i]));
+        return true;
+    }
+};
