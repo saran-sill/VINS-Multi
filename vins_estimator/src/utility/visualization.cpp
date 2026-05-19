@@ -8,6 +8,7 @@
  *******************************************************/
 
 #include "visualization.h"
+#include "../gloc/parameters.h"
 
 using namespace ros;
 using namespace Eigen;
@@ -303,6 +304,22 @@ void pubGlocMap(const gloc::Gloc &gloc)
              map_path.poses.size());
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// yawOnlyR
+//
+// Extracts the yaw component of a rotation matrix and returns a pure
+// yaw rotation (pitch = roll = 0). Used when GLOC_USE_4DOF is true to
+// ensure T_map_local_R_ is gravity-aligned before storing and broadcasting.
+//
+// Yaw is extracted as atan2(R(1,0), R(0,0)) — the rotation of the X axis
+// projected onto the world XY plane.
+// ─────────────────────────────────────────────────────────────────────────────
+static Eigen::Matrix3d yawOnlyR(const Eigen::Matrix3d &R)
+{
+    const double yaw = std::atan2(R(1, 0), R(0, 0));
+    return Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+}
+
 void pubLatestOdometry(const Estimator &estimator)
 {
 
@@ -373,7 +390,9 @@ void pubLatestOdometry(const Estimator &estimator)
             cached_t = estimator.t_map_local_t_;
             estimator.t_map_mutex_.unlock();
         }
-        broadcastWorldOdomTF(cached_R, cached_t, odometry.header.stamp);
+        broadcastWorldOdomTF(
+            gloc::GLOC_USE_4DOF ? yawOnlyR(cached_R) : cached_R,
+            cached_t, odometry.header.stamp);
     }
 
     // ── World-frame odometry (odomimu_world) ──────────────────────────────────
@@ -745,9 +764,9 @@ void pubTF(const Estimator &estimator)
     // during bag replay or when gloc solves are slow.
     {
         std::lock_guard<std::mutex> lk(estimator.t_map_mutex_);
-        broadcastWorldOdomTF(estimator.t_map_local_R_,
-                             estimator.t_map_local_t_,
-                             stamp);
+        broadcastWorldOdomTF(
+            gloc::GLOC_USE_4DOF ? yawOnlyR(estimator.t_map_local_R_) : estimator.t_map_local_R_,
+            estimator.t_map_local_t_, stamp);
     }
     // body frame
     Vector3d correct_t;

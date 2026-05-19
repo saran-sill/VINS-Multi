@@ -30,6 +30,7 @@
 #include <std_msgs/Header.h>
 #include <tf/transform_broadcaster.h>
 #include <visualization_msgs/Marker.h>
+#include "../utility/utility.h"
 
 namespace vins_multi
 {

@@ -230,9 +230,11 @@ static void buildUndistMap(const camodocal::CameraPtr &cam,
         // camodocal: k2,k3,k4,k5 → COLMAP dist: [k1,k2,k3,k4]
         colmap::CameraCalib cal;
         cal.model_id = 5;
-        cal.fx = p.mu();  cal.fy = p.mv();
-        cal.cx = p.u0();  cal.cy = p.v0();
-        cal.width  = W;
+        cal.fx = p.mu();
+        cal.fy = p.mv();
+        cal.cx = p.u0();
+        cal.cy = p.v0();
+        cal.width = W;
         cal.height = H;
         cal.dist = {p.k2(), p.k3(), p.k4(), p.k5()};
 
@@ -508,6 +510,35 @@ bool Gloc::init()
 
     if (!loadDatabase())
         return false;
+
+    // ── Precompute undistorted train keypoints ───────────────────────────────
+    GLOC_INFO("[init] Precomputing undistorted train keypoints for %zu images ...",
+              map_.feats.size());
+    map_.undist_train_kps.resize(map_.feats.size());
+    for (std::size_t ti = 0; ti < map_.feats.size(); ++ti)
+    {
+        const auto &kp1 = map_.feats[ti].keypoints;
+        auto cal_it = map_.calibs.find(map_.images[ti].camera_id);
+        if (cal_it == map_.calibs.end() || kp1.empty())
+        {
+            map_.undist_train_kps[ti] = kp1; // fallback: use raw
+            continue;
+        }
+        const colmap::CameraCalib &cal = cal_it->second;
+        const double cx = cal.width / 2.0;
+        const double cy = cal.height / 2.0;
+        std::vector<cv::KeyPoint> undist(kp1.size());
+        for (std::size_t j = 0; j < kp1.size(); ++j)
+        {
+            const Eigen::Vector2d u = colmap::undistort_point(
+                Eigen::Vector2d(kp1[j].pt.x, kp1[j].pt.y), cal);
+            undist[j].pt = cv::Point2f(
+                (float)(vins_multi::FOCAL_LENGTH * (u.x() - cal.cx) / cal.fx + cx),
+                (float)(vins_multi::FOCAL_LENGTH * (u.y() - cal.cy) / cal.fy + cy));
+        }
+        map_.undist_train_kps[ti] = std::move(undist);
+    }
+    GLOC_INFO("[init] Train keypoint undistortion cache ready.");
 
     // Allocate one ring buffer per gloc-side camera module. The gloc-side
     // unique_id is the index into GLOC_CAM_MODULES, which we mirror here so
@@ -829,7 +860,8 @@ void Gloc::onSnapshotChanged(const Snapshot &snapshot)
                     //            = R_map * dR * X_local_new_approx
                     // Simplified: just right-compose the delta
                     T_map_local_t_ = T_map_local_t_ + T_map_local_R_ * dt_mean;
-                    T_map_local_R_ = T_map_local_R_ * dR_mean;
+                    T_map_local_R_ = GLOC_USE_4DOF ? yawOnlyR(T_map_local_R_ * dR_mean)
+                                                   : T_map_local_R_ * dR_mean;
 
                     // Update common keyframes to new local poses;
                     // erase marginalized ones (no longer in window).
@@ -1088,7 +1120,7 @@ void Gloc::processLoop()
             vins_multi::pubGlocVoteLines(vote_pairs);
         }
 
-        runCorrespondences(working_set, working_snapshot_id);  // DEBUG: disabled
+        runCorrespondences(working_set, working_snapshot_id); // DEBUG: disabled
         writeBackToStateMap(working_set);
 
         // ── Correspondence line visualization (magenta, gloc/corr_lines) ─────
@@ -1126,7 +1158,7 @@ void Gloc::processLoop()
             vins_multi::pubGlocCorrLines(corr_pairs);
         }
 
-        // runOptimization(working_set);  // DEBUG: disabled
+        runOptimization(working_set); // DEBUG: disabled
     }
 
     GLOC_INFO("[processLoop] Exiting.");
@@ -1587,12 +1619,65 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
 // before geometric verification.
 // ─────────────────────────────────────────────────────────────────────────────
 
+// static void subsampleMatchesMinDist(const std::vector<cv::KeyPoint> &keypoints0,
+//                                     const std::vector<cv::DMatch> &matches_in,
+//                                     std::vector<cv::DMatch> &matches_out,
+//                                     const float min_dist_px)
+// {
+//     matches_out.clear();
+
+//     std::vector<cv::DMatch> sorted = matches_in;
+//     std::sort(sorted.begin(), sorted.end(),
+//               [](const cv::DMatch &a, const cv::DMatch &b) {
+//                   return a.distance < b.distance;
+//               });
+
+//     std::vector<cv::Point2f> kept;
+//     kept.reserve(sorted.size());
+
+//     for (const auto &m : sorted)
+//     {
+//         const cv::Point2f &pt = keypoints0[m.queryIdx].pt;
+
+//         bool too_close = false;
+//         for (const auto &k : kept)
+//         {
+//             const float dx = pt.x - k.x;
+//             const float dy = pt.y - k.y;
+//             if (dx * dx + dy * dy < min_dist_px * min_dist_px)
+//             {
+//                 too_close = true;
+//                 break;
+//             }
+//         }
+
+//         if (!too_close)
+//         {
+//             matches_out.push_back(m);
+//             kept.push_back(pt);
+//         }
+//     }
+// }
+
+// subsampleMatchesMinDist  (file-local helper)
+//
+// Greedy spatial subsampling: sorts matches by descriptor distance (best
+// first) then keeps a match only if its query keypoint is at least
+// min_dist_px pixels away from every already-kept keypoint.  This spreads
+// correspondences across the image and removes redundant clustered matches
+// before geometric verification.
+//
+// Grid-accelerated: O(N) instead of the original O(N*K) linear scan.
+// ─────────────────────────────────────────────────────────────────────────────
+
 static void subsampleMatchesMinDist(const std::vector<cv::KeyPoint> &keypoints0,
                                     const std::vector<cv::DMatch> &matches_in,
                                     std::vector<cv::DMatch> &matches_out,
                                     const float min_dist_px)
 {
     matches_out.clear();
+    if (matches_in.empty())
+        return;
 
     std::vector<cv::DMatch> sorted = matches_in;
     std::sort(sorted.begin(), sorted.end(),
@@ -1600,29 +1685,27 @@ static void subsampleMatchesMinDist(const std::vector<cv::KeyPoint> &keypoints0,
                   return a.distance < b.distance;
               });
 
-    std::vector<cv::Point2f> kept;
-    kept.reserve(sorted.size());
+    const int cell = std::max(1, static_cast<int>(min_dist_px));
+    const int W_cells = 4096 / cell + 2; // generous fixed width; no image size available here
+    std::unordered_set<int> occupied;
+    occupied.reserve(sorted.size());
 
     for (const auto &m : sorted)
     {
         const cv::Point2f &pt = keypoints0[m.queryIdx].pt;
+        const int cx = static_cast<int>(pt.x) / cell;
+        const int cy = static_cast<int>(pt.y) / cell;
 
         bool too_close = false;
-        for (const auto &k : kept)
-        {
-            const float dx = pt.x - k.x;
-            const float dy = pt.y - k.y;
-            if (dx * dx + dy * dy < min_dist_px * min_dist_px)
-            {
-                too_close = true;
-                break;
-            }
-        }
+        for (int dy = -1; dy <= 1 && !too_close; ++dy)
+            for (int dx = -1; dx <= 1 && !too_close; ++dx)
+                if (occupied.count((cy + dy) * W_cells + (cx + dx)))
+                    too_close = true;
 
         if (!too_close)
         {
             matches_out.push_back(m);
-            kept.push_back(pt);
+            occupied.insert(cy * W_cells + cx);
         }
     }
 }
@@ -1635,13 +1718,31 @@ static void subsampleMatchesMinDist(const std::vector<cv::KeyPoint> &keypoints0,
 // verification (RANSAC fundamental matrix), and store the surviving 2D-2D
 // point pairs (both distorted and undistorted).  Slots that fail any check
 // have best_train_idx reset to -1 and are marked pipeline_done.
+//
+// Parallelised over keyframes: each kf_state is independent (reads map_
+// which is const after init, writes only its own slots).  A thread_local
+// FLANN matcher avoids contention on the shared index internal state.
 // ─────────────────────────────────────────────────────────────────────────────
 
 void Gloc::runCorrespondences(std::vector<KeyframeGlocState> &working_set,
                               uint64_t snapshot_id)
 {
-    for (auto &kf_state : working_set)
-    {
+    // One FLANN matcher per OS thread — built lazily, zero lock contention.
+    // Mirrors the GLOC_USE_GMS branch: when GMS is off we always use FLANN+Hamming.
+    auto make_matcher = []() -> std::unique_ptr<PointFeatureMatcher> {
+        if (GLOC_USE_GMS)
+            return std::make_unique<PointFeatureMatcherGMS>(cv::NORM_HAMMING,
+                                                            GLOC_GMS_WITH_ROTATION,
+                                                            GLOC_GMS_WITH_SCALE,
+                                                            static_cast<double>(GLOC_GMS_THRESHOLD));
+        return std::make_unique<PointFeatureMatcherFLANN>(cv::NORM_HAMMING);
+    };
+
+    // Per-keyframe work — fully independent, safe to run in parallel.
+    auto process_kf = [&](KeyframeGlocState &kf_state) {
+        // Thread-local matcher: one FLANN index per thread, no mutex needed.
+        thread_local std::unique_ptr<PointFeatureMatcher> tl_matcher = make_matcher();
+
         for (std::size_t g = 0; g < kf_state.per_gloc.size(); ++g)
         {
             auto &slot = kf_state.per_gloc[g];
@@ -1652,8 +1753,7 @@ void Gloc::runCorrespondences(std::vector<KeyframeGlocState> &working_set,
                 continue;
             if (slot.best_train_idx < 0)
             {
-                // Voted out - save debug image showing the top DBoW candidate
-                // (even though it was rejected) so we can inspect the match.
+                // Voted out — optionally save debug image of the top DBoW candidate.
                 if (!GLOC_DEBUG_FOLDER.empty() && !slot.image.empty() &&
                     !slot.dbow_candidates.empty())
                 {
@@ -1733,45 +1833,42 @@ void Gloc::runCorrespondences(std::vector<KeyframeGlocState> &working_set,
                                            ? train_feats.beblid_descriptors
                                            : train_feats.orb_descriptors;
 
-                // ── Time: GMS matching ────────────────────────────────────────
-                auto t_gms0 = std::chrono::steady_clock::now();
+                // ── Matching (FLANN/LSH + Lowe ratio) ────────────────────────
+                auto t_match0 = std::chrono::steady_clock::now();
 
-                // Single-direction knnMatch + Lowe ratio — half the cost of
-                // robustMatch (which does two passes for symmetric filtering).
-                // Geometric verification below handles residual outliers.
                 std::vector<cv::DMatch> matches;
                 std::vector<std::vector<cv::DMatch>> knn_matches;
-                feat_matcher_->knnMatch(desc0_match, desc1, knn_matches, 2);
+                tl_matcher->knnMatch(desc0_match, desc1, knn_matches, 2);
                 for (const auto &m : knn_matches)
                 {
                     if (m.size() < 2)
                         continue;
-                    if (m[1].distance < 1e-6f) // degenerate — skip (LSH artefact)
+                    if (m[1].distance < 1e-6f) // degenerate — LSH artefact
                         continue;
                     if (m[0].distance < GLOC_MATCH_LOWE_RATIO * m[1].distance &&
                         m[0].distance <= GLOC_MATCH_MAX_DIST)
                         matches.push_back(m[0]);
                 }
 
-                auto t_gms1 = std::chrono::steady_clock::now();
-                const int n_after_gms = static_cast<int>(matches.size());
+                auto t_match1 = std::chrono::steady_clock::now();
+                const int n_after_lowe = static_cast<int>(matches.size());
                 GLOC_DEBUG("[corr_time] kf_t=%.4f g=%zu train=%zu [%d/%d]: "
-                           "gms=%.1fms q_kp=%zu t_kp=%zu after_gms=%d",
+                           "match=%.1fms q_kp=%zu t_kp=%zu after_lowe=%d",
                            kf_state.t_kf, g, ti, match_k + 1,
                            static_cast<int>(slot.voted_train_idxs.size()),
-                           std::chrono::duration<double, std::milli>(t_gms1 - t_gms0).count(),
-                           kp0.size(), train_feats.keypoints.size(), n_after_gms);
+                           std::chrono::duration<double, std::milli>(t_match1 - t_match0).count(),
+                           kp0.size(), train_feats.keypoints.size(), n_after_lowe);
 
                 if (matches.empty())
                 {
-                    GLOC_DEBUG("[corr] kf_t=%.4f g=%zu train=%zu: 0 matches after GMS - skip",
+                    GLOC_DEBUG("[corr] kf_t=%.4f g=%zu train=%zu: 0 matches after Lowe - skip",
                                kf_state.t_kf, g, ti);
                     slot.multi_pt_pairs_distorted.emplace_back();
                     slot.multi_pt_pairs_undistorted.emplace_back();
                     continue;
                 }
 
-                // ── Time: spatial subsampling ─────────────────────────────────
+                // ── Spatial subsampling (grid-accelerated O(N)) ───────────────
                 auto t_sub0 = std::chrono::steady_clock::now();
 
                 if (GLOC_SUBSAMPLE_MIN_DIST_PX > 0.0f)
@@ -1796,42 +1893,25 @@ void Gloc::runCorrespondences(std::vector<KeyframeGlocState> &working_set,
                     continue;
                 }
 
-                // ── Time: undistort train keypoints ───────────────────────────
+                // ── Undistort train keypoints (precomputed cache, O(1) lookup) ─
                 auto t_tu0 = std::chrono::steady_clock::now();
 
-                auto tcal_it = map_.calibs.find(map_.images[ti].camera_id);
-                if (tcal_it == map_.calibs.end())
+                if (ti >= map_.undist_train_kps.size())
                 {
-                    GLOC_WARN("[corr] no calibration for train camera_id=%u",
-                              map_.images[ti].camera_id);
+                    GLOC_WARN("[corr] undist_train_kps cache missing for train_idx=%zu - skip", ti);
                     slot.multi_pt_pairs_distorted.emplace_back();
                     slot.multi_pt_pairs_undistorted.emplace_back();
                     continue;
                 }
-                const colmap::CameraCalib &train_cal = tcal_it->second;
-                const double train_cx = train_cal.width / 2.0;
-                const double train_cy = train_cal.height / 2.0;
-                const auto &kp1 = train_feats.keypoints;
-                std::vector<cv::KeyPoint> undist_kp1(kp1.size());
-                for (const auto &m : matches)
-                {
-                    const Eigen::Vector2d u1 = colmap::undistort_point(
-                        Eigen::Vector2d(kp1[m.trainIdx].pt.x, kp1[m.trainIdx].pt.y),
-                        train_cal);
-                    const double xn = (u1.x() - train_cal.cx) / train_cal.fx;
-                    const double yn = (u1.y() - train_cal.cy) / train_cal.fy;
-                    undist_kp1[m.trainIdx].pt = cv::Point2f(
-                        (float)(vins_multi::FOCAL_LENGTH * xn + train_cx),
-                        (float)(vins_multi::FOCAL_LENGTH * yn + train_cy));
-                }
+                const std::vector<cv::KeyPoint> &undist_kp1 = map_.undist_train_kps[ti];
 
                 auto t_tu1 = std::chrono::steady_clock::now();
                 GLOC_DEBUG("[corr_time] kf_t=%.4f g=%zu train=%zu: "
-                           "undistort_train=%.1fms",
+                           "undistort_train=%.1fms (cached)",
                            kf_state.t_kf, g, ti,
                            std::chrono::duration<double, std::milli>(t_tu1 - t_tu0).count());
 
-                // ── Time: geometric verification ──────────────────────────────
+                // ── Geometric verification (RANSAC F-matrix) ──────────────────
                 auto t_geom0 = std::chrono::steady_clock::now();
 
                 PointFeatureMatcher::geometricTest(undist_kp0, undist_kp1, matches,
@@ -1849,8 +1929,8 @@ void Gloc::runCorrespondences(std::vector<KeyframeGlocState> &working_set,
                 if (static_cast<int>(matches.size()) < GLOC_MATCH_MIN_INLIERS)
                 {
                     GLOC_DEBUG("[corr] kf_t=%.4f g=%zu train=%zu: "
-                               "gms=%d -> geom=%d (need %d) - REJECT",
-                               kf_state.t_kf, g, ti, n_after_gms,
+                               "lowe=%d -> geom=%d (need %d) - REJECT",
+                               kf_state.t_kf, g, ti, n_after_lowe,
                                static_cast<int>(matches.size()), GLOC_MATCH_MIN_INLIERS);
                     slot.multi_pt_pairs_distorted.emplace_back();
                     slot.multi_pt_pairs_undistorted.emplace_back();
@@ -1859,14 +1939,16 @@ void Gloc::runCorrespondences(std::vector<KeyframeGlocState> &working_set,
                         slot.best_train_idx = -1;
                         saveDebugImages(GLOC_DEBUG_FOLDER, snapshot_id,
                                         kf_state.t_kf, g, ti,
-                                        slot.preprocessed_image, kp0, kp1, matches,
+                                        slot.preprocessed_image, kp0,
+                                        train_feats.keypoints, matches,
                                         "FEW_INLIERS_" + std::to_string(matches.size()),
                                         map_);
                     }
                     continue;
                 }
 
-                // Store correspondences
+                // ── Store correspondences ─────────────────────────────────────
+                const auto &kp1 = train_feats.keypoints;
                 std::vector<std::pair<Eigen::Vector2f, Eigen::Vector2f>> pd, pu;
                 PointFeatureMatcher::matchesToPointCorrespondences(
                     kp0, kp1, matches, pd, 1.0f);
@@ -1897,7 +1979,17 @@ void Gloc::runCorrespondences(std::vector<KeyframeGlocState> &working_set,
 
             slot.pipeline_done = true;
         }
-    }
+    };
+
+    // ── Dispatch one task per keyframe ────────────────────────────────────────
+    // Each task owns its kf_state slots exclusively; map_ is read-only after
+    // init(); GLOC_* params are const globals — no shared mutable state.
+    std::vector<std::future<void>> futures;
+    futures.reserve(working_set.size());
+    for (auto &kf_state : working_set)
+        futures.push_back(std::async(std::launch::async, process_kf, std::ref(kf_state)));
+    for (auto &f : futures)
+        f.get();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3278,7 +3370,8 @@ bool Gloc::runOptimization_4DOF(std::vector<KeyframeGlocState> &working_set)
 
     {
         std::lock_guard<std::mutex> lk(snap_mutex_);
-        T_map_local_R_ = q_mean.toRotationMatrix();
+        T_map_local_R_ = GLOC_USE_4DOF ? yawOnlyR(q_mean.toRotationMatrix())
+                                       : q_mean.toRotationMatrix();
         T_map_local_t_ = t_acc / w_total;
         snapped_ = true;
         last_snap_poses_.clear();

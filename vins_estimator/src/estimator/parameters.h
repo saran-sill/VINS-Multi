@@ -49,7 +49,7 @@ enum NoiseOrder
     O_GW = 9
 };
 
-const double FOCAL_LENGTH = 460.0;
+const double FOCAL_LENGTH = 530.0; // 460.0;
 const double FRAME_PRIORITY_CONST = 20.0;
 
 #define UNIT_SPHERE_ERROR

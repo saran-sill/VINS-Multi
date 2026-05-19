@@ -23,6 +23,7 @@
 #include "gloc_cost_functors.h"
 #include "parameters.h"
 #include "point_features.h"
+#include "../utility/utility.h"
 
 // ── Gloc-local logging macros ─────────────────────────────────────────────────
 //
@@ -210,6 +211,11 @@ struct Map
 
     // camera_id → rig extrinsic (R_cam_rig, t_cam_rig)
     std::map<uint32_t, colmap::CamRigTransform> cam_rig_map;
+
+    // Precomputed at init: undistorted + normalised train keypoints, index-aligned
+    // with feats[]. Same virtual focal length as query (vins_multi::FOCAL_LENGTH).
+    // undist_train_kps[ti][j].pt is ready for geometricTest directly.
+    std::vector<std::vector<cv::KeyPoint>> undist_train_kps;
 
     // ── DBoW3 ────────────────────────────────────────────────────────────────
 
