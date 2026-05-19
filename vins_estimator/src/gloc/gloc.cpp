@@ -3676,7 +3676,7 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
     for (const auto &kf : working_set)
         for (const auto &slot : kf.per_gloc)
             if (slot.pipeline_done && slot.best_train_idx >= 0 &&
-                !slot.pt_pairs_undistorted.empty())
+                !slot.multi_pt_pairs_undistorted.empty())
                 ++valid_slot_count;
 
     const int min_pairs = snapped_ ? GLOC_MIN_PAIRS : GLOC_MIN_PAIRS_FIRST_SNAP;
@@ -3720,7 +3720,7 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
         for (int i = 0; i < X && !seeded; ++i)
         {
             const auto &slot0 = working_set[i].per_gloc[0];
-            if (slot0.best_train_idx < 0)
+            if (slot0.best_train_idx < 0 || slot0.multi_pt_pairs_undistorted.empty())
                 continue;
 
             const colmap::Image &img =
@@ -3730,7 +3730,7 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
             const Vec3d oj = -(R_cw.transpose() * t_cw);
 
             const Mat3d R_bw = R_imu_cam * R_cw; // R_body_world
-            const Mat3d R_wb = R_bw.transpose(); // R_world_body
+            const Mat3d R_wb = R_bw.transpose();  // R_world_body
             const Vec3d t_wb = oj - R_cw.transpose() *
                                         R_imu_cam.transpose() * t_imu_cam;
 
@@ -3738,12 +3738,14 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
             const Vec3d P_l = working_set[i].P_local;
 
             const Mat3d R_ml = R_wb * R_lb.transpose(); // R_map_local
-            const Vec3d t_ml = t_wb - R_ml * P_l;
-
-            const Eigen::AngleAxisd aa(R_ml);
+            const Mat3d R_ml_seed = use_4dof ? yawOnlyR(R_ml) : R_ml;
+            const Vec3d t_ml_seed = use_4dof ? (t_wb - R_ml_seed * P_l)
+                                             : (t_wb - R_ml * P_l);
+            const Eigen::AngleAxisd aa(R_ml_seed);
             const Vec3d ov = aa.axis() * aa.angle();
             omega_map = {ov.x(), ov.y(), ov.z()};
-            t_map = {t_ml.x(), t_ml.y(), t_ml.z()};
+            t_map = {t_ml_seed.x(), t_ml_seed.y(), t_ml_seed.z()};
+
             seeded = true;
         }
         if (!seeded)
@@ -3752,6 +3754,9 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
             return false;
         }
     }
+
+    GLOC_DEBUG("[opt_fr] seed t=[%.2f %.2f %.2f] snapped=%d",
+               t_map[0], t_map[1], t_map[2], (int)snapped_local);
 
     // ── 3. Flatten observations ───────────────────────────────────────────────
     struct FlatObs
@@ -3811,13 +3816,12 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
                     {
                         R_lb_arr[r * 3 + c] = R_lb(r, c);
                         R_j_arr[r * 3 + c] = R_j(r, c);
-                        Rcr_arr[r * 3 + c] = R_cam_imu(r, c); // Now strictly R_cam_rig (Row-Major)
+                        Rcr_arr[r * 3 + c] = R_cam_imu(r, c);
                     }
                 t_j_arr[0] = t_j.x();
                 t_j_arr[1] = t_j.y();
                 t_j_arr[2] = t_j.z();
-
-                tcr_arr[0] = t_cam_imu.x(); // Now strictly t_cam_rig
+                tcr_arr[0] = t_cam_imu.x();
                 tcr_arr[1] = t_cam_imu.y();
                 tcr_arr[2] = t_cam_imu.z();
 
@@ -3886,7 +3890,6 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
     ceres::Solver::Options solver_opts;
     solver_opts.minimizer_type = ceres::TRUST_REGION;
     solver_opts.trust_region_strategy_type = ceres::LEVENBERG_MARQUARDT;
-    // Single variable block (6 or 4 DOF) + N rho blocks: always small enough for DENSE_SCHUR
     solver_opts.linear_solver_type = ceres::DENSE_SCHUR;
     solver_opts.preconditioner_type = ceres::JACOBI;
     solver_opts.function_tolerance = 1e-8;
@@ -3895,24 +3898,26 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
     solver_opts.minimizer_progress_to_stdout = false;
     solver_opts.num_threads = 1;
 
-    ceres::HuberLoss huber_loss(GLOC_HUBER_DELTA);
+    // Use DO_NOT_TAKE_OWNERSHIP so huber_loss (stack) is shared safely across
+    // multiple ceres::Problem instances (init pass + main solve).
+    // ScaledLoss is also stack-allocated per build_problem call via lambda capture.
     ceres::Problem::Options prob_opts;
-    prob_opts.loss_function_ownership = ceres::DO_NOT_TAKE_OWNERSHIP;
+    // prob_opts.loss_function_ownership = ceres::DO_NOT_TAKE_OWNERSHIP;
 
     auto build_problem = [&](ceres::Problem &prob,
                              ceres::ParameterBlockOrdering *ord,
                              bool add_epi) {
-        // One pose block (omega_map), optionally yaw-only
         ord->AddElementToGroup(omega_map.data(), 1);
         ord->AddElementToGroup(t_map.data(), 1);
+
         if (use_4dof)
         {
+            // Fix t_map Z: 4-DOF solves XY+yaw only.
             prob.AddParameterBlock(omega_map.data(), 3, new YawOnlyParameterization());
-            // Fix t_map Z: 4-DOF solves XY+yaw only. Z is trusted from the
-            // VINS-derived seed and must not be changed by the optimizer
-            // (2D reprojection cost cannot reliably recover metric Z).
-            prob.SetParameterLowerBound(t_map.data(), 2, t_map[2]);
-            prob.SetParameterUpperBound(t_map.data(), 2, t_map[2]);
+            // SubsetParameterization fixes Z (index 2) — compatible with DENSE_SCHUR.
+            // SetParameterLowerBound/UpperBound on Z breaks Schur elimination.
+            prob.AddParameterBlock(t_map.data(), 3,
+                                   new ceres::SubsetParameterization(3, {2}));
         }
 
         for (int k = 0; k < N; ++k)
@@ -3922,9 +3927,10 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
                 auto *cost = new ceres::AutoDiffCostFunction<
                     GlocFixedRelReprojCost, 2, 3, 3, 1>(
                     new GlocFixedRelReprojCost(flat_obs[k].rep));
-                auto *scaled = new ceres::ScaledLoss(
-                    &huber_loss, GLOC_W_REPROJ, ceres::DO_NOT_TAKE_OWNERSHIP);
-                prob.AddResidualBlock(cost, scaled,
+                auto *loss = new ceres::ScaledLoss(
+                    new ceres::HuberLoss(GLOC_HUBER_DELTA),
+                    GLOC_W_REPROJ, ceres::TAKE_OWNERSHIP);
+                prob.AddResidualBlock(cost, loss,
                                       omega_map.data(), t_map.data(), &rhos[k]);
                 prob.SetParameterLowerBound(&rhos[k], 0, 1.0 / kMaxDepthM);
                 ord->AddElementToGroup(&rhos[k], 0);
@@ -3934,9 +3940,10 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
                 auto *cost = new ceres::AutoDiffCostFunction<
                     GlocFixedRelEpipolarCost, 1, 3, 3>(
                     new GlocFixedRelEpipolarCost(flat_obs[k].epi));
-                auto *scaled = new ceres::ScaledLoss(
-                    &huber_loss, GLOC_W_EPIPOLAR, ceres::DO_NOT_TAKE_OWNERSHIP);
-                prob.AddResidualBlock(cost, scaled, omega_map.data(), t_map.data());
+                auto *loss = new ceres::ScaledLoss(
+                    new ceres::HuberLoss(GLOC_HUBER_DELTA),
+                    GLOC_W_EPIPOLAR, ceres::TAKE_OWNERSHIP);
+                prob.AddResidualBlock(cost, loss, omega_map.data(), t_map.data());
             }
         }
     };
@@ -3973,6 +3980,10 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
             ceres::Problem init_prob(prob_opts);
             auto *init_ord = new ceres::ParameterBlockOrdering;
             build_problem(init_prob, init_ord, /*add_epi=*/true);
+
+            if (yk == 0)
+                GLOC_WARN("[opt_fr] W_REPROJ=%.2f W_EPIPOLAR=%.2f N=%d num_residuals=%d",
+                          GLOC_W_REPROJ, GLOC_W_EPIPOLAR, N, init_prob.NumResiduals());
 
             ceres::Solver::Options init_opts = solver_opts;
             init_opts.linear_solver_ordering.reset(init_ord);
@@ -4042,13 +4053,13 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
     {
         std::lock_guard<std::mutex> lk(snap_mutex_);
         T_map_local_R_ = use_4dof ? yawOnlyR(R_ml) : R_ml;
+
         // When stripping pitch/roll, recompute t_ml consistently with the
         // new rotation using the first valid keyframe as anchor so the
         // world position of that keyframe is preserved.
         if (use_4dof)
         {
             const Mat3d R_stripped = T_map_local_R_;
-            // Find first keyframe with valid correspondence to use as anchor
             for (int i = 0; i < X; ++i)
             {
                 const auto &kf = working_set[i];
@@ -4058,9 +4069,6 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
                         w += static_cast<double>(slot.pt_pairs_undistorted.size());
                 if (w < 1.0)
                     continue;
-                // t_world_body_i from optimized omega_map/t_map (consistent with R_ml)
-                // Recompute: t_map_new = t_world_body_i - R_stripped * P_local_i
-                // where t_world_body_i = R_ml * P_local_i + t_ml (original)
                 const Vec3d t_world_body_i = R_ml * kf.P_local + t_ml;
                 T_map_local_t_ = t_world_body_i - R_stripped * kf.P_local;
                 break;

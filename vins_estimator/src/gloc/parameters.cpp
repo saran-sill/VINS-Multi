@@ -119,7 +119,11 @@ void read_if<bool>(const cv::FileStorage &fs,
         out = static_cast<int>(n) != 0;
     else if (n.isString())
     {
-        const std::string s = static_cast<std::string>(n);
+        std::string s = static_cast<std::string>(n);
+        // Trim at first whitespace or '#'
+        const auto cut = s.find_first_of(" \t#");
+        if (cut != std::string::npos)
+            s = s.substr(0, cut);
         out = (s == "true" || s == "1" || s == "yes");
     }
 }

@@ -384,15 +384,18 @@ void pubLatestOdometry(const Estimator &estimator)
     {
         static Eigen::Matrix3d cached_R = Eigen::Matrix3d::Identity();
         static Eigen::Vector3d cached_t = Eigen::Vector3d::Zero();
+        static bool cached_valid = false;
         if (estimator.t_map_mutex_.try_lock())
         {
             cached_R = estimator.t_map_local_R_;
             cached_t = estimator.t_map_local_t_;
+            cached_valid = estimator.t_map_snapped_;
             estimator.t_map_mutex_.unlock();
         }
-        broadcastWorldOdomTF(
-            gloc::GLOC_USE_4DOF ? yawOnlyR(cached_R) : cached_R,
-            cached_t, odometry.header.stamp);
+        if (cached_valid)
+            broadcastWorldOdomTF(
+                gloc::GLOC_USE_4DOF ? yawOnlyR(cached_R) : cached_R,
+                cached_t, odometry.header.stamp);
     }
 
     // ── World-frame odometry (odomimu_world) ──────────────────────────────────
@@ -402,7 +405,9 @@ void pubLatestOdometry(const Estimator &estimator)
         std::lock_guard<std::mutex> lk(estimator.t_map_mutex_);
         if (estimator.t_map_snapped_)
         {
-            const Eigen::Matrix3d &Rm = estimator.t_map_local_R_;
+            const Eigen::Matrix3d Rm = gloc::GLOC_USE_4DOF
+                                           ? yawOnlyR(estimator.t_map_local_R_)
+                                           : estimator.t_map_local_R_;
             const Eigen::Vector3d &tm = estimator.t_map_local_t_;
 
             nav_msgs::Odometry odom_world = odometry;
