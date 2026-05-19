@@ -2395,8 +2395,11 @@ bool Gloc::runOptimization_6DOF(std::vector<KeyframeGlocState> &working_set)
                 const Vec3d o_j = -(R_j.transpose() * t_j); // train centre in world
 
                 // Cam extrinsic: R_cam_body, t_cam_body from imu_T_cam
-                const Mat3d R_cb = vins_multi::GLOC_CAM_MODULES[g].ric_[0].toRotationMatrix();
-                const Vec3d t_cb = vins_multi::GLOC_CAM_MODULES[g].tic_[0];
+                const Mat3d R_imu_cam = vins_multi::GLOC_CAM_MODULES[g].ric_[0].toRotationMatrix();
+                const Vec3d t_imu_cam = vins_multi::GLOC_CAM_MODULES[g].tic_[0];
+
+                const Mat3d R_cam_imu = R_imu_cam.transpose();
+                const Vec3d t_cam_imu = -R_cam_imu * t_imu_cam;
 
                 // Virtual camera intrinsics
                 const double fx_q = vins_multi::FOCAL_LENGTH;
@@ -2410,14 +2413,15 @@ bool Gloc::runOptimization_6DOF(std::vector<KeyframeGlocState> &working_set)
                     for (int c = 0; c < 3; ++c)
                     {
                         R_j_arr[r * 3 + c] = R_j(r, c);
-                        Rcr_arr[r * 3 + c] = R_cb(r, c);
+                        Rcr_arr[r * 3 + c] = R_cam_imu(r, c);
                     }
                 t_j_arr[0] = t_j.x();
                 t_j_arr[1] = t_j.y();
                 t_j_arr[2] = t_j.z();
-                tcr_arr[0] = t_cb.x();
-                tcr_arr[1] = t_cb.y();
-                tcr_arr[2] = t_cb.z();
+
+                tcr_arr[0] = t_cam_imu.x();
+                tcr_arr[1] = t_cam_imu.y();
+                tcr_arr[2] = t_cam_imu.z();
 
                 for (const auto &[pq, pt] : slot.multi_pt_pairs_undistorted[match_k])
                 {
@@ -2912,9 +2916,12 @@ bool Gloc::runOptimization_6DOF(std::vector<KeyframeGlocState> &working_set)
 
                     // Query camera position in world:
                     // o_query = R_world_body * (-t_cam_body) + t_world_body
-                    const Mat3d R_cb = vins_multi::GLOC_CAM_MODULES[g].ric_[0].toRotationMatrix();
-                    const Vec3d t_cb = vins_multi::GLOC_CAM_MODULES[g].tic_[0];
-                    const Vec3d o_query = R_world_body * (-t_cb) + t_world_body;
+                    const Mat3d R_imu_cam = vins_multi::GLOC_CAM_MODULES[g].ric_[0].toRotationMatrix();
+                    const Vec3d t_imu_cam = vins_multi::GLOC_CAM_MODULES[g].tic_[0];
+
+                    // camera centre in body frame is t_imu_cam (position of cam in body frame)
+                    // camera centre in world:
+                    const Vec3d o_query = R_world_body * t_imu_cam + t_world_body;
 
                     // Train camera centre in world
                     const std::size_t ti =
@@ -3159,8 +3166,13 @@ bool Gloc::runOptimization_4DOF(std::vector<KeyframeGlocState> &working_set)
                 const Mat3d R_j = train_img.q_c_w.toRotationMatrix();
                 const Vec3d t_j = train_img.t_c_w;
                 const Vec3d o_j = -(R_j.transpose() * t_j);
-                const Mat3d R_cb = vins_multi::GLOC_CAM_MODULES[g].ric_[0].toRotationMatrix();
-                const Vec3d t_cb = vins_multi::GLOC_CAM_MODULES[g].tic_[0];
+
+                const Mat3d R_imu_cam = vins_multi::GLOC_CAM_MODULES[g].ric_[0].toRotationMatrix();
+                const Vec3d t_imu_cam = vins_multi::GLOC_CAM_MODULES[g].tic_[0];
+
+                const Mat3d R_cam_imu = R_imu_cam.transpose();
+                const Vec3d t_cam_imu = -R_cam_imu * t_imu_cam;
+
                 const double fx_q = vins_multi::FOCAL_LENGTH;
                 const double fy_q = vins_multi::FOCAL_LENGTH;
                 const double cx_q = slot.query_feats.image_size.width / 2.0;
@@ -3171,14 +3183,15 @@ bool Gloc::runOptimization_4DOF(std::vector<KeyframeGlocState> &working_set)
                     for (int c = 0; c < 3; ++c)
                     {
                         R_j_arr[r * 3 + c] = R_j(r, c);
-                        Rcr_arr[r * 3 + c] = R_cb(r, c);
+                        Rcr_arr[r * 3 + c] = R_cam_imu(r, c);
                     }
                 t_j_arr[0] = t_j.x();
                 t_j_arr[1] = t_j.y();
                 t_j_arr[2] = t_j.z();
-                tcr_arr[0] = t_cb.x();
-                tcr_arr[1] = t_cb.y();
-                tcr_arr[2] = t_cb.z();
+
+                tcr_arr[0] = t_cam_imu.x();
+                tcr_arr[1] = t_cam_imu.y();
+                tcr_arr[2] = t_cam_imu.z();
 
                 for (const auto &[pq, pt] : slot.multi_pt_pairs_undistorted[match_k])
                 {
@@ -3595,9 +3608,14 @@ bool Gloc::runOptimization_4DOF(std::vector<KeyframeGlocState> &working_set)
                     const auto &slot = working_set[i].per_gloc[g];
                     if (!slot.pipeline_done || slot.best_train_idx < 0)
                         continue;
-                    const Mat3d R_cb = vins_multi::GLOC_CAM_MODULES[g].ric_[0].toRotationMatrix();
-                    const Vec3d t_cb = vins_multi::GLOC_CAM_MODULES[g].tic_[0];
-                    const Vec3d o_query = R_world_body * (-t_cb) + t_world_body;
+
+                    const Mat3d R_imu_cam = vins_multi::GLOC_CAM_MODULES[g].ric_[0].toRotationMatrix();
+                    const Vec3d t_imu_cam = vins_multi::GLOC_CAM_MODULES[g].tic_[0];
+
+                    // camera centre in body frame is t_imu_cam (position of cam in body frame)
+                    // camera centre in world:
+                    const Vec3d o_query = R_world_body * t_imu_cam + t_world_body;
+
                     const std::size_t ti = static_cast<std::size_t>(slot.best_train_idx);
                     const colmap::Image &train_img = map_.images[ti];
                     const Mat3d R_j = train_img.q_c_w.toRotationMatrix();
@@ -3695,8 +3713,7 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
         //   R_map_local = R_world_body[i] * R_local_body[i]^T
         //   t_map_local = t_world_body[i] - R_map_local * P_local[i]
         // where R_world_body[i] comes from the matched train image.
-        const Mat3d R_imu_cam =
-            vins_multi::GLOC_CAM_MODULES[0].ric_[0].toRotationMatrix();
+        const Mat3d R_imu_cam = vins_multi::GLOC_CAM_MODULES[0].ric_[0].toRotationMatrix();
         const Vec3d t_imu_cam = vins_multi::GLOC_CAM_MODULES[0].tic_[0];
 
         bool seeded = false;
@@ -3774,8 +3791,13 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
                 const Mat3d R_j = train_img.q_c_w.toRotationMatrix();
                 const Vec3d t_j = train_img.t_c_w;
                 const Vec3d o_j = -(R_j.transpose() * t_j);
-                const Mat3d R_cb = vins_multi::GLOC_CAM_MODULES[g].ric_[0].toRotationMatrix();
-                const Vec3d t_cb = vins_multi::GLOC_CAM_MODULES[g].tic_[0];
+
+                const Mat3d R_imu_cam = vins_multi::GLOC_CAM_MODULES[g].ric_[0].toRotationMatrix();
+                const Vec3d t_imu_cam = vins_multi::GLOC_CAM_MODULES[g].tic_[0];
+
+                const Mat3d R_cam_imu = R_imu_cam.transpose();
+                const Vec3d t_cam_imu = -R_cam_imu * t_imu_cam;
+
                 const double fx_q = vins_multi::FOCAL_LENGTH;
                 const double fy_q = vins_multi::FOCAL_LENGTH;
                 const double cx_q = slot.query_feats.image_size.width / 2.0;
@@ -3789,14 +3811,15 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
                     {
                         R_lb_arr[r * 3 + c] = R_lb(r, c);
                         R_j_arr[r * 3 + c] = R_j(r, c);
-                        Rcr_arr[r * 3 + c] = R_cb(r, c);
+                        Rcr_arr[r * 3 + c] = R_cam_imu(r, c); // Now strictly R_cam_rig (Row-Major)
                     }
                 t_j_arr[0] = t_j.x();
                 t_j_arr[1] = t_j.y();
                 t_j_arr[2] = t_j.z();
-                tcr_arr[0] = t_cb.x();
-                tcr_arr[1] = t_cb.y();
-                tcr_arr[2] = t_cb.z();
+
+                tcr_arr[0] = t_cam_imu.x(); // Now strictly t_cam_rig
+                tcr_arr[1] = t_cam_imu.y();
+                tcr_arr[2] = t_cam_imu.z();
 
                 for (const auto &[pq, pt] : slot.multi_pt_pairs_undistorted[match_k])
                 {

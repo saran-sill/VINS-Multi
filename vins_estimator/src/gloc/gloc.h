@@ -255,6 +255,10 @@ struct Snapshot
         // Local-frame body pose at t_kf: T_local_body(t_kf).
         // Gloc holds this as the soft-constraint anchor for the corresponding
         // optimization variable T_map_body(t_kf).
+        //   R_local, P_local  represent  T_local_body:
+        //     X_local = R_local * X_body + P_local
+        //     R_local ≡ R_local_body  (rotation body -> local)
+        //     P_local ≡ t_local_body  (position of body origin in local frame)
         Eigen::Quaterniond R_local{Eigen::Quaterniond::Identity()};
         Eigen::Vector3d P_local{Eigen::Vector3d::Zero()};
 

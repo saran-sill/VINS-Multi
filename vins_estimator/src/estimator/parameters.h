@@ -97,8 +97,11 @@ struct camera_module_info
     double tr_;
     vector<std::string> img_topic_;
     vector<std::string> calib_file_;
+
+    //  pt_in_imu = [ric_, tic] * pt_in_cam0
     vector<Eigen::Map<Eigen::Quaterniond>> ric_;
     vector<Eigen::Map<Eigen::Vector3d>> tic_;
+
     int num_downsamples_ = 0;
 
     vector<double *> para_Ex_Pose_;

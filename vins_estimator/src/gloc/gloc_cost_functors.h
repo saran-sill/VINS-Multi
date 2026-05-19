@@ -439,7 +439,7 @@ struct GlocFixedRelReprojCost
     double Rtm[3];
     double oj[3];
     double pq[2];
-    double Rcr[9];
+    double Rcr[9]; // R_cam_rig
     double tcr[3];
     double fx, fy, cx_, cy_;
 
