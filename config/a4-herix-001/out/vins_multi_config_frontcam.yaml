@@ -284,9 +284,9 @@ gloc_vote_max_dist_m: 3.0          # reject candidates >XXm from current VINS po
 gloc_vote_max_matches: 2           # keep top-3 inlier matches per keyframe (default: 1)
 
 # ORB feature extraction
-gloc_orb_nfeatures: 1000
-gloc_orb_scale_factor: 1.25
-gloc_orb_nlevels: 4
+gloc_orb_nfeatures: 1500
+gloc_orb_scale_factor: 1.2
+gloc_orb_nlevels: 3
 gloc_orb_edge_threshold: 31
 gloc_orb_first_level: 0
 gloc_orb_wta_k: 2
