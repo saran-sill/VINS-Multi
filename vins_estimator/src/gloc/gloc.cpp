@@ -11,6 +11,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <thread>
+#include <unordered_map>
 
 #include "../utility/visualization.h"
 #include "colmap_util.h"
@@ -997,6 +998,18 @@ void Gloc::processLoop()
     while (true)
     {
         std::vector<KeyframeGlocState> working_set;
+        // Full snapshot of all keyframes in the window, captured under the
+        // same state_mutex_ lock as working_set. Used at publish time so the
+        // spheres/path show ALL keyframes with R_local/P_local values that are
+        // CONSISTENT with the ones the optimizer just solved against.
+        struct FullKf
+        {
+            double t_kf;
+            Eigen::Quaterniond R_local;
+            Eigen::Vector3d P_local;
+            int status; // 2=valid match, 1=processed-no-match, 0=not-yet
+        };
+        std::vector<FullKf> full_snapshot;
         uint64_t working_snapshot_id = 0;
 
         {
@@ -1009,49 +1022,58 @@ void Gloc::processLoop()
             working_snapshot_id = last_snapshot_id_;
 
             // Count verdicts across all keyframes for diagnostics.
-            int n_total = 0, n_found = 0, n_none = 0, n_evicted = 0, n_notyet = 0;
-            for (const auto &[t, s] : state_map_)
-            {
-                ++n_total;
-                bool has_found = false, has_none = false, has_evicted = false;
-                for (const auto &slot : s.per_gloc)
-                {
-                    if (slot.verdict == LookupVerdict::Found)
-                        has_found = true;
-                    else if (slot.verdict == LookupVerdict::NoneInTolerance)
-                        has_none = true;
-                    else if (slot.verdict == LookupVerdict::Evicted)
-                        has_evicted = true;
-                }
-                if (has_found)
-                    ++n_found;
-                else if (has_none)
-                    ++n_none;
-                else if (has_evicted)
-                    ++n_evicted;
-                else
-                    ++n_notyet;
-            }
-            GLOC_DEBUG("[snapshot %lu] kf=%d Found=%d NoneInTol=%d Evicted=%d NotYet=%d",
-                       (unsigned long)working_snapshot_id,
-                       n_total, n_found, n_none, n_evicted, n_notyet);
+            // int n_total = 0, n_found = 0, n_none = 0, n_evicted = 0, n_notyet = 0;
+            // for (const auto &[t, s] : state_map_)
+            // {
+            //     ++n_total;
+            //     bool has_found = false, has_none = false, has_evicted = false;
+            //     for (const auto &slot : s.per_gloc)
+            //     {
+            //         if (slot.verdict == LookupVerdict::Found)
+            //             has_found = true;
+            //         else if (slot.verdict == LookupVerdict::NoneInTolerance)
+            //             has_none = true;
+            //         else if (slot.verdict == LookupVerdict::Evicted)
+            //             has_evicted = true;
+            //     }
+            //     if (has_found)
+            //         ++n_found;
+            //     else if (has_none)
+            //         ++n_none;
+            //     else if (has_evicted)
+            //         ++n_evicted;
+            //     else
+            //         ++n_notyet;
+            // }
+            // GLOC_DEBUG("[snapshot %lu] kf=%d Found=%d NoneInTol=%d Evicted=%d NotYet=%d",
+            //            (unsigned long)working_snapshot_id,
+            //            n_total, n_found, n_none, n_evicted, n_notyet);
 
             // Copy out only keyframes with at least one Found slot - keyframes
             // with zero resolved gloc images contribute nothing to the
             // current round but stay in state_map_ in case they resolve later.
+            full_snapshot.reserve(state_map_.size());
             for (const auto &[t, s] : state_map_)
             {
                 bool any_found = false;
+                bool any_done = false;
+                bool any_match = false;
                 for (const auto &slot : s.per_gloc)
                 {
                     if (slot.verdict == LookupVerdict::Found)
-                    {
                         any_found = true;
-                        break;
+                    if (slot.pipeline_done)
+                    {
+                        any_done = true;
+                        if (slot.best_train_idx >= 0)
+                            any_match = true;
                     }
                 }
                 if (any_found)
                     working_set.push_back(s);
+
+                int status = any_match ? 2 : (any_done ? 1 : 0);
+                full_snapshot.push_back({t, s.R_local, s.P_local, status});
             }
         }
         // state_mutex_ released - the Ceres solve below runs without it.
@@ -1089,9 +1111,116 @@ void Gloc::processLoop()
                    std::chrono::duration<double, std::milli>(_t2 - _t1).count(),
                    static_cast<int>(working_set.size()));
 
+        runCorrespondences(working_set, working_snapshot_id); // DEBUG: disabled
+        writeBackToStateMap(working_set);
+
+        // Update full_snapshot statuses:
+        // - working_set has the freshest pipeline_done/best_train_idx for this round
+        // - state_map_ has persisted pipeline_done=true from previous rounds
+        // Build t_kf->status from working_set, then walk state_map_ by index
+        // (same order as full_snapshot was built) using working_set status when
+        // available, falling back to state_map_ for keyframes not in working_set.
+        {
+            // 1. Create a fast lookup from timestamp to full_snapshot index
+            std::unordered_map<double, std::size_t> t_to_idx;
+            t_to_idx.reserve(full_snapshot.size());
+            for (std::size_t i = 0; i < full_snapshot.size(); ++i)
+            {
+                t_to_idx[full_snapshot[i].t_kf] = i;
+            }
+
+            // 2. Loop over working_set and update only the keyframes processed this round
+            for (const auto &kf : working_set)
+            {
+                bool any_done = false;
+                bool any_match = false;
+                for (const auto &slot : kf.per_gloc)
+                {
+                    if (slot.pipeline_done)
+                    {
+                        any_done = true;
+                        if (slot.best_train_idx >= 0)
+                            any_match = true;
+                    }
+                }
+
+                auto it = t_to_idx.find(kf.t_kf);
+                if (it != t_to_idx.end())
+                {
+                    // Update the snapshot with the fresh status from this round
+                    full_snapshot[it->second].status = any_match ? 2 : (any_done ? 1 : 0);
+                }
+            }
+        }
+
+        // Run optimization and capture the success flag for visualization
+        bool opt_success = runOptimization(working_set);
+
+        if (opt_success && vins_multi::hasGlocOptimizedSubscribers())
+        {
+            // Publish all keyframes in world frame using the just-updated
+            // T_map_local and the full_snapshot taken at the start of this round.
+            // full_snapshot has consistent P_local values (same as the optimizer
+            // used) and covers ALL keyframes (not just Found ones) for a smooth path.
+            using Mat3d = Eigen::Matrix3d;
+            using Vec3d = Eigen::Vector3d;
+            using Quat = Eigen::Quaterniond;
+
+            Mat3d pub_R;
+            Vec3d pub_t;
+            {
+                std::lock_guard<std::mutex> lk(snap_mutex_);
+                pub_R = T_map_local_R_;
+                pub_t = T_map_local_t_;
+            }
+
+            std::vector<geometry_msgs::Pose> opt_poses;
+            std::vector<geometry_msgs::Point> opt_path_pts;
+            std::vector<std::pair<Eigen::Vector3d, int>> kf_status_vec;
+            opt_poses.reserve(full_snapshot.size());
+            opt_path_pts.reserve(full_snapshot.size());
+            kf_status_vec.reserve(full_snapshot.size());
+
+            for (const auto &kf : full_snapshot)
+            {
+                const Mat3d R_lb = kf.R_local.toRotationMatrix();
+                const Vec3d t_wb = pub_R * kf.P_local + pub_t;
+                const Quat q_wb(pub_R * R_lb);
+
+                geometry_msgs::Pose pose;
+                pose.position.x = t_wb.x();
+                pose.position.y = t_wb.y();
+                pose.position.z = t_wb.z();
+                pose.orientation.x = q_wb.x();
+                pose.orientation.y = q_wb.y();
+                pose.orientation.z = q_wb.z();
+                pose.orientation.w = q_wb.w();
+                opt_poses.push_back(pose);
+
+                geometry_msgs::Point pt;
+                pt.x = t_wb.x();
+                pt.y = t_wb.y();
+                pt.z = t_wb.z();
+                opt_path_pts.push_back(pt);
+
+                kf_status_vec.push_back(std::make_pair(t_wb, kf.status));
+            }
+            vins_multi::pubGlocOptimized(opt_poses, opt_path_pts);
+            vins_multi::pubGlocKeyframeStatus(kf_status_vec);
+        }
+
+        // Visualize here
+        Eigen::Matrix3d vis_R = Eigen::Matrix3d::Identity();
+        Eigen::Vector3d vis_t = Eigen::Vector3d::Zero();
+        if (opt_success)
+        {
+            std::lock_guard<std::mutex> lk(snap_mutex_);
+            vis_R = T_map_local_R_;
+            vis_t = T_map_local_t_;
+        }
+
         // ── DEBUG: visualize vote results ─────────────────────────────────────
-        // Draw lines between each keyframe's local position (used directly as
-        // world position) and its voted train image camera centre in world.
+        // Draw lines between each keyframe's position and its voted train image camera centre in world.
         if (vins_multi::pub_gloc_vote_lines.getNumSubscribers() > 0)
         {
             std::vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>> vote_pairs;
@@ -1103,8 +1232,11 @@ void Gloc::processLoop()
                     if (slot.voted_train_idxs.empty())
                         continue;
 
-                    // Query position: local pose used directly as world coords
-                    const Eigen::Vector3d q_pos = kf.P_local;
+                    // Query position: Use optimized world pose if available, else local
+                    Eigen::Vector3d q_pos = kf.P_local;
+                    if (opt_success) {
+                        q_pos = vis_R * q_pos + vis_t;
+                    }
 
                     // Draw one line per voted match
                     for (int ti : slot.voted_train_idxs)
@@ -1119,9 +1251,6 @@ void Gloc::processLoop()
             }
             vins_multi::pubGlocVoteLines(vote_pairs);
         }
-
-        runCorrespondences(working_set, working_snapshot_id); // DEBUG: disabled
-        writeBackToStateMap(working_set);
 
         // ── Correspondence line visualization (magenta, gloc/corr_lines) ─────
         // Draw magenta lines from query body position to matched train image
@@ -1138,7 +1267,11 @@ void Gloc::processLoop()
                         slot.pt_pairs_undistorted.empty())
                         continue;
 
-                    const Eigen::Vector3d q_pos = kf.P_local;
+                    // Query position: Use optimized world pose if available, else local
+                    Eigen::Vector3d q_pos = kf.P_local;
+                    if (opt_success) {
+                        q_pos = vis_R * q_pos + vis_t;
+                    }
 
                     for (int match_k = 0;
                          match_k < static_cast<int>(slot.voted_train_idxs.size()); ++match_k)
@@ -1157,8 +1290,6 @@ void Gloc::processLoop()
             }
             vins_multi::pubGlocCorrLines(corr_pairs);
         }
-
-        runOptimization(working_set); // DEBUG: disabled
     }
 
     GLOC_INFO("[processLoop] Exiting.");
@@ -2734,13 +2865,8 @@ bool Gloc::runOptimization_6DOF(std::vector<KeyframeGlocState> &working_set)
         kf_status_vec.reserve(X);
         for (int i = 0; i < X; ++i)
         {
-            const Eigen::Map<const Vec3d> ov(omega_kf[i].data());
-            const double norm = ov.norm();
-            const Mat3d R_wb = Eigen::AngleAxisd(
-                                   norm, norm > 1e-8 ? (ov / norm).eval() : Vec3d::UnitZ())
-                                   .toRotationMatrix();
-            (void)R_wb;
-            const Vec3d pos(t_kf[i][0], t_kf[i][1], t_kf[i][2]);
+            // Use P_local (odom frame) so spheres stay in sync with VINS path.
+            const Vec3d pos = working_set[i].P_local;
 
             // Determine status from per_gloc slots
             int status = 0; // not processed
@@ -3431,7 +3557,8 @@ bool Gloc::runOptimization_4DOF(std::vector<KeyframeGlocState> &working_set)
         kf_status_vec.reserve(X);
         for (int i = 0; i < X; ++i)
         {
-            const Vec3d pos(t_kf[i][0], t_kf[i][1], t_kf[i][2]);
+            // Use P_local (odom frame) so spheres stay in sync with VINS path.
+            const Vec3d pos = working_set[i].P_local;
             int status = 0;
             bool any_done = false;
             for (const auto &slot : working_set[i].per_gloc)
@@ -3756,7 +3883,14 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
         ord->AddElementToGroup(omega_map.data(), 1);
         ord->AddElementToGroup(t_map.data(), 1);
         if (use_4dof)
+        {
             prob.AddParameterBlock(omega_map.data(), 3, new YawOnlyParameterization());
+            // Fix t_map Z: 4-DOF solves XY+yaw only. Z is trusted from the
+            // VINS-derived seed and must not be changed by the optimizer
+            // (2D reprojection cost cannot reliably recover metric Z).
+            prob.SetParameterLowerBound(t_map.data(), 2, t_map[2]);
+            prob.SetParameterUpperBound(t_map.data(), 2, t_map[2]);
+        }
 
         for (int k = 0; k < N; ++k)
         {
@@ -3930,92 +4064,6 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
 
     GLOC_INFO("[opt_fr] SNAPPED T_map_local t=[%.2f %.2f %.2f]",
               t_ml.x(), t_ml.y(), t_ml.z());
-
-    // ── Publish ───────────────────────────────────────────────────────────────
-    if (vins_multi::hasGlocOptimizedSubscribers())
-    {
-        std::vector<geometry_msgs::Pose> opt_poses;
-        std::vector<geometry_msgs::Point> opt_path_pts;
-        opt_poses.reserve(X);
-        opt_path_pts.reserve(X);
-
-        for (int i = 0; i < X; ++i)
-        {
-            const auto &kf = working_set[i];
-            const Mat3d R_lb = kf.R_local.toRotationMatrix();
-            const Mat3d R_wb = R_ml * R_lb;
-            const Vec3d t_wb = R_ml * kf.P_local + t_ml;
-            const Quat q_wb(R_wb);
-
-            geometry_msgs::Pose pose;
-            pose.position.x = t_wb.x();
-            pose.position.y = t_wb.y();
-            pose.position.z = t_wb.z();
-            pose.orientation.x = q_wb.x();
-            pose.orientation.y = q_wb.y();
-            pose.orientation.z = q_wb.z();
-            pose.orientation.w = q_wb.w();
-            opt_poses.push_back(pose);
-
-            geometry_msgs::Point pt;
-            pt.x = t_wb.x();
-            pt.y = t_wb.y();
-            pt.z = t_wb.z();
-            opt_path_pts.push_back(pt);
-        }
-        vins_multi::pubGlocOptimized(opt_poses, opt_path_pts);
-
-        std::vector<std::pair<Eigen::Vector3d, int>> kf_status_vec;
-        kf_status_vec.reserve(X);
-        for (int i = 0; i < X; ++i)
-        {
-            const Vec3d t_wb = R_ml * working_set[i].P_local + t_ml;
-            int status = 0;
-            bool any_done = false;
-            for (const auto &slot : working_set[i].per_gloc)
-            {
-                if (slot.pipeline_done)
-                {
-                    any_done = true;
-                    if (slot.best_train_idx >= 0)
-                    {
-                        status = 2;
-                        break;
-                    }
-                }
-            }
-            if (status == 0 && any_done)
-                status = 1;
-            kf_status_vec.push_back({t_wb, status});
-        }
-        vins_multi::pubGlocKeyframeStatus(kf_status_vec);
-
-        if (vins_multi::pub_gloc_match_lines.getNumSubscribers() > 0)
-        {
-            std::vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>> match_pairs;
-            for (int i = 0; i < X; ++i)
-            {
-                const auto &kf = working_set[i];
-                const Mat3d R_wb = R_ml * kf.R_local.toRotationMatrix();
-                const Vec3d t_wb = R_ml * kf.P_local + t_ml;
-                for (std::size_t g = 0; g < kf.per_gloc.size(); ++g)
-                {
-                    const auto &slot = kf.per_gloc[g];
-                    if (!slot.pipeline_done || slot.best_train_idx < 0)
-                        continue;
-                    const Mat3d R_cb = vins_multi::GLOC_CAM_MODULES[g].ric_[0].toRotationMatrix();
-                    const Vec3d t_cb = vins_multi::GLOC_CAM_MODULES[g].tic_[0];
-                    const Vec3d o_query = R_wb * (-t_cb) + t_wb;
-                    const std::size_t ti = static_cast<std::size_t>(slot.best_train_idx);
-                    const colmap::Image &train_img = map_.images[ti];
-                    const Mat3d R_j = train_img.q_c_w.toRotationMatrix();
-                    const Vec3d o_train = -(R_j.transpose() * train_img.t_c_w);
-                    match_pairs.push_back({o_query, o_train});
-                }
-            }
-            vins_multi::pubGlocMatchLines(match_pairs);
-        }
-    }
 
     {
         std::lock_guard<std::mutex> lk(cb_mutex_);
