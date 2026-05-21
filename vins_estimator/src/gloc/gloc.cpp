@@ -1565,7 +1565,6 @@ void Gloc::runOrbAndDbow(std::vector<KeyframeGlocState> &working_set)
 // rejected. Among survivors the one with the highest DBoW3 score is elected as
 // best_train_idx for that slot.
 // ─────────────────────────────────────────────────────────────────────────────
-
 void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
 {
     // ── Overview ──────────────────────────────────────────────────────────────
@@ -1576,8 +1575,7 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
     // help constrain the translation hypothesis for new keyframes.
     //
     // For each new keyframe, find the best-scoring candidate whose implied
-    // translation t = train_pos - P_local is consistent with the translation
-    // implied by the majority of other keyframes (done or new) via RANSAC.
+    // T_map_local is consistent with the majority of other keyframes via RANSAC.
     // ─────────────────────────────────────────────────────────────────────────
 
     const int X = static_cast<int>(working_set.size());
@@ -1586,6 +1584,20 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
                                 : GLOC_VOTE_MIN_VOTES;
 
     const std::size_t n_modules = working_set.empty() ? 0 : working_set[0].per_gloc.size();
+
+    // ── Read T_map_local once (raw committed value, same as optimizer uses) ──
+    bool snapped_local = false;
+    Eigen::Matrix3d R_ml = Eigen::Matrix3d::Identity();
+    Eigen::Vector3d t_ml = Eigen::Vector3d::Zero();
+    {
+        std::lock_guard<std::mutex> lk(snap_mutex_);
+        snapped_local = snapped_;
+        if (snapped_local)
+        {
+            R_ml = T_map_local_R_;
+            t_ml = T_map_local_t_;
+        }
+    }
 
     auto train_world_pos = [&](std::size_t train_idx) -> Eigen::Vector3d {
         const colmap::Image &img = map_.images[train_idx];
@@ -1609,8 +1621,6 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
             continue;
 
         // ── 1. Build voter pool from ALL keyframes (new + done) ───────────────
-        // Done keyframes provide stable translation anchors.
-        // New keyframes provide candidates to be assigned.
         struct Cand
         {
             int kf_idx;
@@ -1632,13 +1642,19 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
                                      slot.dbow_candidates[ni].first});
         }
 
-        // ── 1b. Pre-filter by max distance ────────────────────────────────────
+        // ── 1b. Pre-filter by max distance (snapped only) ─────────────────────
+        // Requires T_map_local to project P_local into world frame before
+        // comparing against the candidate's world position. Skip before the
+        // first snap — no prior means no meaningful distance bound.
         if (GLOC_VOTE_MAX_DIST_M > 0.0)
         {
             all_cands.erase(
                 std::remove_if(all_cands.begin(), all_cands.end(),
-                               [](const Cand &c) {
-                                   return (c.P_world - c.P_local).norm() > GLOC_VOTE_MAX_DIST_M;
+                               [&](const Cand &c) {
+                                   const Eigen::Vector3d P_world_pred =
+                                       R_ml * c.P_local + t_ml;
+                                   return (c.P_world - P_world_pred).norm()
+                                          > GLOC_VOTE_MAX_DIST_M;
                                }),
                 all_cands.end());
         }
@@ -1655,14 +1671,23 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
         }
 
         // ── 2. RANSAC — seed from ALL candidates, assign only new keyframes ───
+        // Each candidate implies a full T_map_local hypothesis:
+        //   R_hyp * P_local[i] + t_hyp = P_world[i]
+        // When snapped: R_hyp = R_ml (known from prior), solve for t_hyp only.
+        // When not snapped: assume R_hyp = I (pure translation, first-snap
+        // heuristic — same assumption used by the initial seed elsewhere).
         int best_inlier_count = 0;
-        std::vector<int> best_assignment(X, -1); // kf_idx -> cand_idx (new kfs only)
+        std::vector<int> best_assignment(X, -1);
 
         for (const auto &seed : all_cands)
         {
-            const Eigen::Vector3d t_hyp = seed.P_world - seed.P_local;
+            // Derive the translation component of the hypothesis.
+            // With R known: t_hyp = P_world - R_ml * P_local
+            // Without R:    t_hyp = P_world - P_local  (R = I assumed)
+            const Eigen::Vector3d t_hyp = snapped_local
+                ? (seed.P_world - R_ml * seed.P_local).eval()
+                : (seed.P_world - seed.P_local).eval();
 
-            // Count inliers across ALL keyframes (for hypothesis strength)
             std::vector<int> assignment(X, -1);
             int inlier_count = 0;
 
@@ -1672,7 +1697,11 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
                 if (slot.dbow_candidates.empty())
                     continue;
 
-                const Eigen::Vector3d predicted = working_set[i].P_local + t_hyp;
+                // Predicted world position of keyframe i under this hypothesis
+                const Eigen::Vector3d predicted = snapped_local
+                    ? (R_ml * working_set[i].P_local + t_hyp).eval()
+                    : (working_set[i].P_local + t_hyp).eval();
+
                 int best_ni = -1;
                 double best_score = -1.0;
                 for (int ni = 0; ni < static_cast<int>(slot.dbow_candidates.size()); ++ni)
@@ -1713,7 +1742,12 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
             for (int i = 0; i < X; ++i)
                 if (best_assignment[i] >= 0)
                 {
-                    t_win = train_world_pos(working_set[i].per_gloc[g].dbow_candidates[best_assignment[i]].second) - working_set[i].P_local;
+                    const Eigen::Vector3d P_w =
+                        train_world_pos(working_set[i].per_gloc[g]
+                                            .dbow_candidates[best_assignment[i]].second);
+                    t_win = snapped_local
+                        ? (P_w - R_ml * working_set[i].P_local).eval()
+                        : (P_w - working_set[i].P_local).eval();
                     break;
                 }
 
@@ -1727,7 +1761,10 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
                     slot.best_train_idx = static_cast<int>(
                         slot.dbow_candidates[best_assignment[i]].second);
 
-                    const Eigen::Vector3d predicted = working_set[i].P_local + t_win;
+                    const Eigen::Vector3d predicted = snapped_local
+                        ? (R_ml * working_set[i].P_local + t_win).eval()
+                        : (working_set[i].P_local + t_win).eval();
+
                     std::vector<std::pair<double, int>> inlier_cands;
                     for (const auto &[sc, ti] : slot.dbow_candidates)
                         if ((train_world_pos(ti) - predicted).norm() < GLOC_VOTE_EPS_M)
@@ -1766,6 +1803,7 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
         }
     }
 }
+
 // subsampleMatchesMinDist  (file-local helper)
 //
 // Greedy spatial subsampling: sorts matches by descriptor distance (best
