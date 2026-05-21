@@ -13,18 +13,19 @@
 #include <memory>
 #include <mutex>
 #include <opencv2/opencv.hpp>
+#include <opencv2/xfeatures2d.hpp>
 #include <queue>
 #include <thread>
 #include <unordered_map>
 
+#include "../utility/utility.h"
 #include "camodocal/camera_models/CameraFactory.h"
 #include "colmap_util.h"
 #include "dbow3_util.h"
+#include "fast_bvh.h"
 #include "gloc_cost_functors.h"
 #include "parameters.h"
 #include "point_features.h"
-#include "../utility/utility.h"
-#include "fast_bvh.h"
 #include "read_ply.h"
 
 // ── Gloc-local logging macros ─────────────────────────────────────────────────
@@ -526,7 +527,7 @@ class Gloc
     // Shared across all processLoop rounds. Both are used only on the worker
     // thread so no locking is needed.
     std::unique_ptr<PointFeatureExtractor> orb_extractor_;
-    cv::Ptr<cv::DescriptorExtractor> beblid_extractor_; // null if GLOC_USE_BEBLID==0
+    cv::Ptr<cv::xfeatures2d::BEBLID> beblid_extractor_; // null if GLOC_USE_BEBLID==0
     std::unique_ptr<PointFeatureMatcher> feat_matcher_;
 
     // One camera model per gloc module, loaded from GLOC_CAM_MODULES[g].calib_file_[0].

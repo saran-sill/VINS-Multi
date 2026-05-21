@@ -254,6 +254,7 @@ void readParameters(std::string config_file)
     printf("GLOC_COLMAP_SPARSE_FOLDER : %s\n", gloc::GLOC_COLMAP_SPARSE_FOLDER.c_str());
     printf("GLOC_COLMAP_IMG_FOLDER    : %s\n", gloc::GLOC_COLMAP_IMG_FOLDER.c_str());
     printf("GLOC_DBOW3_DATABASE       : %s\n", gloc::GLOC_DBOW3_DATABASE.c_str());
+    printf("GLOC_DBOW3_AUTO_CREATED_DB_FOLDER       : %s\n", gloc::GLOC_DBOW3_AUTO_CREATED_DB_FOLDER.c_str());
     printf("GLOC_DBOW3_VOCAB          : %s\n", gloc::GLOC_DBOW3_VOCAB.c_str());
     printf("GLOC_WORLD_TMAT_FILE      : %s\n", gloc::GLOC_WORLD_TMAT_FILE.c_str());
     printf("GLOC_DBOW3_MAX_RESULTS    : %d\n", gloc::GLOC_DBOW3_MAX_RESULTS);
@@ -282,7 +283,7 @@ void readParameters(std::string config_file)
     printf("GLOC_W_WORLD_PRIOR        : %.2f\n", gloc::GLOC_W_WORLD_PRIOR);
     printf("GLOC_W_MESH_PRIOR        : %.2f\n", gloc::GLOC_W_MESH_PRIOR);
     printf("GLOC_MESH_SIGMA_M        : %.2f\n", gloc::GLOC_MESH_SIGMA_M);
-    printf("GLOC_MIN_MESH_PRIOR_POINTS        : %.2f\n", gloc::GLOC_MIN_MESH_PRIOR_POINTS);
+    printf("GLOC_MIN_MESH_PRIOR_POINTS        : %.d\n", gloc::GLOC_MIN_MESH_PRIOR_POINTS);
     printf("GLOC_HUBER_DELTA          : %.2f\n", gloc::GLOC_HUBER_DELTA);
     printf("GLOC_INLIER_THRESH_PX     : %.2f\n", gloc::GLOC_INLIER_THRESH_PX);
     printf("GLOC_MAX_ITERS            : %d\n", gloc::GLOC_MAX_ITERS);

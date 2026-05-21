@@ -1,11 +1,14 @@
 #include "dbow3_util.h"
 
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
+
+#include "../vins_estimator/src/gloc/gloc.h"
 
 namespace fs = std::filesystem;
 
@@ -398,7 +401,7 @@ void create_dbow3_database(const std::vector<colmap::Image> &map_images,
                            const std::string &vocab_path,
                            const std::string &auto_db_root,
                            const OrbConfig &cfg,
-                           PointFeatureExtractorORB *orb_extractor,
+                           PointFeatureExtractor *orb_extractor,
                            cv::Ptr<cv::xfeatures2d::BEBLID> beblid_extractor,
                            DBoW3::Database &db_out,
                            std::vector<ImageFeatures> &train_feats_out)
@@ -412,29 +415,28 @@ void create_dbow3_database(const std::vector<colmap::Image> &map_images,
     const std::string db_path = cache_dir + "/database.dbow3";
     const std::string feat_path = cache_dir + "/train_features.bin";
 
-    GLOC_INFO("[createDB] auto_db_root : %s", auto_db_root.c_str());
-    GLOC_INFO("[createDB] fingerprint  : %s", fingerprint.c_str());
-    GLOC_INFO("[createDB] cache_dir    : %s", cache_dir.c_str());
+    printf("  [INFO] [createDB] auto_db_root : %s\n", auto_db_root.c_str());
+    printf("  [INFO] [createDB] fingerprint  : %s\n", fingerprint.c_str());
+    printf("  [INFO] [createDB] cache_dir    : %s\n", cache_dir.c_str());
 
     // ── Try loading existing cache ────────────────────────────────────────────
     if (fs::exists(db_path) && fs::exists(feat_path))
     {
-        GLOC_INFO("[createDB] Found existing cache — loading ...");
+        printf("  [INFO] [createDB] Found existing cache — loading ...\n");
         try
         {
             load_dbow3_database(db_path, vocab_path, db_out, train_feats_out);
-            GLOC_INFO("[createDB] Cache loaded OK (db=%zu feats=%zu).",
-                      db_out.size(), train_feats_out.size());
+            printf("  [INFO] [createDB] Cache loaded OK (db=%zu feats=%zu).\n", db_out.size(), train_feats_out.size());
             return;
         }
         catch (const std::exception &e)
         {
-            GLOC_WARN("[createDB] Cache load failed (%s) — re-extracting.", e.what());
+            fprintf(stderr, "  [WARN] [createDB] Cache load failed (%s) — re-extracting.\n", e.what());
         }
     }
 
     // ── Load vocabulary ───────────────────────────────────────────────────────
-    GLOC_INFO("[createDB] Loading vocabulary: %s", vocab_path.c_str());
+    printf("  [INFO] [createDB] Loading vocabulary: %s\n", vocab_path.c_str());
     if (!fs::exists(vocab_path))
         throw std::runtime_error("Vocabulary not found: " + vocab_path);
 
@@ -442,9 +444,9 @@ void create_dbow3_database(const std::vector<colmap::Image> &map_images,
     if (vocab.empty())
         throw std::runtime_error("Loaded vocabulary is empty: " + vocab_path);
 
-    GLOC_INFO("[createDB] Vocabulary loaded (%zu words).", vocab.size());
+    printf("  [INFO] [createDB] Vocabulary loaded (%zu words).\n", vocab.size());
     if (beblid_extractor)
-        GLOC_INFO("[createDB] BEBLID extractor provided — will extract BEBLID descriptors.");
+        printf("  [INFO] [createDB] BEBLID extractor provided — will extract BEBLID descriptors.\n");
 
     // ── Extract features using the caller's extractor instances ──────────────
     const std::size_t N = map_images.size();
@@ -452,7 +454,7 @@ void create_dbow3_database(const std::vector<colmap::Image> &map_images,
     std::vector<std::string> names(N);
     std::size_t n_ok = 0, n_fail = 0;
 
-    GLOC_INFO("[createDB] Extracting features from %zu images ...", N);
+    printf("  [INFO] [createDB] Extracting features from %zu images ...\n", N);
 
     for (std::size_t ti = 0; ti < N; ++ti)
     {
@@ -462,7 +464,7 @@ void create_dbow3_database(const std::vector<colmap::Image> &map_images,
         cv::Mat gray = cv::imread(img_path, cv::IMREAD_GRAYSCALE);
         if (gray.empty())
         {
-            GLOC_WARN("[createDB] cannot read image: %s — skipping.", img_path.c_str());
+            fprintf(stderr, "  [WARN] [createDB] cannot read image: %s — skipping.\n", img_path.c_str());
             ++n_fail;
             continue;
         }
@@ -488,17 +490,16 @@ void create_dbow3_database(const std::vector<colmap::Image> &map_images,
 
         ++n_ok;
         if (ti % 200 == 0 || ti == N - 1)
-            GLOC_INFO("[createDB] %zu/%zu  ok=%zu  fail=%zu",
-                      ti + 1, N, n_ok, n_fail);
+            printf("  [INFO] [createDB] %zu/%zu  ok=%zu  fail=%zu\n", ti + 1, N, n_ok, n_fail);
     }
 
-    GLOC_INFO("[createDB] Extraction done: ok=%zu  fail=%zu.", n_ok, n_fail);
+    printf("  [INFO] [createDB] Extraction done: ok=%zu  fail=%zu.\n", n_ok, n_fail);
     if (n_ok == 0)
         throw std::runtime_error(
             "[createDB] All images failed to load — check img_folder: " + img_folder);
 
     // ── Build DBoW3 database ──────────────────────────────────────────────────
-    GLOC_INFO("[createDB] Building DBoW3 database ...");
+    printf("  [INFO] [createDB] Building DBoW3 database ...\n");
     db_out = DBoW3::Database(vocab, /*use_di=*/false, /*di_levels=*/0);
     for (std::size_t ti = 0; ti < N; ++ti)
     {
@@ -507,19 +508,17 @@ void create_dbow3_database(const std::vector<colmap::Image> &map_images,
         else
             db_out.add(cv::Mat()); // empty entry keeps index aligned with map_images
     }
-    GLOC_INFO("[createDB] Database built: %zu entries.", db_out.size());
+    printf("  [INFO] [createDB] Database built: %zu entries.\n", db_out.size());
 
     // ── Save to disk ──────────────────────────────────────────────────────────
-    GLOC_INFO("[createDB] Saving cache to: %s", cache_dir.c_str());
+    printf("  [INFO] [createDB] Saving cache to: %s\n", cache_dir.c_str());
     fs::create_directories(cache_dir);
 
     save_orb_config(cfg, cache_dir);
     save_image_features(train_feats_out, names, cache_dir);
     db_out.saveBinary(db_path);
 
-    GLOC_INFO("[createDB] Saved. Next startup will load from cache "
-              "(fingerprint=%s).",
-              fingerprint.c_str());
+    printf("  [INFO] [createDB] Saved. Next startup will load from cache (fingerprint=%s).\n", fingerprint.c_str());
 }
 
 }; // namespace dbow3

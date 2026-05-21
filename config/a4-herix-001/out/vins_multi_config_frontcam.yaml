@@ -240,7 +240,7 @@ gloc_colmap_mesh_file: "/home/a4/workspace/Arm/SCGP_map/mesh.ply"
 gloc_world_tmat_file: "/home/a4/workspace/Arm/SCGP_map/world_transform.txt"
 gloc_dbow3_database: ""     # "/home/a4/workspace/Arm/SCGP_map/database_orb.bin"
 gloc_dbow3_vocab: "/home/a4/workspace/Arm/SCGP_map/orbvoc.dbow3"
-gloc_dbow3_auto_created_db_folder: ""
+gloc_dbow3_auto_created_db_folder: "/home/a4/workspace/Arm/SCGP_map/db_auto"
 
 #======================================================
 

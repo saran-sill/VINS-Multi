@@ -515,9 +515,6 @@ bool Gloc::init()
     if (!loadMesh())
         return false;
 
-    if (!loadDatabase())
-        return false;
-
     // ── Precompute undistorted train keypoints (parallel) ────────────────────
     GLOC_INFO("[init] Precomputing undistorted train keypoints for %zu images ...",
               map_.feats.size());
@@ -675,6 +672,13 @@ bool Gloc::init()
 
         GLOC_INFO("[init] Matcher: BruteForce Hamming");
     }
+
+    // ── Load / auto-create DBoW3 database ────────────────────────────────────
+    // Placed after extractor construction so loadDatabase() can pass
+    // orb_extractor_ / beblid_extractor_ to create_dbow3_database when
+    // GLOC_DBOW3_DATABASE is empty and on-the-fly extraction is needed.
+    if (!loadDatabase())
+        return false;
 
     GLOC_INFO("[init] Ready.");
     return true;
@@ -4454,7 +4458,10 @@ bool Gloc::checkPaths() const
         ok = false;
     }
 
-    if (!fs::exists(GLOC_DBOW3_DATABASE))
+    // GLOC_DBOW3_DATABASE is optional — if empty or missing, features are
+    // extracted on-the-fly from GLOC_COLMAP_IMG_FOLDER at init and the
+    // database is auto-created under GLOC_DBOW3_AUTO_CREATED_DB_FOLDER.
+    if (!GLOC_DBOW3_DATABASE.empty() && !fs::exists(GLOC_DBOW3_DATABASE))
     {
         GLOC_ERROR("[checkPaths] DBoW3 database not found: %s", GLOC_DBOW3_DATABASE.c_str());
         ok = false;
@@ -4560,20 +4567,85 @@ bool Gloc::loadColmapData()
 
 bool Gloc::loadDatabase()
 {
-    GLOC_INFO("[loadDB] loading DBoW3 database ...");
+    // ── Fast path: pre-built database configured and exists ───────────────────
+    if (!GLOC_DBOW3_DATABASE.empty() && fs::exists(GLOC_DBOW3_DATABASE))
+    {
+        GLOC_INFO("[loadDB] loading DBoW3 database ...");
+        try
+        {
+            dbow3::load_dbow3_database(GLOC_DBOW3_DATABASE,
+                                       GLOC_DBOW3_VOCAB,
+                                       map_.db,
+                                       map_.feats);
+            GLOC_INFO("[loadDB] db_entries=%zu map_feats=%zu",
+                      map_.db.size(), map_.feats.size());
+        }
+        catch (const std::exception &e)
+        {
+            GLOC_ERROR("[loadDB] %s", e.what());
+            return false;
+        }
+        return true;
+    }
+
+    // ── Slow path: auto-create database from GLOC_COLMAP_IMG_FOLDER ──────────
+    // Triggered when GLOC_DBOW3_DATABASE is empty or the file does not exist.
+    // Uses the same orb_extractor_ / beblid_extractor_ already constructed in
+    // init() so train and query features are guaranteed to be compatible.
+    // The result is cached under GLOC_DBOW3_AUTO_CREATED_DB_FOLDER/<fingerprint>/
+    // so subsequent startups with the same config load instantly.
+    GLOC_WARN("[loadDB] No pre-built database — auto-creating from images in: %s",
+              GLOC_COLMAP_IMG_FOLDER.c_str());
+    GLOC_WARN("[loadDB] This is slow on first run. Pre-build with global_localize_dbow3 "
+              "to avoid this.");
+
+    if (GLOC_DBOW3_AUTO_CREATED_DB_FOLDER.empty())
+    {
+        GLOC_ERROR("[loadDB] gloc_dbow3_auto_created_db_folder is not set — "
+                   "cannot auto-create database.");
+        return false;
+    }
+
+    if (!orb_extractor_)
+    {
+        GLOC_ERROR("[loadDB] orb_extractor_ is null — called before init() completed?");
+        return false;
+    }
+
+    // Build OrbConfig for fingerprinting only — extractor is passed directly.
+    dbow3::OrbConfig cfg;
+    cfg.nfeatures      = GLOC_ORB_NFEATURES;
+    cfg.scale_factor   = static_cast<float>(GLOC_ORB_SCALE_FACTOR);
+    cfg.nlevels        = GLOC_ORB_NLEVELS;
+    cfg.edge_threshold = GLOC_ORB_EDGE_THRESHOLD;
+    cfg.first_level    = GLOC_ORB_FIRST_LEVEL;
+    cfg.wta_k          = GLOC_ORB_WTA_K;
+    cfg.score_type     = GLOC_ORB_SCORE_TYPE;
+    cfg.patch_size     = GLOC_ORB_PATCH_SIZE;
+    cfg.fast_threshold = GLOC_ORB_FAST_THRESHOLD;
+    cfg.use_beblid     = GLOC_USE_BEBLID;
+    cfg.beblid_scale   = static_cast<float>(GLOC_BEBLID_SCALE_FACTOR);
+    cfg.beblid_n_bits  = GLOC_BEBLID_N_BITS;
 
     try
     {
-        dbow3::load_dbow3_database(GLOC_DBOW3_DATABASE,
-                                   GLOC_DBOW3_VOCAB,
-                                   map_.db,
-                                   map_.feats);
+        dbow3::create_dbow3_database(
+            map_.images,
+            GLOC_COLMAP_IMG_FOLDER,
+            GLOC_DBOW3_VOCAB,
+            GLOC_DBOW3_AUTO_CREATED_DB_FOLDER,
+            cfg,
+            orb_extractor_.get(),
+            beblid_extractor_,
+            map_.db,
+            map_.feats);
 
-        GLOC_INFO("[loadDB] db_entries=%zu map_feats=%zu", map_.db.size(), map_.feats.size());
+        GLOC_INFO("[loadDB] auto-create done: db_entries=%zu map_feats=%zu",
+                  map_.db.size(), map_.feats.size());
     }
     catch (const std::exception &e)
     {
-        GLOC_ERROR("[loadDB] %s", e.what());
+        GLOC_ERROR("[loadDB] auto-create failed: %s", e.what());
         return false;
     }
 
