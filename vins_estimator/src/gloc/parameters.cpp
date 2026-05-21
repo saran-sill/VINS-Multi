@@ -11,6 +11,7 @@ std::string GLOC_COLMAP_IMG_FOLDER;
 std::string GLOC_DBOW3_DATABASE;
 std::string GLOC_DBOW3_VOCAB;
 std::string GLOC_WORLD_TMAT_FILE;
+std::string GLOC_COLMAP_MESH_FILE;
 
 // DBoW3
 int GLOC_DBOW3_MAX_RESULTS = 5;
@@ -61,6 +62,8 @@ double GLOC_W_EPIPOLAR = 1.0;
 double GLOC_W_REPROJ = 1.0;
 double GLOC_W_REL_POSE = 1.0;
 double GLOC_W_WORLD_PRIOR = 10.0;
+double GLOC_W_MESH_PRIOR;
+double GLOC_MESH_SIGMA_M;
 double GLOC_HUBER_DELTA = 5.0;
 double GLOC_INLIER_THRESH_PX = 10.0;
 int GLOC_MAX_ITERS = 150;
@@ -70,6 +73,7 @@ double GLOC_MAX_DEPTH_M = 200.0;
 bool GLOC_USE_4DOF = false;
 bool GLOC_FIX_REL_POSES = false;
 std::string GLOC_DEBUG_FOLDER;
+int GLOC_MIN_MESH_PRIOR_POINTS;
 
 // Preprocessing
 bool GLOC_PREPROCESS_WHITE_BALANCE = false;
@@ -152,6 +156,7 @@ void readParameters(std::string config_file)
     fsSettings["gloc_dbow3_database"] >> gloc::GLOC_DBOW3_DATABASE;
     fsSettings["gloc_dbow3_vocab"] >> gloc::GLOC_DBOW3_VOCAB;
     read_if(fsSettings, "gloc_world_tmat_file", gloc::GLOC_WORLD_TMAT_FILE);
+    read_if(fsSettings, "gloc_colmap_mesh_file", gloc::GLOC_COLMAP_MESH_FILE);
 
     read_if(fsSettings, "gloc_dbow3_max_results", gloc::GLOC_DBOW3_MAX_RESULTS);
     read_if(fsSettings, "gloc_dbow3_min_score", gloc::GLOC_DBOW3_MIN_SCORE);
@@ -188,6 +193,7 @@ void readParameters(std::string config_file)
     read_if(fsSettings, "gloc_rel_pose_k", gloc::GLOC_REL_POSE_K);
     read_if(fsSettings, "gloc_w_epipolar", gloc::GLOC_W_EPIPOLAR);
     read_if(fsSettings, "gloc_w_reproj", gloc::GLOC_W_REPROJ);
+    read_if(fsSettings, "gloc_w_mesh_prior", gloc::GLOC_W_MESH_PRIOR);
     read_if(fsSettings, "gloc_w_rel_pose", gloc::GLOC_W_REL_POSE);
     read_if(fsSettings, "gloc_w_world_prior", gloc::GLOC_W_WORLD_PRIOR);
     read_if(fsSettings, "gloc_huber_delta", gloc::GLOC_HUBER_DELTA);
@@ -199,6 +205,8 @@ void readParameters(std::string config_file)
     read_if(fsSettings, "gloc_use_4dof", gloc::GLOC_USE_4DOF);
     read_if(fsSettings, "gloc_fix_rel_poses", gloc::GLOC_FIX_REL_POSES);
     read_if(fsSettings, "gloc_debug_folder", gloc::GLOC_DEBUG_FOLDER);
+    read_if(fsSettings, "gloc_mesh_sigma_m", gloc::GLOC_MESH_SIGMA_M);
+    read_if(fsSettings, "gloc_min_mesh_prior_points", gloc::GLOC_MIN_MESH_PRIOR_POINTS);
 
     // Preprocessing
     read_if(fsSettings, "gloc_preprocess_white_balance", gloc::GLOC_PREPROCESS_WHITE_BALANCE);
@@ -270,6 +278,9 @@ void readParameters(std::string config_file)
     printf("GLOC_W_REPROJ             : %.2f\n", gloc::GLOC_W_REPROJ);
     printf("GLOC_W_REL_POSE           : %.2f\n", gloc::GLOC_W_REL_POSE);
     printf("GLOC_W_WORLD_PRIOR        : %.2f\n", gloc::GLOC_W_WORLD_PRIOR);
+    printf("GLOC_W_MESH_PRIOR        : %.2f\n", gloc::GLOC_W_MESH_PRIOR);
+    printf("GLOC_MESH_SIGMA_M        : %.2f\n", gloc::GLOC_MESH_SIGMA_M);
+    printf("GLOC_MIN_MESH_PRIOR_POINTS        : %.2f\n", gloc::GLOC_MIN_MESH_PRIOR_POINTS);
     printf("GLOC_HUBER_DELTA          : %.2f\n", gloc::GLOC_HUBER_DELTA);
     printf("GLOC_INLIER_THRESH_PX     : %.2f\n", gloc::GLOC_INLIER_THRESH_PX);
     printf("GLOC_MAX_ITERS            : %d\n", gloc::GLOC_MAX_ITERS);

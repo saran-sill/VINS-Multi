@@ -22,6 +22,8 @@ extern std::string GLOC_DBOW3_VOCAB;
 // GLOC_COLMAP_SPARSE_FOLDER. Set via gloc_world_tmat_file in yaml.
 extern std::string GLOC_WORLD_TMAT_FILE;
 
+extern std::string GLOC_COLMAP_MESH_FILE;
+
 // ── DBoW3 query ──────────────────────────────────────────────────────────────
 
 // Number of top candidates returned by DBoW3 per query image (N in the plan).
@@ -112,6 +114,9 @@ extern double GLOC_W_EPIPOLAR;    // Sampson epipolar
 extern double GLOC_W_REPROJ;      // inverse-depth reprojection
 extern double GLOC_W_REL_POSE;    // relative local pose
 extern double GLOC_W_WORLD_PRIOR; // world prior (only when snapped)
+extern double GLOC_W_MESH_PRIOR;      // weight for mesh prior
+
+extern double GLOC_MESH_SIGMA_M;
 
 // Huber loss delta (virtual pixels) applied to epipolar and reprojection terms.
 extern double GLOC_HUBER_DELTA;
@@ -147,6 +152,8 @@ extern bool GLOC_FIX_REL_POSES;
 //   <prefix><t_kf>_g<g>_query.jpg       — query image with keypoints
 //   <prefix><t_kf>_g<g>_match.jpg       — side-by-side with match lines
 extern std::string GLOC_DEBUG_FOLDER;
+
+extern int GLOC_MIN_MESH_PRIOR_POINTS;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Image preprocessing (applied to query images before ORB extraction)

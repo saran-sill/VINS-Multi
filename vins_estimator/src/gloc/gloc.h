@@ -24,6 +24,8 @@
 #include "parameters.h"
 #include "point_features.h"
 #include "../utility/utility.h"
+#include "fast_bvh.h"
+#include "read_ply.h"
 
 // ── Gloc-local logging macros ─────────────────────────────────────────────────
 //
@@ -208,6 +210,10 @@ struct Map
 
     // camera_id → calibration
     colmap::CalibMap calibs;
+
+    // Mesh Prior
+    Mesh mesh_;
+    fbvh::BVH bvh_;
 
     // camera_id → rig extrinsic (R_cam_rig, t_cam_rig)
     std::map<uint32_t, colmap::CamRigTransform> cam_rig_map;
@@ -511,6 +517,9 @@ class Gloc
     // Populates map_.db and map_.feats.
     // Returns false on any error.
     bool loadDatabase();
+
+    // Load ply mesh
+    bool loadMesh();
 
     // ── ORB extractor and feature matcher (constructed once in init()) ───────
     //

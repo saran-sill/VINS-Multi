@@ -22,6 +22,9 @@
 #include "camodocal/camera_models/CameraFactory.h"
 #include "camodocal/camera_models/EquidistantCamera.h"
 
+#include "fast_bvh.h"
+#include "read_ply.h"
+
 namespace fs = std::filesystem;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -507,6 +510,9 @@ bool Gloc::init()
         return false;
 
     if (!loadColmapData())
+        return false;
+
+    if (!loadMesh())
         return false;
 
     if (!loadDatabase())
@@ -1576,6 +1582,12 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
     //
     // For each new keyframe, find the best-scoring candidate whose implied
     // T_map_local is consistent with the majority of other keyframes via RANSAC.
+    //
+    // Pair distribution: each train image may be matched by at most one
+    // keyframe. During RANSAC inlier counting, conflicts are resolved by
+    // score (highest-scoring keyframe keeps the train image). During final
+    // assignment, a greedy score-ordered pass claims train images, then a
+    // second pass gives displaced keyframes their next best unclaimed match.
     // ─────────────────────────────────────────────────────────────────────────
 
     const int X = static_cast<int>(working_set.size());
@@ -1585,7 +1597,7 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
 
     const std::size_t n_modules = working_set.empty() ? 0 : working_set[0].per_gloc.size();
 
-    // ── Read T_map_local once (raw committed value, same as optimizer uses) ──
+    // ── Read T_map_local once ─────────────────────────────────────────────────
     bool snapped_local = false;
     Eigen::Matrix3d R_ml = Eigen::Matrix3d::Identity();
     Eigen::Vector3d t_ml = Eigen::Vector3d::Zero();
@@ -1620,7 +1632,7 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
         if (new_kf_idxs.empty())
             continue;
 
-        // ── 1. Build voter pool from ALL keyframes (new + done) ───────────────
+        // ── 1. Build voter pool ───────────────────────────────────────────────
         struct Cand
         {
             int kf_idx;
@@ -1642,10 +1654,7 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
                                      slot.dbow_candidates[ni].first});
         }
 
-        // ── 1b. Pre-filter by max distance (snapped only) ─────────────────────
-        // Requires T_map_local to project P_local into world frame before
-        // comparing against the candidate's world position. Skip before the
-        // first snap — no prior means no meaningful distance bound.
+        // ── 1b. Pre-filter by max distance ────────────────────────────────────
         if (GLOC_VOTE_MAX_DIST_M > 0.0)
         {
             all_cands.erase(
@@ -1653,8 +1662,7 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
                                [&](const Cand &c) {
                                    const Eigen::Vector3d P_world_pred =
                                        R_ml * c.P_local + t_ml;
-                                   return (c.P_world - P_world_pred).norm()
-                                          > GLOC_VOTE_MAX_DIST_M;
+                                   return (c.P_world - P_world_pred).norm() > GLOC_VOTE_MAX_DIST_M;
                                }),
                 all_cands.end());
         }
@@ -1670,26 +1678,20 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
             continue;
         }
 
-        // ── 2. RANSAC — seed from ALL candidates, assign only new keyframes ───
-        // Each candidate implies a full T_map_local hypothesis:
-        //   R_hyp * P_local[i] + t_hyp = P_world[i]
-        // When snapped: R_hyp = R_ml (known from prior), solve for t_hyp only.
-        // When not snapped: assume R_hyp = I (pure translation, first-snap
-        // heuristic — same assumption used by the initial seed elsewhere).
+        // ── 2. RANSAC ─────────────────────────────────────────────────────────
+        // Inlier counting enforces one-train-per-keyframe and
+        // one-keyframe-per-train: conflicts resolved by highest DBoW score.
         int best_inlier_count = 0;
-        std::vector<int> best_assignment(X, -1);
+        std::vector<int> best_assignment(X, -1); // kf_idx → cand_idx
 
         for (const auto &seed : all_cands)
         {
-            // Derive the translation component of the hypothesis.
-            // With R known: t_hyp = P_world - R_ml * P_local
-            // Without R:    t_hyp = P_world - P_local  (R = I assumed)
             const Eigen::Vector3d t_hyp = snapped_local
-                ? (seed.P_world - R_ml * seed.P_local).eval()
-                : (seed.P_world - seed.P_local).eval();
+                                              ? (seed.P_world - R_ml * seed.P_local).eval()
+                                              : (seed.P_world - seed.P_local).eval();
 
             std::vector<int> assignment(X, -1);
-            int inlier_count = 0;
+            std::vector<double> assignment_score(X, -1.0);
 
             for (int i = 0; i < X; ++i)
             {
@@ -1697,32 +1699,58 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
                 if (slot.dbow_candidates.empty())
                     continue;
 
-                // Predicted world position of keyframe i under this hypothesis
                 const Eigen::Vector3d predicted = snapped_local
-                    ? (R_ml * working_set[i].P_local + t_hyp).eval()
-                    : (working_set[i].P_local + t_hyp).eval();
+                                                      ? (R_ml * working_set[i].P_local + t_hyp).eval()
+                                                      : (working_set[i].P_local + t_hyp).eval();
 
-                int best_ni = -1;
-                double best_score = -1.0;
                 for (int ni = 0; ni < static_cast<int>(slot.dbow_candidates.size()); ++ni)
                 {
-                    const Eigen::Vector3d wp = train_world_pos(slot.dbow_candidates[ni].second);
+                    const Eigen::Vector3d wp =
+                        train_world_pos(slot.dbow_candidates[ni].second);
                     if ((wp - predicted).norm() < GLOC_VOTE_EPS_M)
                     {
                         const double sc = slot.dbow_candidates[ni].first;
-                        if (sc > best_score)
+                        if (sc > assignment_score[i])
                         {
-                            best_score = sc;
-                            best_ni = ni;
+                            assignment_score[i] = sc;
+                            assignment[i] = ni;
                         }
                     }
                 }
-                if (best_ni >= 0)
+            }
+
+            // Resolve train-image conflicts: one keyframe per train image,
+            // winner = highest DBoW score.
+            std::unordered_map<int, int> train_to_best_kf; // train_idx → kf_idx
+            for (int i = 0; i < X; ++i)
+            {
+                if (assignment[i] < 0)
+                    continue;
+                const int ti = static_cast<int>(
+                    working_set[i].per_gloc[g].dbow_candidates[assignment[i]].second);
+                auto it = train_to_best_kf.find(ti);
+                if (it == train_to_best_kf.end())
                 {
-                    assignment[i] = best_ni;
-                    ++inlier_count;
+                    train_to_best_kf[ti] = i;
+                }
+                else
+                {
+                    const int prev = it->second;
+                    if (assignment_score[i] > assignment_score[prev])
+                    {
+                        assignment[prev] = -1;
+                        it->second = i;
+                    }
+                    else
+                    {
+                        assignment[i] = -1;
+                    }
                 }
             }
+
+            const int inlier_count = static_cast<int>(
+                std::count_if(assignment.begin(), assignment.end(),
+                              [](int v) { return v >= 0; }));
 
             if (inlier_count > best_inlier_count)
             {
@@ -1732,66 +1760,7 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
         }
 
         // ── 3. Apply assignment to NEW keyframes only ─────────────────────────
-        if (best_inlier_count >= min_inliers)
-        {
-            GLOC_DEBUG("[vote] g=%zu hypothesis: %d/%d inliers, assigning %zu new kfs",
-                       g, best_inlier_count, X, new_kf_idxs.size());
-
-            // Winning translation from highest-scoring inlier
-            Eigen::Vector3d t_win = Eigen::Vector3d::Zero();
-            for (int i = 0; i < X; ++i)
-                if (best_assignment[i] >= 0)
-                {
-                    const Eigen::Vector3d P_w =
-                        train_world_pos(working_set[i].per_gloc[g]
-                                            .dbow_candidates[best_assignment[i]].second);
-                    t_win = snapped_local
-                        ? (P_w - R_ml * working_set[i].P_local).eval()
-                        : (P_w - working_set[i].P_local).eval();
-                    break;
-                }
-
-            for (int i : new_kf_idxs)
-            {
-                auto &slot = working_set[i].per_gloc[g];
-                slot.voted_train_idxs.clear();
-
-                if (best_assignment[i] >= 0)
-                {
-                    slot.best_train_idx = static_cast<int>(
-                        slot.dbow_candidates[best_assignment[i]].second);
-
-                    const Eigen::Vector3d predicted = snapped_local
-                        ? (R_ml * working_set[i].P_local + t_win).eval()
-                        : (working_set[i].P_local + t_win).eval();
-
-                    std::vector<std::pair<double, int>> inlier_cands;
-                    for (const auto &[sc, ti] : slot.dbow_candidates)
-                        if ((train_world_pos(ti) - predicted).norm() < GLOC_VOTE_EPS_M)
-                            inlier_cands.push_back({sc, static_cast<int>(ti)});
-
-                    std::sort(inlier_cands.begin(), inlier_cands.end(),
-                              [](const auto &a, const auto &b) { return a.first > b.first; });
-                    const int n_keep = std::min(static_cast<int>(inlier_cands.size()),
-                                                GLOC_VOTE_MAX_MATCHES);
-                    for (int k = 0; k < n_keep; ++k)
-                        slot.voted_train_idxs.push_back(inlier_cands[k].second);
-
-                    GLOC_DEBUG("[vote] kf_t=%.4f g=%zu -> %d match(es), best train=%d score=%.4f",
-                               working_set[i].t_kf, g,
-                               static_cast<int>(slot.voted_train_idxs.size()),
-                               slot.best_train_idx,
-                               slot.dbow_candidates[best_assignment[i]].first);
-                }
-                else
-                {
-                    slot.best_train_idx = -1;
-                    GLOC_DEBUG("[vote] kf_t=%.4f g=%zu -> no inlier candidate",
-                               working_set[i].t_kf, g);
-                }
-            }
-        }
-        else
+        if (best_inlier_count < min_inliers)
         {
             GLOC_DEBUG("[vote] g=%zu rejected: best inliers %d < %d",
                        g, best_inlier_count, min_inliers);
@@ -1800,6 +1769,124 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
                 working_set[i].per_gloc[g].best_train_idx = -1;
                 working_set[i].per_gloc[g].voted_train_idxs.clear();
             }
+            continue;
+        }
+
+        GLOC_DEBUG("[vote] g=%zu hypothesis: %d/%d inliers, assigning %zu new kfs",
+                   g, best_inlier_count, X, new_kf_idxs.size());
+
+        // Winning translation
+        Eigen::Vector3d t_win = Eigen::Vector3d::Zero();
+        for (int i = 0; i < X; ++i)
+            if (best_assignment[i] >= 0)
+            {
+                const Eigen::Vector3d P_w =
+                    train_world_pos(working_set[i].per_gloc[g].dbow_candidates[best_assignment[i]].second);
+                t_win = snapped_local
+                            ? (P_w - R_ml * working_set[i].P_local).eval()
+                            : (P_w - working_set[i].P_local).eval();
+                break;
+            }
+
+        // ── 3a. Build claimed set from already-done keyframes ─────────────────
+        // Done keyframes have fixed matches — their train images are off-limits.
+        std::unordered_set<int> claimed; // train indices already taken
+        for (int i = 0; i < X; ++i)
+        {
+            const auto &slot = working_set[i].per_gloc[g];
+            if (!slot.pipeline_done)
+                continue;
+            if (slot.best_train_idx >= 0)
+                claimed.insert(slot.best_train_idx);
+            for (int ti : slot.voted_train_idxs)
+                claimed.insert(ti);
+        }
+
+        // ── 3b. Greedy assignment: highest-scoring new keyframe claims first ───
+        // Sort new keyframes by their best_assignment score descending so the
+        // most confident match wins any conflict.
+        //
+        // For each new keyframe we build its ranked candidate list (all dbow
+        // candidates within GLOC_VOTE_EPS_M of predicted, sorted by score),
+        // then walk down the list until we find an unclaimed train image.
+        // This ensures that in the A(1) vs B(1,2) example:
+        //   - A has higher score on train 1 → claims it first
+        //   - B finds train 1 claimed → falls back to train 2
+
+        // Precompute per-new-kf candidate lists (score-sorted, within eps)
+        struct KfCandList
+        {
+            int kf_idx;
+            double best_score; // score of highest-ranked candidate (for sort)
+            // (score, train_idx) sorted descending by score
+            std::vector<std::pair<double, int>> ranked;
+        };
+        std::vector<KfCandList> kf_cand_lists;
+        kf_cand_lists.reserve(new_kf_idxs.size());
+
+        for (int i : new_kf_idxs)
+        {
+            const auto &slot = working_set[i].per_gloc[g];
+            const Eigen::Vector3d predicted = snapped_local
+                                                  ? (R_ml * working_set[i].P_local + t_win).eval()
+                                                  : (working_set[i].P_local + t_win).eval();
+
+            KfCandList cl;
+            cl.kf_idx = i;
+            for (const auto &[sc, ti] : slot.dbow_candidates)
+                if ((train_world_pos(ti) - predicted).norm() < GLOC_VOTE_EPS_M)
+                    cl.ranked.push_back({sc, static_cast<int>(ti)});
+
+            std::sort(cl.ranked.begin(), cl.ranked.end(),
+                      [](const auto &a, const auto &b) { return a.first > b.first; });
+
+            cl.best_score = cl.ranked.empty() ? -1.0 : cl.ranked.front().first;
+            kf_cand_lists.push_back(std::move(cl));
+        }
+
+        // Sort new keyframes so highest-confidence one claims first
+        std::sort(kf_cand_lists.begin(), kf_cand_lists.end(),
+                  [](const KfCandList &a, const KfCandList &b) {
+                      return a.best_score > b.best_score;
+                  });
+
+        // Greedy claim
+        for (auto &cl : kf_cand_lists)
+        {
+            auto &slot = working_set[cl.kf_idx].per_gloc[g];
+            slot.voted_train_idxs.clear();
+            slot.best_train_idx = -1;
+
+            for (const auto &[sc, ti] : cl.ranked)
+            {
+                if (claimed.count(ti))
+                    continue; // already taken — try next
+
+                // First unclaimed candidate becomes best_train_idx
+                if (slot.best_train_idx < 0)
+                {
+                    slot.best_train_idx = ti;
+                    claimed.insert(ti);
+                }
+                else
+                {
+                    // Additional unclaimed inliers go into voted_train_idxs
+                    // (up to GLOC_VOTE_MAX_MATCHES total including best)
+                    if (static_cast<int>(slot.voted_train_idxs.size()) + 1 >= GLOC_VOTE_MAX_MATCHES)
+                        break;
+                    slot.voted_train_idxs.push_back(ti);
+                    claimed.insert(ti);
+                }
+            }
+
+            if (slot.best_train_idx >= 0)
+                GLOC_DEBUG("[vote] kf_t=%.4f g=%zu -> best train=%d voted=%d",
+                           working_set[cl.kf_idx].t_kf, g,
+                           slot.best_train_idx,
+                           static_cast<int>(slot.voted_train_idxs.size()));
+            else
+                GLOC_DEBUG("[vote] kf_t=%.4f g=%zu -> no unclaimed candidate",
+                           working_set[cl.kf_idx].t_kf, g);
         }
     }
 }
@@ -3834,13 +3921,45 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
     {
         GlocFixedRelReprojCost rep;
         GlocFixedRelEpipolarCost epi;
+        MeshRayPriorCost mesh_prior;
+        bool has_mesh_prior = false;
         int kf_idx;
     };
     std::vector<FlatObs> flat_obs;
     flat_obs.reserve(4096);
     std::vector<double> rhos;
     rhos.reserve(4096);
+
     const double kMaxDepthM = GLOC_MAX_DEPTH_M;
+    const bool use_mesh = !map_.bvh_.nodes.empty() && GLOC_W_MESH_PRIOR > 0.0;
+
+    // BVH ray intersection helper — same logic as global_localize_dbow3.cpp.
+    // dir does NOT need to be unit-length; lambda is in units of ||dir||.
+    auto ray_mesh_intersect = [&](const Vec3d &org, const Vec3d &dir,
+                                  double &lambda_out) -> bool {
+        const double len = dir.norm();
+        if (len < 1e-12)
+            return false;
+        const double inv_len = 1.0 / len;
+
+        fbvh::Ray ray{};
+        ray.org[0] = static_cast<float>(org.x());
+        ray.org[1] = static_cast<float>(org.y());
+        ray.org[2] = static_cast<float>(org.z());
+        ray.dir[0] = static_cast<float>(dir.x() * inv_len);
+        ray.dir[1] = static_cast<float>(dir.y() * inv_len);
+        ray.dir[2] = static_cast<float>(dir.z() * inv_len);
+        ray.min_t = 0.f;
+        ray.max_t = std::numeric_limits<float>::max();
+
+        fbvh::Hit hit;
+        if (!map_.bvh_.traverse(ray, hit))
+            return false;
+
+        // hit.t is in normalised-direction units → convert back to ||dir|| units
+        lambda_out = static_cast<double>(hit.t) * inv_len;
+        return true;
+    };
 
     for (int i = 0; i < X; ++i)
     {
@@ -3878,6 +3997,7 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
                 const double fy_q = vins_multi::FOCAL_LENGTH;
                 const double cx_q = slot.query_feats.image_size.width / 2.0;
                 const double cy_q = slot.query_feats.image_size.height / 2.0;
+                const double f_avg = std::sqrt(fx_q * fy_q);
 
                 // Bake in per-keyframe VINS local pose
                 const Mat3d R_lb = kf.R_local.toRotationMatrix();
@@ -3896,12 +4016,17 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
                 tcr_arr[1] = t_cam_imu.y();
                 tcr_arr[2] = t_cam_imu.z();
 
+                // Track flat_obs size before processing this ti so we can
+                // detect the case where every point misses the mesh.
+                const std::size_t flat_obs_before = flat_obs.size();
+
                 for (const auto &[pq, pt] : slot.multi_pt_pairs_undistorted[match_k])
                 {
                     const Vec3d m_t((pt.x() - train_cal.cx) / train_cal.fx,
                                     (pt.y() - train_cal.cy) / train_cal.fy, 1.0);
                     const Vec3d Rtm = R_j.transpose() * m_t;
 
+                    // ── Reprojection functor ──────────────────────────────────
                     GlocFixedRelReprojCost rep{};
                     std::memcpy(rep.R_local_body, R_lb_arr, sizeof(R_lb_arr));
                     rep.P_local[0] = kf.P_local.x();
@@ -3922,6 +4047,7 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
                     rep.cx_ = cx_q;
                     rep.cy_ = cy_q;
 
+                    // ── Epipolar functor ──────────────────────────────────────
                     GlocFixedRelEpipolarCost epi{};
                     std::memcpy(epi.R_local_body, R_lb_arr, sizeof(R_lb_arr));
                     epi.P_local[0] = kf.P_local.x();
@@ -3939,23 +4065,76 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
                     epi.t_j[2] = t_j_arr[2];
                     std::memcpy(epi.Rcr, Rcr_arr, sizeof(Rcr_arr));
                     std::memcpy(epi.tcr, tcr_arr, sizeof(tcr_arr));
-                    epi.scale = std::sqrt(fx_q * fy_q);
+                    epi.scale = f_avg;
 
-                    flat_obs.push_back({rep, epi, i});
-                    rhos.push_back(0.1);
+                    // ── Mesh ray prior ────────────────────────────────────────
+                    // When a mesh is loaded every point MUST hit the mesh.
+                    // Misses (sky, moving objects, mesh holes) mean the depth
+                    // is unreliable so the point is discarded entirely.
+                    // When no mesh is configured all points are kept and rho
+                    // falls back to the blind 0.1 seed (original behaviour).
+                    MeshRayPriorCost mesh_prior{};
+                    bool has_mesh_prior = false;
+
+                    if (use_mesh)
+                    {
+                        double lambda_mesh = 0.0;
+                        if (ray_mesh_intersect(o_j, Rtm, lambda_mesh) &&
+                            lambda_mesh > 1e-3 && lambda_mesh < kMaxDepthM)
+                        {
+                            mesh_prior.rho_mesh = 1.0 / lambda_mesh;
+                            mesh_prior.f_avg = f_avg;
+                            mesh_prior.sigma_m = GLOC_MESH_SIGMA_M;
+                            has_mesh_prior = true;
+                        }
+                        else
+                        {
+                            // No mesh hit — reject this point.
+                            continue;
+                        }
+                    }
+
+                    flat_obs.push_back({rep, epi, mesh_prior, has_mesh_prior, i});
+                    rhos.push_back(has_mesh_prior ? mesh_prior.rho_mesh : 0.1);
+                }
+
+                // When a mesh is active, every ti that passed the initial guard
+                // must contribute at least one mesh-anchored point. If none
+                // survived (all points missed the mesh), the train image is
+                // entirely unanchored in depth — abort immediately rather than
+                // optimising with a corrupted observation set.
+                if (use_mesh && flat_obs.size() == flat_obs_before)
+                {
+                    GLOC_WARN("[opt_fr] ti=%zu: all points missed mesh — abort",
+                              static_cast<std::size_t>(slot.voted_train_idxs[match_k]));
+                    return false;
                 }
             } // end match_k loop
         }
     }
 
     const int N = static_cast<int>(flat_obs.size());
+    const int n_mesh_hit = static_cast<int>(
+        std::count_if(flat_obs.begin(), flat_obs.end(),
+                      [](const FlatObs &o) { return o.has_mesh_prior; }));
+
     if (N < GLOC_MIN_PAIRS)
     {
         GLOC_DEBUG("[opt_fr] too few observations (%d) - skip", N);
         return false;
     }
-    GLOC_DEBUG("[opt_fr] X=%d keyframes N=%d observations (fixed-rel, %s)",
-               X, N, use_4dof ? "4DOF" : "6DOF");
+    // When a mesh is active every surviving point has a prior (misses were
+    // already rejected above), so n_mesh_hit == N.  The check below catches
+    // the degenerate case where the mesh exists but almost no rays hit it
+    // (e.g. the robot has moved outside the mapped area).
+    if (use_mesh && n_mesh_hit < GLOC_MIN_MESH_PRIOR_POINTS)
+    {
+        GLOC_WARN("[opt_fr] too few mesh-prior points (%d < %d) - skip",
+                  n_mesh_hit, GLOC_MIN_MESH_PRIOR_POINTS);
+        return false;
+    }
+    GLOC_DEBUG("[opt_fr] X=%d keyframes N=%d observations mesh_hits=%d (fixed-rel, %s)",
+               X, N, n_mesh_hit, use_4dof ? "4DOF" : "6DOF");
 
     // ── Solver options ────────────────────────────────────────────────────────
     ceres::Solver::Options solver_opts;
@@ -3969,11 +4148,7 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
     solver_opts.minimizer_progress_to_stdout = false;
     solver_opts.num_threads = 1;
 
-    // Use DO_NOT_TAKE_OWNERSHIP so huber_loss (stack) is shared safely across
-    // multiple ceres::Problem instances (init pass + main solve).
-    // ScaledLoss is also stack-allocated per build_problem call via lambda capture.
     ceres::Problem::Options prob_opts;
-    // prob_opts.loss_function_ownership = ceres::DO_NOT_TAKE_OWNERSHIP;
 
     auto build_problem = [&](ceres::Problem &prob,
                              ceres::ParameterBlockOrdering *ord,
@@ -3986,25 +4161,22 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
             // Fix t_map Z: 4-DOF solves XY+yaw only.
             prob.AddParameterBlock(omega_map.data(), 3, new YawOnlyParameterization());
             // SubsetParameterization fixes Z (index 2) — compatible with DENSE_SCHUR.
-            // SetParameterLowerBound/UpperBound on Z breaks Schur elimination.
             prob.AddParameterBlock(t_map.data(), 3,
                                    new ceres::SubsetParameterization(3, {2}));
         }
 
         // ── World prior (snapped only) ────────────────────────────────────────
-        // Anchors omega_map and t_map to omega_map_seed / t_map_seed which
-        // were captured from T_map_local BEFORE this lambda was defined —
-        // so the seed is fixed and independent of the optimisation variable.
+        // Anchors omega_map and t_map to the seeds captured before this lambda,
+        // so the prior target is fixed and independent of the solve variable.
         if (snapped_local && GLOC_W_WORLD_PRIOR > 0.0)
         {
             using PriorCost3 = GlocFixedRelPriorCost<3>;
 
-            // omega: 1 radian ≈ FOCAL_LENGTH pixels at unit depth — scale accordingly
+            // omega: 1 radian ≈ FOCAL_LENGTH pixels at unit depth
             const double omega_scale = vins_multi::FOCAL_LENGTH;
-            // t: 1 metre at typical depth D ≈ FOCAL_LENGTH/D pixels — use D=5m as ref
+            // t: 1 metre at typical depth D ≈ FOCAL_LENGTH/D pixels (D=5 m ref)
             const double t_scale = vins_multi::FOCAL_LENGTH / 5.0;
 
-            // omega prior
             {
                 auto *cost = new ceres::AutoDiffCostFunction<PriorCost3, 3, 3>(
                     new PriorCost3(omega_map_seed.data(), omega_scale));
@@ -4013,7 +4185,6 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
                                                             ceres::TAKE_OWNERSHIP),
                                       omega_map.data());
             }
-            // t prior
             {
                 auto *cost = new ceres::AutoDiffCostFunction<PriorCost3, 3, 3>(
                     new PriorCost3(t_map_seed.data(), t_scale));
@@ -4026,6 +4197,9 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
 
         for (int k = 0; k < N; ++k)
         {
+            // rho is group-0 (marginalised first by Schur complement)
+            ord->AddElementToGroup(&rhos[k], 0);
+
             if (GLOC_W_REPROJ > 0.0)
             {
                 auto *cost = new ceres::AutoDiffCostFunction<
@@ -4037,8 +4211,8 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
                 prob.AddResidualBlock(cost, loss,
                                       omega_map.data(), t_map.data(), &rhos[k]);
                 prob.SetParameterLowerBound(&rhos[k], 0, 1.0 / kMaxDepthM);
-                ord->AddElementToGroup(&rhos[k], 0);
             }
+
             if (add_epi && GLOC_W_EPIPOLAR > 0.0)
             {
                 auto *cost = new ceres::AutoDiffCostFunction<
@@ -4048,6 +4222,21 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
                     new ceres::HuberLoss(GLOC_HUBER_DELTA),
                     GLOC_W_EPIPOLAR, ceres::TAKE_OWNERSHIP);
                 prob.AddResidualBlock(cost, loss, omega_map.data(), t_map.data());
+            }
+
+            // ── Mesh ray prior (rho-only, group-0) ───────────────────────────
+            // Only added when a mesh hit was found at observation-build time.
+            // Huber wrapping handles mesh outliers (holes, behind-surface hits).
+            // Because this residual block touches only &rhos[k] (group-0) it
+            // does not disturb the Schur complement for the pose blocks.
+            if (flat_obs[k].has_mesh_prior && GLOC_W_MESH_PRIOR > 0.0)
+            {
+                auto *cost = new ceres::AutoDiffCostFunction<MeshRayPriorCost, 1, 1>(
+                    new MeshRayPriorCost(flat_obs[k].mesh_prior));
+                auto *loss = new ceres::ScaledLoss(
+                    new ceres::HuberLoss(GLOC_HUBER_DELTA),
+                    GLOC_W_MESH_PRIOR, ceres::TAKE_OWNERSHIP);
+                prob.AddResidualBlock(cost, loss, &rhos[k]);
             }
         }
     };
@@ -4072,7 +4261,9 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
             const Eigen::Map<const Eigen::Vector3d> ov(omega_map.data());
             const double norm = ov.norm();
             const Mat3d R_orig = Eigen::AngleAxisd(
-                                     norm, norm > 1e-8 ? (ov / norm).eval() : Eigen::Vector3d::UnitZ())
+                                     norm,
+                                     norm > 1e-8 ? (ov / norm).eval()
+                                                 : Eigen::Vector3d::UnitZ())
                                      .toRotationMatrix();
             const Mat3d Rz = Eigen::AngleAxisd(yk * kYawStep,
                                                Eigen::Vector3d::UnitZ())
@@ -4086,8 +4277,10 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
             build_problem(init_prob, init_ord, /*add_epi=*/true);
 
             if (yk == 0)
-                GLOC_WARN("[opt_fr] W_REPROJ=%.2f W_EPIPOLAR=%.2f N=%d num_residuals=%d",
-                          GLOC_W_REPROJ, GLOC_W_EPIPOLAR, N, init_prob.NumResiduals());
+                GLOC_WARN("[opt_fr] W_REPROJ=%.2f W_EPIPOLAR=%.2f W_MESH=%.2f "
+                          "N=%d num_residuals=%d",
+                          GLOC_W_REPROJ, GLOC_W_EPIPOLAR, GLOC_W_MESH_PRIOR,
+                          N, init_prob.NumResiduals());
 
             ceres::Solver::Options init_opts = solver_opts;
             init_opts.linear_solver_ordering.reset(init_ord);
@@ -4149,7 +4342,9 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
     const Eigen::Map<const Eigen::Vector3d> ov(omega_map.data());
     const double norm = ov.norm();
     const Mat3d R_ml = Eigen::AngleAxisd(
-                           norm, norm > 1e-8 ? (ov / norm).eval() : Eigen::Vector3d::UnitZ())
+                           norm,
+                           norm > 1e-8 ? (ov / norm).eval()
+                                       : Eigen::Vector3d::UnitZ())
                            .toRotationMatrix();
     const Vec3d t_ml(t_map[0], t_map[1], t_map[2]);
 
@@ -4383,6 +4578,91 @@ bool Gloc::loadDatabase()
         GLOC_ERROR("[loadDB] %s", e.what());
         return false;
     }
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// loadMesh
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool Gloc::loadMesh()
+{
+    if (GLOC_COLMAP_MESH_FILE.empty())
+    {
+        GLOC_INFO("[loadMesh] no mesh configured — mesh ray prior disabled");
+        return true; // optional feature, not an error
+    }
+
+    GLOC_INFO("[loadMesh] loading mesh: %s", GLOC_COLMAP_MESH_FILE.c_str());
+
+    try
+    {
+        map_.mesh_ = load_ply(GLOC_COLMAP_MESH_FILE);
+    }
+    catch (const std::exception &e)
+    {
+        GLOC_ERROR("[loadMesh] failed to load mesh: %s", e.what());
+        return false;
+    }
+
+    // The world transform was already applied to map_.images in loadColmapData().
+    // Apply the same transform to mesh vertices so they share the same frame.
+    // We re-derive the transform from GLOC_WORLD_TMAT_FILE here rather than
+    // storing it, to keep loadMesh() self-contained.
+    // If no world transform file is set, vertices are already in the right frame.
+    if (!GLOC_WORLD_TMAT_FILE.empty())
+    {
+        Eigen::Matrix4d world_transform = Eigen::Matrix4d::Identity();
+        std::ifstream f(GLOC_WORLD_TMAT_FILE);
+        if (f)
+        {
+            int row = 0;
+            std::string line;
+            while (std::getline(f, line) && row < 4)
+            {
+                const auto hash = line.find('#');
+                if (hash != std::string::npos)
+                    line = line.substr(0, hash);
+                std::istringstream ss(line);
+                double v;
+                int col = 0;
+                while (ss >> v && col < 4)
+                    world_transform(row, col++) = v;
+                if (col > 0)
+                    ++row;
+            }
+        }
+
+        if (!world_transform.isIdentity(1e-10))
+        {
+            const Eigen::Matrix3d R_M = world_transform.topLeftCorner<3, 3>();
+            const Eigen::Vector3d t_M = world_transform.topRightCorner<3, 1>();
+            auto &verts = map_.mesh_.verts;
+            for (std::size_t vi = 0; vi < verts.size(); vi += 3)
+            {
+                const Eigen::Vector3d p(verts[vi], verts[vi + 1], verts[vi + 2]);
+                const Eigen::Vector3d pw = R_M * p + t_M;
+                verts[vi] = static_cast<float>(pw.x());
+                verts[vi + 1] = static_cast<float>(pw.y());
+                verts[vi + 2] = static_cast<float>(pw.z());
+            }
+        }
+    }
+
+    const uint32_t nv = static_cast<uint32_t>(map_.mesh_.verts.size() / 3);
+    const uint32_t nf = static_cast<uint32_t>(map_.mesh_.faces.size() / 3);
+    GLOC_INFO("[loadMesh] vertices=%u triangles=%u — building BVH ...", nv, nf);
+
+    const auto t0 = std::chrono::high_resolution_clock::now();
+    map_.bvh_ = fbvh::make_bvh(map_.mesh_.verts.data(),
+                               map_.mesh_.faces.data(), nf, /*min_leaf=*/16);
+    const auto t1 = std::chrono::high_resolution_clock::now();
+    const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+
+    const fbvh::Stats stats = fbvh::tree_stats(map_.bvh_);
+    GLOC_INFO("[loadMesh] BVH built in %.0f ms — leaves=%ld branches=%ld max_depth=%d",
+              ms, stats.leaves, stats.branches, stats.max_depth);
 
     return true;
 }

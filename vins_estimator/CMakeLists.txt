@@ -185,6 +185,14 @@ include_directories(
         ${CMAKE_SOURCE_DIR}/colmap
 )
 
+add_library(mesh_util_lib SHARED
+    ${CMAKE_SOURCE_DIR}/mesh_utils/read_ply.cpp
+)
+
+include_directories(
+        ${CMAKE_SOURCE_DIR}/mesh_utils
+)
+
 add_library(point_features_lib SHARED
     ${CMAKE_SOURCE_DIR}/point_features/point_features.cpp
 )
@@ -250,7 +258,7 @@ add_library(estimator_lib_multi SHARED
     src/estimator/feature_manager.cpp
 )
 target_link_libraries(estimator_lib_multi
-    parameter_lib_multi utility_lib_multi init_lib_multi factor_lib_multi
+    parameter_lib_multi utility_lib_multi init_lib_multi factor_lib_multi mesh_util_lib
     ${CAMERA_MODELS_LIB} ${ros_libraries} ${OPENCV_FULL_PATH_LIBS} ${CERES_LIBRARIES} ${LIBDW})
 
 add_library(gloc_lib SHARED
@@ -260,6 +268,7 @@ add_library(gloc_lib SHARED
 target_link_libraries(gloc_lib
     colmap_util_lib dbow3_util_lib point_features_lib
     parameter_lib_multi
+    mesh_util_lib
     ${CAMERA_MODELS_LIB}
     ${CERES_LIBRARIES}
     ${ros_libraries}
@@ -280,6 +289,7 @@ target_link_libraries(${PROJECT_NAME} rosnode_lib_multi
                                       factor_lib_multi
                                       colmap_util_lib
                                       point_features_lib
+                                      mesh_util_lib
                                       dbow3_util_lib
                                       gloc_lib
                                       ${LIBDW})
@@ -300,6 +310,7 @@ install(TARGETS
     rosnode_lib_multi
     colmap_util_lib
     point_features_lib
+    mesh_util_lib
     dbow3_util_lib
     gloc_lib
     RUNTIME DESTINATION bin

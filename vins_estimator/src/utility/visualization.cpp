@@ -18,7 +18,7 @@ namespace vins_multi
 
 ros::Publisher pub_odometry, pub_latest_odometry, pub_latest_odometry_world,
     pub_latest_odometry_raw;
-ros::Publisher pub_gloc_map_frustums, pub_gloc_map_path;
+ros::Publisher pub_gloc_map_frustums, pub_gloc_map_path, pub_gloc_mesh_cloud;
 ros::Publisher pub_gloc_opt_poses, pub_gloc_opt_path, pub_gloc_kf_status, pub_gloc_match_lines;
 ros::Publisher pub_gloc_vote_lines;
 ros::Publisher pub_gloc_corr_lines;
@@ -63,6 +63,8 @@ void registerPub(ros::NodeHandle &n)
         "gloc/map_frustums", 1, /*latch=*/true);
     pub_gloc_map_path = n.advertise<nav_msgs::Path>(
         "gloc/map_path", 1, /*latch=*/true);
+    pub_gloc_mesh_cloud = n.advertise<sensor_msgs::PointCloud>(
+        "gloc/mesh_cloud", 1, /*latch=*/true);
     pub_gloc_opt_poses = n.advertise<geometry_msgs::PoseArray>(
         "gloc/opt_poses", 10);
     pub_gloc_opt_path = n.advertise<nav_msgs::Path>(
@@ -304,6 +306,34 @@ void pubGlocMap(const gloc::Gloc &gloc)
 
     ROS_INFO("[pubGlocMap] Published map path with %zu poses on gloc/map_path",
              map_path.poses.size());
+
+    // ── Mesh point cloud (sensor_msgs/PointCloud, latched) ───────────────────
+    // Publish mesh vertices as a sparse point cloud so the map geometry is
+    // visible in RViz alongside the camera path. Published once, latched, so
+    // late subscribers still receive it. Only published when a mesh is loaded.
+    const auto &mesh = map.mesh_;
+    if (!mesh.verts.empty())
+    {
+        const std::size_t n_verts = mesh.verts.size() / 3;
+
+        sensor_msgs::PointCloud cloud;
+        cloud.header.stamp = now;
+        cloud.header.frame_id = frame_id;
+        cloud.points.reserve(n_verts);
+
+        for (std::size_t vi = 0; vi < mesh.verts.size(); vi += 3)
+        {
+            geometry_msgs::Point32 p;
+            p.x = mesh.verts[vi + 0];
+            p.y = mesh.verts[vi + 1];
+            p.z = mesh.verts[vi + 2];
+            cloud.points.push_back(p);
+        }
+
+        pub_gloc_mesh_cloud.publish(cloud);
+        ROS_INFO("[pubGlocMap] Published mesh cloud with %zu vertices on gloc/mesh_cloud",
+                 n_verts);
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -425,7 +455,6 @@ void pubLatestOdometry(const Estimator &estimator)
 
             broadcastWorldOdomTF(cached_R, cached_t, odometry.header.stamp);
         }
-
     }
 
     last_pos = w_T_center;

@@ -664,3 +664,40 @@ struct GlocFixedRelPriorCost
         return true;
     }
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MeshRayPriorCost
+//
+//   The 3-D point model is:  X_world = o_j + (1/rho) * Rtm
+//   where  o_j  = train camera centre (world),
+//          Rtm  = R_j^T * K_j^{-1} * q_train  (unnormalised world bearing).
+//
+//   We cast the ray (o_j, Rtm) against the mesh and obtain the intersection
+//   depth  lambda_mesh  such that  X_mesh = o_j + lambda_mesh * Rtm.
+//   The corresponding inverse depth is  rho_mesh = 1 / lambda_mesh.
+//
+//   Equivalently (avoids 1/rho inside AutoDiff, better conditioning):
+//     res[0] = f_avg * (rho_mesh - rho) / (sigma_m * rho_mesh^2)
+//   which is the first-order expansion of  (1/rho - 1/rho_mesh)  around rho_mesh.
+//
+//   This is rho-only (group-0 in Schur ordering) — it does NOT couple to
+//   the pose blocks and therefore does not disturb the Schur complement.
+// ─────────────────────────────────────────────────────────────────────────────
+struct MeshRayPriorCost
+{
+    double rho_mesh; // 1 / lambda_mesh  (inverse of ray–mesh intersection depth)
+    double f_avg;    // sqrt(fx_q * fy_q) — pixel-scale normalisation
+    double sigma_m;  // expected depth uncertainty in metres
+
+    template <typename T>
+    bool operator()(const T *__restrict__ rho, T *__restrict__ res) const
+    {
+        // First-order linearisation of (1/rho - 1/rho_mesh):
+        //   d(1/rho)/d(rho) = -1/rho^2  ≈ -1/rho_mesh^2  near rho_mesh
+        // → residual in metres ≈ (rho_mesh - rho) / rho_mesh^2
+        // → scaled to ~pixels:  f_avg * (rho_mesh - rho) / (sigma_m * rho_mesh^2)
+        const T scale = T(f_avg / (sigma_m * rho_mesh * rho_mesh));
+        res[0] = scale * (T(rho_mesh) - rho[0]);
+        return true;
+    }
+};
