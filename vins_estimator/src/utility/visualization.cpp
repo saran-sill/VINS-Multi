@@ -438,6 +438,19 @@ void pubLatestOdometry(const Estimator &estimator)
             odom_world.pose.pose.orientation.w = q_world.w();
             pub_latest_odometry_world.publish(odom_world);
         }
+
+        // Broadcast world → body_world TF at IMU rate so RViz "Follow" view
+        // is smooth. body_world is the IMU-propagated body pose in world frame,
+        // updated at ~100 Hz vs the estimator-rate body TF (~5-10 Hz).
+        {
+            static tf::TransformBroadcaster br_world;
+            tf::Transform tf_body_world;
+            tf_body_world.setOrigin(tf::Vector3(t_world.x(), t_world.y(), t_world.z()));
+            tf_body_world.setRotation(tf::Quaternion(
+                q_world.x(), q_world.y(), q_world.z(), q_world.w()));
+            br_world.sendTransform(tf::StampedTransform(
+                tf_body_world, odometry.header.stamp, "world", "body_world"));
+        }
     }
 
     // ── World→odom TF at IMU rate ─────────────────────────────────────────────

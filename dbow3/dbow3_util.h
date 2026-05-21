@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "DBoW3/DBoW3.h"
+#include "../point_features/point_features.h"
 
 namespace dbow3
 {
@@ -25,9 +26,25 @@ struct ImageFeatures
     cv::Mat beblid_descriptors; // CV_8U — populated only when use_beblid=true
 };
 
+struct OrbConfig {
+    int nfeatures=1000; float scale_factor=1.2f; int nlevels=8;
+    int edge_threshold=31; int first_level=0; int wta_k=2;
+    int score_type=0; int patch_size=31; int fast_threshold=20;
+    bool use_beblid=false; float beblid_scale=1.0f; int beblid_n_bits=256;
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Public API — DBoW3 database loader
 // ─────────────────────────────────────────────────────────────────────────────
+void create_dbow3_database(const std::vector<colmap::Image>    &map_images,
+                           const std::string                    &img_folder,
+                           const std::string                    &vocab_path,
+                           const std::string                    &auto_db_root,
+                           const OrbConfig                      &cfg,
+                           PointFeatureExtractorORB             *orb_extractor,
+                           cv::Ptr<cv::xfeatures2d::BEBLID>      beblid_extractor,
+                           DBoW3::Database                      &db_out,
+                           std::vector<ImageFeatures>           &train_feats_out);
 
 /**
  * Load the DBoW3 vocabulary, feature cache, and database in one call.

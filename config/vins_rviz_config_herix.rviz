@@ -26,7 +26,7 @@ Panels:
   - Class: rviz/Time
     Name: Time
     SyncMode: 0
-    SyncSource: ""
+    SyncSource: MapPoints
   - Class: rviz/Displays
     Help Height: 0
     Name: Displays
@@ -38,6 +38,7 @@ Panels:
         - /VIO1/OdomHigh1/Shape1
         - /VIO1/OdomLow1/Shape1
         - /GLOC1
+        - /GLOC1/MapPoints1
         - /GLOC1/OdomIMUWorld1/Shape1
         - /GLOC1/OdomIMURaw1/Shape1
       Splitter Ratio: 0.5222772359848022
@@ -507,7 +508,7 @@ Visualization Manager:
           Queue Size: 10
           Selectable: true
           Size (Pixels): 3
-          Size (m): 0.009999999776482582
+          Size (m): 0.004999999888241291
           Style: Flat Squares
           Topic: /herix/gloc/mesh_cloud
           Unreliable: false
@@ -656,7 +657,7 @@ Visualization Manager:
     Background Color: 0; 0; 0
     Default Light: true
     Fixed Frame: world
-    Frame Rate: 30
+    Frame Rate: 60
   Name: root
   Tools:
     - Class: rviz/MoveCamera
@@ -677,7 +678,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz/Orbit
-      Distance: 45.83372116088867
+      Distance: 45.88267517089844
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
@@ -685,17 +686,17 @@ Visualization Manager:
         Value: false
       Field of View: 0.7853981852531433
       Focal Point:
-        X: 3.00183367729187
-        Y: 17.392854690551758
-        Z: 2.7890055179595947
+        X: 7.524456977844238
+        Y: 10.06350040435791
+        Z: -3.6732959747314453
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 1.544796347618103
-      Target Frame: <Fixed Frame>
-      Yaw: 3.2895150184631348
+      Pitch: 1.054796814918518
+      Target Frame: body_world
+      Yaw: 3.3240973949432373
     Saved: ~
 Window Geometry:
   Displays:

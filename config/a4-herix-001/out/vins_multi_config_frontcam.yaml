@@ -229,16 +229,18 @@ gloc_startup_delay_s: 10.0   # wait XXs after first snapshot before processing
 # gloc_colmap_img_folder: "/mnt/EXDISK/HiveGround/colmap_ws/SCGP/images_2"
 # gloc_colmap_mesh_file: "/mnt/EXDISK/HiveGround/colmap_ws/SCGP/colmap/_dense/0/mesh.ply"
 # gloc_world_tmat_file: "/mnt/EXDISK/HiveGround/colmap_ws/SCGP/world_transform.txt"
-# gloc_dbow3_database: "/mnt/EXDISK/HiveGround/colmap_ws/_SCGP_database/database_orb.bin"
+# gloc_dbow3_database: ""     # "/mnt/EXDISK/HiveGround/colmap_ws/_SCGP_database/database_orb.bin"
 # gloc_dbow3_vocab: "/mnt/EXDISK/HiveGround/dbow3/orbvoc.dbow3"
+# gloc_dbow3_auto_created_db_folder: ""
 
 #======================= Jetson =======================
 gloc_colmap_sparse_folder: "/home/a4/workspace/Arm/SCGP_map/colmap/_sparse/0"
 gloc_colmap_img_folder: "/home/a4/workspace/Arm/SCGP_map/images_2"
 gloc_colmap_mesh_file: "/home/a4/workspace/Arm/SCGP_map/mesh.ply"
 gloc_world_tmat_file: "/home/a4/workspace/Arm/SCGP_map/world_transform.txt"
-gloc_dbow3_database: "/home/a4/workspace/Arm/SCGP_map/database_orb.bin"
+gloc_dbow3_database: ""     # "/home/a4/workspace/Arm/SCGP_map/database_orb.bin"
 gloc_dbow3_vocab: "/home/a4/workspace/Arm/SCGP_map/orbvoc.dbow3"
+gloc_dbow3_auto_created_db_folder: ""
 
 #======================================================
 
@@ -288,7 +290,7 @@ gloc_dbow3_min_score: 0.005
 gloc_vote_eps_m: 3.0
 gloc_vote_min_votes: 2             # -1 = majority rule (ceil((X-1)/2))
 gloc_vote_max_dist_m: 3.0          # reject candidates >XXm from current position
-gloc_vote_max_matches: 3           # keep top-3 inlier matches per keyframe (default: 1)
+gloc_vote_max_matches: 2           # keep top-3 inlier matches per keyframe (default: 1)
 
 # ORB feature extraction
 gloc_orb_nfeatures: 1000
@@ -318,8 +320,8 @@ gloc_match_min_inliers: 20
 gloc_subsample_min_dist_px: 10.0    # 0 = disabled;
 
 # Optimization
-gloc_min_pairs: 4               # min valid slots after first snap
-gloc_min_pairs_first_snap: 4    # min valid slots for first snap (stricter)
+gloc_min_pairs: 3               # min valid slots after first snap
+gloc_min_pairs_first_snap: 3    # min valid slots for first snap (stricter)
 gloc_rel_pose_k: 2              # chain half-width (1 = adjacent only)
 gloc_w_rel_pose: 1.0            # weight for relative local pose term
 gloc_w_epipolar: 1.0            # weight for Sampson epipolar term

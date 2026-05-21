@@ -16,6 +16,7 @@ extern std::string GLOC_COLMAP_SPARSE_FOLDER;
 extern std::string GLOC_COLMAP_IMG_FOLDER;
 extern std::string GLOC_DBOW3_DATABASE;
 extern std::string GLOC_DBOW3_VOCAB;
+extern std::string GLOC_DBOW3_AUTO_CREATED_DB_FOLDER;
 
 // Optional: explicit path to world_transform.txt.
 // When empty, gloc falls back to looking for the file inside

@@ -1050,6 +1050,8 @@ void Gloc::processLoop()
             snapshot_fresh_ = false;
             working_snapshot_id = last_snapshot_id_;
 
+            GLOC_INFO("[processLoop] ========== working_snapshot_id = %d ==========", working_snapshot_id);
+
             // Count verdicts across all keyframes for diagnostics.
             // int n_total = 0, n_found = 0, n_none = 0, n_evicted = 0, n_notyet = 0;
             // for (const auto &[t, s] : state_map_)
@@ -1687,10 +1689,10 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
         for (const auto &seed : all_cands)
         {
             const Eigen::Vector3d t_hyp = snapped_local
-                                              ? (seed.P_world - R_ml * seed.P_local).eval()
-                                              : (seed.P_world - seed.P_local).eval();
+                ? (seed.P_world - R_ml * seed.P_local).eval()
+                : (seed.P_world - seed.P_local).eval();
 
-            std::vector<int> assignment(X, -1);
+            std::vector<int>    assignment(X, -1);
             std::vector<double> assignment_score(X, -1.0);
 
             for (int i = 0; i < X; ++i)
@@ -1700,8 +1702,8 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
                     continue;
 
                 const Eigen::Vector3d predicted = snapped_local
-                                                      ? (R_ml * working_set[i].P_local + t_hyp).eval()
-                                                      : (working_set[i].P_local + t_hyp).eval();
+                    ? (R_ml * working_set[i].P_local + t_hyp).eval()
+                    : (working_set[i].P_local + t_hyp).eval();
 
                 for (int ni = 0; ni < static_cast<int>(slot.dbow_candidates.size()); ++ni)
                 {
@@ -1755,7 +1757,7 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
             if (inlier_count > best_inlier_count)
             {
                 best_inlier_count = inlier_count;
-                best_assignment = assignment;
+                best_assignment   = assignment;
             }
         }
 
@@ -1781,45 +1783,38 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
             if (best_assignment[i] >= 0)
             {
                 const Eigen::Vector3d P_w =
-                    train_world_pos(working_set[i].per_gloc[g].dbow_candidates[best_assignment[i]].second);
+                    train_world_pos(working_set[i].per_gloc[g]
+                                        .dbow_candidates[best_assignment[i]].second);
                 t_win = snapped_local
-                            ? (P_w - R_ml * working_set[i].P_local).eval()
-                            : (P_w - working_set[i].P_local).eval();
+                    ? (P_w - R_ml * working_set[i].P_local).eval()
+                    : (P_w - working_set[i].P_local).eval();
                 break;
             }
 
-        // ── 3a. Build claimed set from already-done keyframes ─────────────────
-        // Done keyframes have fixed matches — their train images are off-limits.
-        std::unordered_set<int> claimed; // train indices already taken
+        // ── 3a. Build claimed set for best_train_idx only ────────────────────
+        // Only best_train_idx is exclusive — one keyframe per train image for
+        // the primary match. voted_train_idxs are additional correspondence
+        // candidates used by the optimizer and are NOT exclusive; multiple
+        // keyframes may share the same voted train image.
+        //
+        // Seed claimed from done keyframes' primary matches only.
+        std::unordered_set<int> claimed_primary; // best_train_idx already taken
         for (int i = 0; i < X; ++i)
         {
             const auto &slot = working_set[i].per_gloc[g];
-            if (!slot.pipeline_done)
-                continue;
-            if (slot.best_train_idx >= 0)
-                claimed.insert(slot.best_train_idx);
-            for (int ti : slot.voted_train_idxs)
-                claimed.insert(ti);
+            if (slot.pipeline_done && slot.best_train_idx >= 0)
+                claimed_primary.insert(slot.best_train_idx);
         }
 
-        // ── 3b. Greedy assignment: highest-scoring new keyframe claims first ───
-        // Sort new keyframes by their best_assignment score descending so the
-        // most confident match wins any conflict.
-        //
-        // For each new keyframe we build its ranked candidate list (all dbow
-        // candidates within GLOC_VOTE_EPS_M of predicted, sorted by score),
-        // then walk down the list until we find an unclaimed train image.
-        // This ensures that in the A(1) vs B(1,2) example:
-        //   - A has higher score on train 1 → claims it first
-        //   - B finds train 1 claimed → falls back to train 2
-
-        // Precompute per-new-kf candidate lists (score-sorted, within eps)
+        // ── 3b. Greedy primary assignment: highest-scoring keyframe claims first
+        // Build ranked candidate list per new keyframe (within eps, score-sorted),
+        // then assign best_train_idx greedily. voted_train_idxs are filled
+        // independently from all inlier candidates without exclusivity.
         struct KfCandList
         {
             int kf_idx;
-            double best_score; // score of highest-ranked candidate (for sort)
-            // (score, train_idx) sorted descending by score
-            std::vector<std::pair<double, int>> ranked;
+            double best_score;
+            std::vector<std::pair<double, int>> ranked; // (score, train_idx) desc
         };
         std::vector<KfCandList> kf_cand_lists;
         kf_cand_lists.reserve(new_kf_idxs.size());
@@ -1828,8 +1823,8 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
         {
             const auto &slot = working_set[i].per_gloc[g];
             const Eigen::Vector3d predicted = snapped_local
-                                                  ? (R_ml * working_set[i].P_local + t_win).eval()
-                                                  : (working_set[i].P_local + t_win).eval();
+                ? (R_ml * working_set[i].P_local + t_win).eval()
+                : (working_set[i].P_local + t_win).eval();
 
             KfCandList cl;
             cl.kf_idx = i;
@@ -1844,39 +1839,42 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
             kf_cand_lists.push_back(std::move(cl));
         }
 
-        // Sort new keyframes so highest-confidence one claims first
+        // Sort so highest-confidence keyframe claims its primary first
         std::sort(kf_cand_lists.begin(), kf_cand_lists.end(),
                   [](const KfCandList &a, const KfCandList &b) {
                       return a.best_score > b.best_score;
                   });
 
-        // Greedy claim
+        // Pass 1: assign best_train_idx exclusively (greedy by score)
         for (auto &cl : kf_cand_lists)
         {
             auto &slot = working_set[cl.kf_idx].per_gloc[g];
-            slot.voted_train_idxs.clear();
             slot.best_train_idx = -1;
+            slot.voted_train_idxs.clear();
 
             for (const auto &[sc, ti] : cl.ranked)
             {
-                if (claimed.count(ti))
-                    continue; // already taken — try next
-
-                // First unclaimed candidate becomes best_train_idx
-                if (slot.best_train_idx < 0)
+                if (!claimed_primary.count(ti))
                 {
                     slot.best_train_idx = ti;
-                    claimed.insert(ti);
+                    claimed_primary.insert(ti);
+                    break;
                 }
-                else
-                {
-                    // Additional unclaimed inliers go into voted_train_idxs
-                    // (up to GLOC_VOTE_MAX_MATCHES total including best)
-                    if (static_cast<int>(slot.voted_train_idxs.size()) + 1 >= GLOC_VOTE_MAX_MATCHES)
-                        break;
-                    slot.voted_train_idxs.push_back(ti);
-                    claimed.insert(ti);
-                }
+            }
+        }
+
+        // Pass 2: fill voted_train_idxs from ALL inlier candidates (no
+        // exclusivity — same behaviour as original code). Includes the primary
+        // match so the optimizer sees it in voted_train_idxs too.
+        for (auto &cl : kf_cand_lists)
+        {
+            auto &slot = working_set[cl.kf_idx].per_gloc[g];
+
+            for (const auto &[sc, ti] : cl.ranked)
+            {
+                if (static_cast<int>(slot.voted_train_idxs.size()) >= GLOC_VOTE_MAX_MATCHES)
+                    break;
+                slot.voted_train_idxs.push_back(ti);
             }
 
             if (slot.best_train_idx >= 0)
@@ -1885,7 +1883,7 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
                            slot.best_train_idx,
                            static_cast<int>(slot.voted_train_idxs.size()));
             else
-                GLOC_DEBUG("[vote] kf_t=%.4f g=%zu -> no unclaimed candidate",
+                GLOC_DEBUG("[vote] kf_t=%.4f g=%zu -> no unclaimed primary candidate",
                            working_set[cl.kf_idx].t_kf, g);
         }
     }

@@ -12,6 +12,7 @@ std::string GLOC_DBOW3_DATABASE;
 std::string GLOC_DBOW3_VOCAB;
 std::string GLOC_WORLD_TMAT_FILE;
 std::string GLOC_COLMAP_MESH_FILE;
+std::string GLOC_DBOW3_AUTO_CREATED_DB_FOLDER;
 
 // DBoW3
 int GLOC_DBOW3_MAX_RESULTS = 5;
@@ -155,6 +156,7 @@ void readParameters(std::string config_file)
     fsSettings["gloc_colmap_img_folder"] >> gloc::GLOC_COLMAP_IMG_FOLDER;
     fsSettings["gloc_dbow3_database"] >> gloc::GLOC_DBOW3_DATABASE;
     fsSettings["gloc_dbow3_vocab"] >> gloc::GLOC_DBOW3_VOCAB;
+    fsSettings["gloc_dbow3_auto_created_db_folder"] >> gloc::GLOC_DBOW3_AUTO_CREATED_DB_FOLDER;
     read_if(fsSettings, "gloc_world_tmat_file", gloc::GLOC_WORLD_TMAT_FILE);
     read_if(fsSettings, "gloc_colmap_mesh_file", gloc::GLOC_COLMAP_MESH_FILE);
 
