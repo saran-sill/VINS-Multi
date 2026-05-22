@@ -291,7 +291,7 @@ gloc_vote_max_dist_m: 3.0          # reject candidates >XXm from current positio
 gloc_vote_max_matches: 2           # keep top-3 inlier matches per keyframe (default: 1)
 
 # ORB feature extraction
-gloc_orb_nfeatures: 1000
+gloc_orb_nfeatures: 500
 gloc_orb_scale_factor: 1.2
 gloc_orb_nlevels: 4
 gloc_orb_edge_threshold: 31
@@ -309,12 +309,12 @@ gloc_use_gms: false                     # 0=BruteForce, 1=GMS
 gloc_gms_threshold: 6.0
 gloc_gms_with_rotation: true
 gloc_gms_with_scale: false
-gloc_match_lowe_ratio: 0.7          # used only when gloc_use_gms: 0
+gloc_match_lowe_ratio: 0.8          # used only when gloc_use_gms: 0
 gloc_match_max_dist: 72
 gloc_match_geom_reproj_th: 5.0
 gloc_match_geom_confidence: 0.99
 gloc_match_geom_sampson_sq: -1.0    # negative = disabled
-gloc_match_min_inliers: 20
+gloc_match_min_inliers: 15
 gloc_subsample_min_dist_px: 10.0    # 0 = disabled;
 
 # Optimization
