@@ -62,7 +62,8 @@ int GLOC_REL_POSE_K = 1;
 double GLOC_W_EPIPOLAR = 1.0;
 double GLOC_W_REPROJ = 1.0;
 double GLOC_W_REL_POSE = 1.0;
-double GLOC_W_WORLD_PRIOR = 10.0;
+double GLOC_W_WORLD_PRIOR_ROT = 1;   // weight for rotation prior (radians)
+double GLOC_W_WORLD_PRIOR_TRANS = 1; // weight for translation prior (metres)
 double GLOC_W_MESH_PRIOR;
 double GLOC_MESH_SIGMA_M;
 double GLOC_HUBER_DELTA = 5.0;
@@ -198,7 +199,8 @@ void readParameters(std::string config_file)
     read_if(fsSettings, "gloc_w_reproj", gloc::GLOC_W_REPROJ);
     read_if(fsSettings, "gloc_w_mesh_prior", gloc::GLOC_W_MESH_PRIOR);
     read_if(fsSettings, "gloc_w_rel_pose", gloc::GLOC_W_REL_POSE);
-    read_if(fsSettings, "gloc_w_world_prior", gloc::GLOC_W_WORLD_PRIOR);
+    read_if(fsSettings, "gloc_w_world_prior_rot", gloc::GLOC_W_WORLD_PRIOR_ROT);
+    read_if(fsSettings, "gloc_w_world_prior_trans", gloc::GLOC_W_WORLD_PRIOR_TRANS);
     read_if(fsSettings, "gloc_huber_delta", gloc::GLOC_HUBER_DELTA);
     read_if(fsSettings, "gloc_inlier_thresh_px", gloc::GLOC_INLIER_THRESH_PX);
     read_if(fsSettings, "gloc_max_iters", gloc::GLOC_MAX_ITERS);
@@ -281,7 +283,8 @@ void readParameters(std::string config_file)
     printf("GLOC_W_EPIPOLAR           : %.2f\n", gloc::GLOC_W_EPIPOLAR);
     printf("GLOC_W_REPROJ             : %.2f\n", gloc::GLOC_W_REPROJ);
     printf("GLOC_W_REL_POSE           : %.2f\n", gloc::GLOC_W_REL_POSE);
-    printf("GLOC_W_WORLD_PRIOR        : %.2f\n", gloc::GLOC_W_WORLD_PRIOR);
+    printf("GLOC_W_WORLD_PRIOR_ROT        : %.2f\n", gloc::GLOC_W_WORLD_PRIOR_ROT);
+    printf("GLOC_W_WORLD_PRIOR_TRANS        : %.2f\n", gloc::GLOC_W_WORLD_PRIOR_TRANS);
     printf("GLOC_W_MESH_PRIOR        : %.2f\n", gloc::GLOC_W_MESH_PRIOR);
     printf("GLOC_MESH_SIGMA_M        : %.2f\n", gloc::GLOC_MESH_SIGMA_M);
     printf("GLOC_MIN_MESH_PRIOR_POINTS        : %.d\n", gloc::GLOC_MIN_MESH_PRIOR_POINTS);

@@ -7,6 +7,7 @@ Panels:
         - /Global Options1
         - /VIO1
         - /VIO1/OdomHigh1/Shape1
+        - /GLOC1/MapPoints1/Autocompute Value Bounds1
       Splitter Ratio: 0.4651159942150116
     Tree Height: 441
   - Class: rviz/Selection
@@ -38,6 +39,7 @@ Panels:
         - /VIO1/OdomHigh1/Shape1
         - /VIO1/OdomLow1/Shape1
         - /GLOC1
+        - /GLOC1/MapPoints1/Autocompute Value Bounds1
         - /GLOC1/OdomIMUWorld1/Shape1
         - /GLOC1/OdomIMURaw1/Shape1
       Splitter Ratio: 0.5222772359848022
@@ -450,7 +452,7 @@ Visualization Manager:
           Topic: /herix/keyframe_path
           Unreliable: false
           Value: false
-      Enabled: true
+      Enabled: false
       Name: VIO
     - Class: rviz/Group
       Displays:
@@ -489,14 +491,14 @@ Visualization Manager:
         - Alpha: 0.5
           Autocompute Intensity Bounds: true
           Autocompute Value Bounds:
-            Max Value: 10
-            Min Value: -10
+            Max Value: 13.016915321350098
+            Min Value: -1.018385410308838
             Value: true
           Axis: Z
           Channel Name: intensity
           Class: rviz/PointCloud
           Color: 255; 255; 255
-          Color Transformer: FlatColor
+          Color Transformer: AxisColor
           Decay Time: 0
           Enabled: true
           Invert Rainbow: false
@@ -560,7 +562,7 @@ Visualization Manager:
           Marker Topic: /herix/gloc/kf_status
           Name: OptKfStatus
           Namespaces:
-            {}
+            gloc_kf_status: true
           Queue Size: 100
           Value: true
         - Angle Tolerance: 0.05000000074505806
@@ -638,7 +640,7 @@ Visualization Manager:
           Marker Topic: /herix/gloc/vote_lines
           Name: VoteLines
           Namespaces:
-            {}
+            gloc_vote_lines: true
           Queue Size: 100
           Value: true
         - Class: rviz/Marker
@@ -646,7 +648,7 @@ Visualization Manager:
           Marker Topic: /herix/gloc/corr_lines
           Name: CorrLines
           Namespaces:
-            {}
+            gloc_corr_lines: true
           Queue Size: 100
           Value: true
       Enabled: true
@@ -677,7 +679,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz/Orbit
-      Distance: 53.92397689819336
+      Distance: 48.39396667480469
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
@@ -685,17 +687,17 @@ Visualization Manager:
         Value: false
       Field of View: 0.7853981852531433
       Focal Point:
-        X: 3.117051601409912
-        Y: 1.6093885898590088
-        Z: -1.8112434148788452
+        X: 5.171781063079834
+        Y: 8.667724609375
+        Z: -4.255899429321289
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 1.3347967863082886
+      Pitch: 1.3597959280014038
       Target Frame: body_world
-      Yaw: 3.1322944164276123
+      Yaw: 3.243187427520752
     Saved: ~
 Window Geometry:
   Displays:

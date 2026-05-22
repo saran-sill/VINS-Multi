@@ -1696,10 +1696,10 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
         for (const auto &seed : all_cands)
         {
             const Eigen::Vector3d t_hyp = snapped_local
-                ? (seed.P_world - R_ml * seed.P_local).eval()
-                : (seed.P_world - seed.P_local).eval();
+                                              ? (seed.P_world - R_ml * seed.P_local).eval()
+                                              : (seed.P_world - seed.P_local).eval();
 
-            std::vector<int>    assignment(X, -1);
+            std::vector<int> assignment(X, -1);
             std::vector<double> assignment_score(X, -1.0);
 
             for (int i = 0; i < X; ++i)
@@ -1709,8 +1709,8 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
                     continue;
 
                 const Eigen::Vector3d predicted = snapped_local
-                    ? (R_ml * working_set[i].P_local + t_hyp).eval()
-                    : (working_set[i].P_local + t_hyp).eval();
+                                                      ? (R_ml * working_set[i].P_local + t_hyp).eval()
+                                                      : (working_set[i].P_local + t_hyp).eval();
 
                 for (int ni = 0; ni < static_cast<int>(slot.dbow_candidates.size()); ++ni)
                 {
@@ -1764,7 +1764,7 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
             if (inlier_count > best_inlier_count)
             {
                 best_inlier_count = inlier_count;
-                best_assignment   = assignment;
+                best_assignment = assignment;
             }
         }
 
@@ -1790,11 +1790,10 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
             if (best_assignment[i] >= 0)
             {
                 const Eigen::Vector3d P_w =
-                    train_world_pos(working_set[i].per_gloc[g]
-                                        .dbow_candidates[best_assignment[i]].second);
+                    train_world_pos(working_set[i].per_gloc[g].dbow_candidates[best_assignment[i]].second);
                 t_win = snapped_local
-                    ? (P_w - R_ml * working_set[i].P_local).eval()
-                    : (P_w - working_set[i].P_local).eval();
+                            ? (P_w - R_ml * working_set[i].P_local).eval()
+                            : (P_w - working_set[i].P_local).eval();
                 break;
             }
 
@@ -1830,8 +1829,8 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
         {
             const auto &slot = working_set[i].per_gloc[g];
             const Eigen::Vector3d predicted = snapped_local
-                ? (R_ml * working_set[i].P_local + t_win).eval()
-                : (working_set[i].P_local + t_win).eval();
+                                                  ? (R_ml * working_set[i].P_local + t_win).eval()
+                                                  : (working_set[i].P_local + t_win).eval();
 
             KfCandList cl;
             cl.kf_idx = i;
@@ -2738,7 +2737,7 @@ bool Gloc::runOptimization_6DOF(std::vector<KeyframeGlocState> &working_set)
         }
 
         // World prior from last snapped T_map_local
-        if (add_prior && GLOC_W_WORLD_PRIOR > 0.0)
+        if (add_prior && (GLOC_W_WORLD_PRIOR_ROT > 0.0 || GLOC_W_WORLD_PRIOR_TRANS > 0.0))
         {
             std::lock_guard<std::mutex> lk(snap_mutex_);
             if (!snapped_)
@@ -2762,12 +2761,13 @@ bool Gloc::runOptimization_6DOF(std::vector<KeyframeGlocState> &working_set)
                 c.t_prior[0] = t_prior.x();
                 c.t_prior[1] = t_prior.y();
                 c.t_prior[2] = t_prior.z();
+                c.w_rot = GLOC_W_WORLD_PRIOR_ROT;
+                c.w_trans = GLOC_W_WORLD_PRIOR_TRANS;
 
                 auto *cost = new ceres::AutoDiffCostFunction<GlocWorldPriorCost, 6, 3, 3>(
                     new GlocWorldPriorCost(c));
-                auto *scaled = new ceres::ScaledLoss(
-                    nullptr, GLOC_W_WORLD_PRIOR, ceres::DO_NOT_TAKE_OWNERSHIP);
-                prob.AddResidualBlock(cost, scaled,
+
+                prob.AddResidualBlock(cost, nullptr,
                                       omega_kf[i].data(), t_kf[i].data());
             }
         }
@@ -3488,7 +3488,7 @@ bool Gloc::runOptimization_4DOF(std::vector<KeyframeGlocState> &working_set)
             }
         }
 
-        if (add_prior && GLOC_W_WORLD_PRIOR > 0.0)
+        if (add_prior && (GLOC_W_WORLD_PRIOR_ROT > 0.0 || GLOC_W_WORLD_PRIOR_TRANS > 0.0))
         {
             std::lock_guard<std::mutex> lk(snap_mutex_);
             if (!snapped_)
@@ -3506,11 +3506,11 @@ bool Gloc::runOptimization_4DOF(std::vector<KeyframeGlocState> &working_set)
                 c.t_prior[0] = t_prior.x();
                 c.t_prior[1] = t_prior.y();
                 c.t_prior[2] = t_prior.z();
+                c.w_rot = GLOC_W_WORLD_PRIOR_ROT;
+                c.w_trans = GLOC_W_WORLD_PRIOR_TRANS;
                 auto *cost = new ceres::AutoDiffCostFunction<GlocWorldPriorCost, 6, 3, 3>(
                     new GlocWorldPriorCost(c));
-                auto *scaled = new ceres::ScaledLoss(
-                    nullptr, GLOC_W_WORLD_PRIOR, ceres::DO_NOT_TAKE_OWNERSHIP);
-                prob.AddResidualBlock(cost, scaled, omega_kf[i].data(), t_kf[i].data());
+                prob.AddResidualBlock(cost, nullptr, omega_kf[i].data(), t_kf[i].data());
             }
         }
     };
@@ -4171,33 +4171,33 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
         }
 
         // ── World prior (snapped only) ────────────────────────────────────────
-        // Anchors omega_map and t_map to the seeds captured before this lambda,
-        // so the prior target is fixed and independent of the solve variable.
-        if (snapped_local && GLOC_W_WORLD_PRIOR > 0.0)
+        // Proper SO(3) prior anchoring T_map_local to its seed from the last
+        // accepted snap. Uses geodesic rotation error, not parameter-space L2.
+        if (snapped_local && (GLOC_W_WORLD_PRIOR_ROT > 0.0 || GLOC_W_WORLD_PRIOR_TRANS > 0.0))
         {
-            using PriorCost3 = GlocFixedRelPriorCost<3>;
-
-            // omega: 1 radian ≈ FOCAL_LENGTH pixels at unit depth
-            const double omega_scale = vins_multi::FOCAL_LENGTH;
-            // t: 1 metre at typical depth D ≈ FOCAL_LENGTH/D pixels (D=5 m ref)
-            const double t_scale = vins_multi::FOCAL_LENGTH / 5.0;
-
+            GlocFixedRelWorldPriorCost c{};
+            // R_seed = R_map_local_seed  (row-major)
+            const Eigen::Map<const Eigen::Vector3d> ov_seed(omega_map_seed.data());
+            const double angle = ov_seed.norm();
+            Eigen::Matrix3d R_seed_mat = Eigen::Matrix3d::Identity();
+            if (angle > 1e-12)
             {
-                auto *cost = new ceres::AutoDiffCostFunction<PriorCost3, 3, 3>(
-                    new PriorCost3(omega_map_seed.data(), omega_scale));
-                prob.AddResidualBlock(cost,
-                                      new ceres::ScaledLoss(nullptr, GLOC_W_WORLD_PRIOR,
-                                                            ceres::TAKE_OWNERSHIP),
-                                      omega_map.data());
+                const Eigen::AngleAxisd aa(angle, ov_seed / angle);
+                R_seed_mat = aa.toRotationMatrix();
             }
-            {
-                auto *cost = new ceres::AutoDiffCostFunction<PriorCost3, 3, 3>(
-                    new PriorCost3(t_map_seed.data(), t_scale));
-                prob.AddResidualBlock(cost,
-                                      new ceres::ScaledLoss(nullptr, GLOC_W_WORLD_PRIOR,
-                                                            ceres::TAKE_OWNERSHIP),
-                                      t_map.data());
-            }
+            for (int r = 0; r < 3; ++r)
+                for (int col = 0; col < 3; ++col)
+                    c.R_seed[r * 3 + col] = R_seed_mat(r, col);
+            c.t_seed[0] = t_map_seed[0];
+            c.t_seed[1] = t_map_seed[1];
+            c.t_seed[2] = t_map_seed[2];
+            c.w_rot = GLOC_W_WORLD_PRIOR_ROT;
+            c.w_trans = GLOC_W_WORLD_PRIOR_TRANS;
+
+            auto *cost = new ceres::AutoDiffCostFunction<GlocFixedRelWorldPriorCost, 6, 3, 3>(
+                new GlocFixedRelWorldPriorCost(c));
+            prob.AddResidualBlock(cost, nullptr,
+                                  omega_map.data(), t_map.data());
         }
 
         for (int k = 0; k < N; ++k)
@@ -4616,18 +4616,18 @@ bool Gloc::loadDatabase()
 
     // Build OrbConfig for fingerprinting only — extractor is passed directly.
     dbow3::OrbConfig cfg;
-    cfg.nfeatures      = GLOC_ORB_NFEATURES;
-    cfg.scale_factor   = static_cast<float>(GLOC_ORB_SCALE_FACTOR);
-    cfg.nlevels        = GLOC_ORB_NLEVELS;
+    cfg.nfeatures = GLOC_ORB_NFEATURES;
+    cfg.scale_factor = static_cast<float>(GLOC_ORB_SCALE_FACTOR);
+    cfg.nlevels = GLOC_ORB_NLEVELS;
     cfg.edge_threshold = GLOC_ORB_EDGE_THRESHOLD;
-    cfg.first_level    = GLOC_ORB_FIRST_LEVEL;
-    cfg.wta_k          = GLOC_ORB_WTA_K;
-    cfg.score_type     = GLOC_ORB_SCORE_TYPE;
-    cfg.patch_size     = GLOC_ORB_PATCH_SIZE;
+    cfg.first_level = GLOC_ORB_FIRST_LEVEL;
+    cfg.wta_k = GLOC_ORB_WTA_K;
+    cfg.score_type = GLOC_ORB_SCORE_TYPE;
+    cfg.patch_size = GLOC_ORB_PATCH_SIZE;
     cfg.fast_threshold = GLOC_ORB_FAST_THRESHOLD;
-    cfg.use_beblid     = GLOC_USE_BEBLID;
-    cfg.beblid_scale   = static_cast<float>(GLOC_BEBLID_SCALE_FACTOR);
-    cfg.beblid_n_bits  = GLOC_BEBLID_N_BITS;
+    cfg.use_beblid = GLOC_USE_BEBLID;
+    cfg.beblid_scale = static_cast<float>(GLOC_BEBLID_SCALE_FACTOR);
+    cfg.beblid_n_bits = GLOC_BEBLID_N_BITS;
 
     try
     {

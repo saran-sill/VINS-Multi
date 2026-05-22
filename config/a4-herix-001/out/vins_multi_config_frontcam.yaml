@@ -174,7 +174,7 @@ estimate_extrinsic: 1
 multiple_thread: 0
 cv_num_threads: 1
 
-window_size: 21
+window_size: 15
 max_cnt: 250
 min_dist: 30
 img_freq: 15
@@ -205,7 +205,7 @@ optflow_pyr_levels: 8
 max_solver_time: 0.06
 max_num_iterations: 20
 
-keyframe_parallax: 10.0
+keyframe_parallax: 15.0
 
 estimate_td: 1
 
@@ -286,7 +286,7 @@ gloc_dbow3_min_score: 0.005
 
 # Consensus voting
 gloc_vote_eps_m: 3.0
-gloc_vote_min_votes: 2             # -1 = majority rule (ceil((X-1)/2))
+gloc_vote_min_votes: 2            # -1 = majority rule (ceil((X-1)/2))
 gloc_vote_max_dist_m: 3.0          # reject candidates >XXm from current position
 gloc_vote_max_matches: 2           # keep top-3 inlier matches per keyframe (default: 1)
 
@@ -314,7 +314,7 @@ gloc_match_max_dist: 72
 gloc_match_geom_reproj_th: 5.0
 gloc_match_geom_confidence: 0.99
 gloc_match_geom_sampson_sq: -1.0    # negative = disabled
-gloc_match_min_inliers: 15
+gloc_match_min_inliers: 10
 gloc_subsample_min_dist_px: 0.0    # 0 = disabled;
 
 # Optimization
@@ -322,11 +322,12 @@ gloc_min_pairs: 3               # min valid slots after first snap
 gloc_min_pairs_first_snap: 3    # min valid slots for first snap (stricter)
 gloc_rel_pose_k: 2              # chain half-width (1 = adjacent only)
 gloc_w_rel_pose: 1.0            # weight for relative local pose term
-gloc_w_epipolar: 1.0            # weight for Sampson epipolar term
+gloc_w_epipolar: 0.0            # weight for Sampson epipolar term
 gloc_w_reproj: 1.0              # weight for inverse-depth reprojection term
-gloc_w_world_prior: 2.0        # weight for world prior (when snapped)
-gloc_w_mesh_prior: 1.0        # weight for mesh prior
-gloc_mesh_sigma_m: 0.3
+gloc_w_world_prior_rot: 500.0    # weight for world prior (when snapped)
+gloc_w_world_prior_trans: 100.0   # weight for world prior (when snapped)
+gloc_w_mesh_prior: 100.0        # weight for mesh prior
+gloc_mesh_sigma_m: 0.1
 gloc_huber_delta: 1.0           # Huber loss delta (virtual pixels)
 gloc_inlier_thresh_px: 30.0     # reprojection inlier threshold (virtual pixels)
 gloc_max_iters: 150             # main solver iterations

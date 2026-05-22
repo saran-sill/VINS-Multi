@@ -114,7 +114,8 @@ extern int GLOC_REL_POSE_K;
 extern double GLOC_W_EPIPOLAR;    // Sampson epipolar
 extern double GLOC_W_REPROJ;      // inverse-depth reprojection
 extern double GLOC_W_REL_POSE;    // relative local pose
-extern double GLOC_W_WORLD_PRIOR; // world prior (only when snapped)
+extern double GLOC_W_WORLD_PRIOR_ROT;   // weight for rotation prior (radians)
+extern double GLOC_W_WORLD_PRIOR_TRANS; // weight for translation prior (metres)
 extern double GLOC_W_MESH_PRIOR;      // weight for mesh prior
 
 extern double GLOC_MESH_SIGMA_M;

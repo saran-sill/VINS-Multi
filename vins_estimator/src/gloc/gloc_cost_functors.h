@@ -353,27 +353,33 @@ struct GlocWorldPriorCost
 {
     double R_prior[9]; // R_map_body_prior[i]  row-major
     double t_prior[3]; // t_world_body_prior[i]
+    double w_rot;
+    double w_trans;
 
     template <typename T>
     bool operator()(const T *__restrict__ omega_i,
                     const T *__restrict__ t_i,
                     T *__restrict__ res) const
     {
-        // R_world_body from axis-angle (col-major)
+        // R_world_body from axis-angle — col-major output
         T R_wi[9];
         ceres::AngleAxisToRotationMatrix(omega_i, R_wi);
 
-        // R_err = R_world_body[i]^T * R_prior  (row-major R_prior)
+        // R_err = R_wi^T * R_prior
+        // R_wi is col-major: R_wi[r + c*3] = element(r,c)
+        // R_prior is row-major: R_prior[r*3 + c] = element(r,c)
+        // Result R_err stored row-major for the transpose below
         T R_err[9];
-        for (int i = 0; i < 3; ++i)
-            for (int j = 0; j < 3; ++j)
+        for (int i = 0; i < 3; ++i)     // row of R_wi^T = col of R_wi
+            for (int j = 0; j < 3; ++j) // col of R_prior
             {
                 R_err[i * 3 + j] = T(0);
                 for (int k = 0; k < 3; ++k)
-                    R_err[i * 3 + j] += R_wi[k + i * 3] * T(R_prior[k * 3 + j]);
+                    R_err[i * 3 + j] += R_wi[i + k * 3]          // R_wi col-major, transposed: element(k,i)
+                                        * T(R_prior[k * 3 + j]); // R_prior row-major: element(k,j)
             }
 
-        // Row-major → col-major for Ceres
+        // Row-major → col-major for Ceres RotationMatrixToAngleAxis
         T R_err_cm[9];
         for (int r = 0; r < 3; ++r)
             for (int c = 0; c < 3; ++c)
@@ -382,12 +388,13 @@ struct GlocWorldPriorCost
         T rot_res[3];
         ceres::RotationMatrixToAngleAxis(R_err_cm, rot_res);
 
-        res[0] = rot_res[0];
-        res[1] = rot_res[1];
-        res[2] = rot_res[2];
-        res[3] = t_i[0] - T(t_prior[0]);
-        res[4] = t_i[1] - T(t_prior[1]);
-        res[5] = t_i[2] - T(t_prior[2]);
+        res[0] = T(w_rot) * rot_res[0];
+        res[1] = T(w_rot) * rot_res[1];
+        res[2] = T(w_rot) * rot_res[2];
+        res[3] = T(w_trans) * (t_i[0] - T(t_prior[0]));
+        res[4] = T(w_trans) * (t_i[1] - T(t_prior[1]));
+        res[5] = T(w_trans) * (t_i[2] - T(t_prior[2]));
+
         return true;
     }
 };
@@ -642,7 +649,6 @@ struct GlocFixedRelEpipolarCost
 //
 // Simple L2 prior: penalises a parameter block deviating from its seed.
 //   residual[i] = param[i] - seed[i]
-// Used in runOptimization_FixedRel to anchor omega_map and t_map.
 // ─────────────────────────────────────────────────────────────────────────────
 template <int N>
 struct GlocFixedRelPriorCost
@@ -661,6 +667,78 @@ struct GlocFixedRelPriorCost
     {
         for (int i = 0; i < N; ++i)
             res[i] = T(scale) * (param[i] - T(seed[i]));
+        return true;
+    }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GlocFixedRelWorldPriorCost
+//
+//  Proper SO(3) world prior for the fixed-relative-pose optimizer.
+//  Penalises T_map_local deviating from its seed value using geodesic
+//  rotation error (not parameter-space L2).
+//
+//  Variables: omega_map[3]  axis-angle of R_map_local  (local → world)
+//             t_map[3]      t_map_local
+//
+//  Constants (baked in):
+//    R_seed[9]   R_map_local_seed  row-major
+//    t_seed[3]   t_map_local_seed
+//    w_rot       weight for rotation residual
+//    w_trans     weight for translation residual
+//
+//  Residual:
+//    rot_res[3]   = w_rot   * log( R_map_local^T * R_seed )   (radians)
+//    trans_res[3] = w_trans * (t_map - t_seed)                (metres)
+//
+//  When R_map_local == R_seed, rot_res = 0 (identity on SO(3)).
+// ─────────────────────────────────────────────────────────────────────────────
+struct GlocFixedRelWorldPriorCost
+{
+    double R_seed[9]; // R_map_local_seed  row-major
+    double t_seed[3]; // t_map_local_seed
+    double w_rot;
+    double w_trans;
+
+    template <typename T>
+    bool operator()(const T *__restrict__ omega_map, // [3] AA(R_map_local)
+                    const T *__restrict__ t_map,     // [3] t_map_local
+                    T *__restrict__ res) const
+    {
+        // R_map_local from axis-angle (col-major from Ceres)
+        T R_ml[9];
+        ceres::AngleAxisToRotationMatrix(omega_map, R_ml);
+
+        // R_err = R_map_local^T * R_seed
+        // R_ml is col-major: R_ml[r + c*3] = element(r,c)
+        //   so R_ml(i,k) = R_ml[i + k*3]
+        // R_seed is row-major: R_seed[r*3 + c] = element(r,c)
+        // Result R_err stored row-major
+        T R_err[9];
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j)
+            {
+                R_err[i * 3 + j] = T(0);
+                for (int k = 0; k < 3; ++k)
+                    R_err[i * 3 + j] += R_ml[i + k * 3]         // R_ml col-major: element(i,k)
+                                        * T(R_seed[k * 3 + j]); // R_seed row-major: element(k,j)
+            }
+
+        // Row-major → col-major for Ceres RotationMatrixToAngleAxis
+        T R_err_cm[9];
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                R_err_cm[r + c * 3] = R_err[r * 3 + c];
+
+        T rot_res[3];
+        ceres::RotationMatrixToAngleAxis(R_err_cm, rot_res);
+
+        res[0] = T(w_rot) * rot_res[0];
+        res[1] = T(w_rot) * rot_res[1];
+        res[2] = T(w_rot) * rot_res[2];
+        res[3] = T(w_trans) * (t_map[0] - T(t_seed[0]));
+        res[4] = T(w_trans) * (t_map[1] - T(t_seed[1]));
+        res[5] = T(w_trans) * (t_map[2] - T(t_seed[2]));
         return true;
     }
 };
