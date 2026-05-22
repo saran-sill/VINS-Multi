@@ -111,12 +111,17 @@ extern int GLOC_MIN_PAIRS_FIRST_SNAP;
 extern int GLOC_REL_POSE_K;
 
 // Weights for each energy term.
-extern double GLOC_W_EPIPOLAR;    // Sampson epipolar
-extern double GLOC_W_REPROJ;      // inverse-depth reprojection
-extern double GLOC_W_REL_POSE;    // relative local pose
-extern double GLOC_W_WORLD_PRIOR_ROT;   // weight for rotation prior (radians)
-extern double GLOC_W_WORLD_PRIOR_TRANS; // weight for translation prior (metres)
-extern double GLOC_W_MESH_PRIOR;      // weight for mesh prior
+extern double GLOC_W_EPIPOLAR;          // Sampson epipolar
+extern double GLOC_W_REPROJ;            // inverse-depth reprojection
+extern double GLOC_W_REL_POSE;          // relative local pose
+extern double GLOC_W_WORLD_PRIOR_ROT;   // world prior rotation weight (when snapped)
+extern double GLOC_W_WORLD_PRIOR_TRANS; // world prior translation weight (when snapped)
+// Reference depth (metres) used to convert rotation/translation prior residuals
+// to pixel units so weights are on the same scale as GLOC_W_REPROJ.
+//   rot_scale   = FOCAL_LENGTH * GLOC_W_WORLD_PRIOR_REF_DEPTH_M
+//   trans_scale = FOCAL_LENGTH / GLOC_W_WORLD_PRIOR_REF_DEPTH_M
+extern double GLOC_W_WORLD_PRIOR_REF_DEPTH_M;
+extern double GLOC_W_MESH_PRIOR; // weight for mesh prior
 
 extern double GLOC_MESH_SIGMA_M;
 

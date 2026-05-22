@@ -339,15 +339,18 @@ struct GlocRelPoseCost
 //  Rotation part of world prior for 6DOF/4DOF optimizer.
 //  One block per keyframe, weighted via ScaledLoss(GLOC_W_WORLD_PRIOR_ROT).
 //
-//  Residual (3D, radians):
-//    res[0..2] = log( R_body_world[i] * R_prior[i] )
-//             = log( R_world_body[i]^T * R_prior[i] )
+//  Residual (3D, pseudo-pixels):
+//    res[0..2] = r_scale * log( R_body_world[i] * R_prior[i] )
+//
+//  where r_scale = FOCAL_LENGTH * ref_depth converts radians → pixels
+//  so that GLOC_W_WORLD_PRIOR_ROT is on the same scale as GLOC_W_REPROJ.
 //
 //  Variables: omega_i[3]  axis-angle of R_body_world[i]  (world → body)
 // ─────────────────────────────────────────────────────────────────────────────
 struct GlocWorldPriorRotCost
 {
     double R_prior[9]; // R_world_body_prior[i]  row-major
+    double r_scale;    // FOCAL_LENGTH * ref_depth_m  (radians → pixels)
 
     template <typename T>
     bool operator()(const T *__restrict__ omega_i,
@@ -359,7 +362,7 @@ struct GlocWorldPriorRotCost
         ceres::AngleAxisToRotationMatrix(omega_i, R_bw);
 
         // R_err = R_body_world * R_prior = R_world_body^T * R_prior
-        // R_bw col-major: R_bw[r + c*3] = element(r,c), so R_bw(i,k) = R_bw[i + k*3]
+        // R_bw col-major: R_bw(i,k) = R_bw[i + k*3]
         // R_prior row-major: R_prior[r*3 + c] = element(r,c)
         T R_err[9];
         for (int i = 0; i < 3; ++i)
@@ -376,7 +379,11 @@ struct GlocWorldPriorRotCost
             for (int c = 0; c < 3; ++c)
                 R_err_cm[r + c * 3] = R_err[r * 3 + c];
 
-        ceres::RotationMatrixToAngleAxis(R_err_cm, res);
+        T rot_res[3];
+        ceres::RotationMatrixToAngleAxis(R_err_cm, rot_res);
+        res[0] = T(r_scale) * rot_res[0];
+        res[1] = T(r_scale) * rot_res[1];
+        res[2] = T(r_scale) * rot_res[2];
         return true;
     }
 };
@@ -387,22 +394,26 @@ struct GlocWorldPriorRotCost
 //  Translation part of world prior for 6DOF/4DOF optimizer.
 //  One block per keyframe, weighted via ScaledLoss(GLOC_W_WORLD_PRIOR_TRANS).
 //
-//  Residual (3D, metres):
-//    res[0..2] = t_i - t_prior[i]
+//  Residual (3D, pseudo-pixels):
+//    res[0..2] = t_scale * (t_i - t_prior[i])
+//
+//  where t_scale = FOCAL_LENGTH / ref_depth converts metres → pixels
+//  so that GLOC_W_WORLD_PRIOR_TRANS is on the same scale as GLOC_W_REPROJ.
 //
 //  Variables: t_i[3]  t_world_body[i]
 // ─────────────────────────────────────────────────────────────────────────────
 struct GlocWorldPriorTransCost
 {
     double t_prior[3]; // t_world_body_prior[i]
+    double t_scale;    // FOCAL_LENGTH / ref_depth_m  (metres → pixels)
 
     template <typename T>
     bool operator()(const T *__restrict__ t_i,
                     T *__restrict__ res) const
     {
-        res[0] = t_i[0] - T(t_prior[0]);
-        res[1] = t_i[1] - T(t_prior[1]);
-        res[2] = t_i[2] - T(t_prior[2]);
+        res[0] = T(t_scale) * (t_i[0] - T(t_prior[0]));
+        res[1] = T(t_scale) * (t_i[1] - T(t_prior[1]));
+        res[2] = T(t_scale) * (t_i[2] - T(t_prior[2]));
         return true;
     }
 };
@@ -685,14 +696,17 @@ struct GlocFixedRelPriorCost
 //  Rotation part of world prior for fixed-rel optimizer.
 //  Weighted via ScaledLoss(GLOC_W_WORLD_PRIOR_ROT).
 //
-//  Residual (3D, radians):
-//    res[0..2] = log( R_map_local^T * R_seed )
+//  Residual (3D, pseudo-pixels):
+//    res[0..2] = r_scale * log( R_map_local^T * R_seed )
+//
+//  where r_scale = FOCAL_LENGTH * ref_depth converts radians → pixels.
 //
 //  Variables: omega_map[3]  axis-angle of R_map_local  (local → world)
 // ─────────────────────────────────────────────────────────────────────────────
 struct GlocFixedRelWorldPriorRotCost
 {
     double R_seed[9]; // R_map_local_seed  row-major
+    double r_scale;   // FOCAL_LENGTH * ref_depth_m  (radians → pixels)
 
     template <typename T>
     bool operator()(const T *__restrict__ omega_map,
@@ -720,7 +734,11 @@ struct GlocFixedRelWorldPriorRotCost
             for (int c = 0; c < 3; ++c)
                 R_err_cm[r + c * 3] = R_err[r * 3 + c];
 
-        ceres::RotationMatrixToAngleAxis(R_err_cm, res);
+        T rot_res[3];
+        ceres::RotationMatrixToAngleAxis(R_err_cm, rot_res);
+        res[0] = T(r_scale) * rot_res[0];
+        res[1] = T(r_scale) * rot_res[1];
+        res[2] = T(r_scale) * rot_res[2];
         return true;
     }
 };
@@ -731,22 +749,25 @@ struct GlocFixedRelWorldPriorRotCost
 //  Translation part of world prior for fixed-rel optimizer.
 //  Weighted via ScaledLoss(GLOC_W_WORLD_PRIOR_TRANS).
 //
-//  Residual (3D, metres):
-//    res[0..2] = t_map - t_seed
+//  Residual (3D, pseudo-pixels):
+//    res[0..2] = t_scale * (t_map - t_seed)
+//
+//  where t_scale = FOCAL_LENGTH / ref_depth converts metres → pixels.
 //
 //  Variables: t_map[3]  t_map_local
 // ─────────────────────────────────────────────────────────────────────────────
 struct GlocFixedRelWorldPriorTransCost
 {
     double t_seed[3]; // t_map_local_seed
+    double t_scale;   // FOCAL_LENGTH / ref_depth_m  (metres → pixels)
 
     template <typename T>
     bool operator()(const T *__restrict__ t_map,
                     T *__restrict__ res) const
     {
-        res[0] = t_map[0] - T(t_seed[0]);
-        res[1] = t_map[1] - T(t_seed[1]);
-        res[2] = t_map[2] - T(t_seed[2]);
+        res[0] = T(t_scale) * (t_map[0] - T(t_seed[0]));
+        res[1] = T(t_scale) * (t_map[1] - T(t_seed[1]));
+        res[2] = T(t_scale) * (t_map[2] - T(t_seed[2]));
         return true;
     }
 };

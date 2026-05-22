@@ -2739,6 +2739,10 @@ bool Gloc::runOptimization_6DOF(std::vector<KeyframeGlocState> &working_set)
         // World prior from last snapped T_map_local
         if (add_prior && (GLOC_W_WORLD_PRIOR_ROT > 0.0 || GLOC_W_WORLD_PRIOR_TRANS > 0.0) && snapped_local)
         {
+            const double ref_depth = GLOC_W_WORLD_PRIOR_REF_DEPTH_M;
+            const double r_scale = vins_multi::FOCAL_LENGTH * ref_depth;
+            const double t_scale = vins_multi::FOCAL_LENGTH / ref_depth;
+
             for (int i = 0; i < X; ++i)
             {
                 const auto &kf = working_set[i];
@@ -2748,13 +2752,14 @@ bool Gloc::runOptimization_6DOF(std::vector<KeyframeGlocState> &working_set)
                 const Mat3d R_prior = R_map_local * R_local_body;
                 const Vec3d t_prior = R_map_local * kf.P_local + t_map_local;
 
-                // ── Rotation prior (SO(3) geodesic error) ────────────────────
+                // ── Rotation prior (SO(3) geodesic, pixel-scaled) ────────────
                 if (GLOC_W_WORLD_PRIOR_ROT > 0.0)
                 {
                     GlocWorldPriorRotCost cr{};
                     for (int r = 0; r < 3; ++r)
                         for (int col = 0; col < 3; ++col)
                             cr.R_prior[r * 3 + col] = R_prior(r, col);
+                    cr.r_scale = r_scale;
                     auto *cost = new ceres::AutoDiffCostFunction<GlocWorldPriorRotCost, 3, 3>(
                         new GlocWorldPriorRotCost(cr));
                     prob.AddResidualBlock(cost,
@@ -2763,13 +2768,14 @@ bool Gloc::runOptimization_6DOF(std::vector<KeyframeGlocState> &working_set)
                                           omega_kf[i].data());
                 }
 
-                // ── Translation prior (L2 in metres) ────────────────────────
+                // ── Translation prior (L2 pixel-scaled) ─────────────────────
                 if (GLOC_W_WORLD_PRIOR_TRANS > 0.0)
                 {
                     GlocWorldPriorTransCost ct{};
                     ct.t_prior[0] = t_prior.x();
                     ct.t_prior[1] = t_prior.y();
                     ct.t_prior[2] = t_prior.z();
+                    ct.t_scale = t_scale;
                     auto *cost = new ceres::AutoDiffCostFunction<GlocWorldPriorTransCost, 3, 3>(
                         new GlocWorldPriorTransCost(ct));
                     prob.AddResidualBlock(cost,
@@ -3506,6 +3512,10 @@ bool Gloc::runOptimization_4DOF(std::vector<KeyframeGlocState> &working_set)
 
         if (add_prior && (GLOC_W_WORLD_PRIOR_ROT > 0.0 || GLOC_W_WORLD_PRIOR_TRANS > 0.0) && snapped_local)
         {
+            const double ref_depth = GLOC_W_WORLD_PRIOR_REF_DEPTH_M;
+            const double r_scale = vins_multi::FOCAL_LENGTH * ref_depth;
+            const double t_scale = vins_multi::FOCAL_LENGTH / ref_depth;
+
             for (int i = 0; i < X; ++i)
             {
                 const auto &kf = working_set[i];
@@ -3520,6 +3530,7 @@ bool Gloc::runOptimization_4DOF(std::vector<KeyframeGlocState> &working_set)
                     for (int r = 0; r < 3; ++r)
                         for (int col = 0; col < 3; ++col)
                             cr.R_prior[r * 3 + col] = R_prior(r, col);
+                    cr.r_scale = r_scale;
                     auto *cost = new ceres::AutoDiffCostFunction<GlocWorldPriorRotCost, 3, 3>(
                         new GlocWorldPriorRotCost(cr));
                     prob.AddResidualBlock(cost,
@@ -3535,6 +3546,7 @@ bool Gloc::runOptimization_4DOF(std::vector<KeyframeGlocState> &working_set)
                     ct.t_prior[0] = t_prior.x();
                     ct.t_prior[1] = t_prior.y();
                     ct.t_prior[2] = t_prior.z();
+                    ct.t_scale = t_scale;
                     auto *cost = new ceres::AutoDiffCostFunction<GlocWorldPriorTransCost, 3, 3>(
                         new GlocWorldPriorTransCost(ct));
                     prob.AddResidualBlock(cost,
@@ -4210,11 +4222,14 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
         }
 
         // ── World prior (snapped only) ────────────────────────────────────────
-        // Proper SO(3) prior anchoring T_map_local to its seed from the last
-        // accepted snap. Rotation and translation weighted independently via
-        // ScaledLoss so weights are on the same scale as GLOC_W_REPROJ.
+        // Proper SO(3) prior anchoring T_map_local to its seed.
+        // Residuals pixel-scaled so weights are on the same scale as GLOC_W_REPROJ.
         if (snapped_local && (GLOC_W_WORLD_PRIOR_ROT > 0.0 || GLOC_W_WORLD_PRIOR_TRANS > 0.0))
         {
+            const double ref_depth = GLOC_W_WORLD_PRIOR_REF_DEPTH_M;
+            const double r_scale = vins_multi::FOCAL_LENGTH * ref_depth;
+            const double t_scale = vins_multi::FOCAL_LENGTH / ref_depth;
+
             // Build R_seed from omega_map_seed
             const Eigen::Map<const Eigen::Vector3d> ov_seed(omega_map_seed.data());
             const double seed_norm = ov_seed.norm();
@@ -4231,6 +4246,7 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
                 for (int r = 0; r < 3; ++r)
                     for (int c = 0; c < 3; ++c)
                         cr.R_seed[r * 3 + c] = R_seed_mat(r, c);
+                cr.r_scale = r_scale;
                 auto *cost = new ceres::AutoDiffCostFunction<
                     GlocFixedRelWorldPriorRotCost, 3, 3>(
                     new GlocFixedRelWorldPriorRotCost(cr));
@@ -4246,6 +4262,7 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
                 ct.t_seed[0] = t_map_seed[0];
                 ct.t_seed[1] = t_map_seed[1];
                 ct.t_seed[2] = t_map_seed[2];
+                ct.t_scale = t_scale;
                 auto *cost = new ceres::AutoDiffCostFunction<
                     GlocFixedRelWorldPriorTransCost, 3, 3>(
                     new GlocFixedRelWorldPriorTransCost(ct));
