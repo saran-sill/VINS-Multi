@@ -315,7 +315,7 @@ gloc_match_geom_reproj_th: 5.0
 gloc_match_geom_confidence: 0.99
 gloc_match_geom_sampson_sq: -1.0    # negative = disabled
 gloc_match_min_inliers: 15
-gloc_subsample_min_dist_px: 10.0    # 0 = disabled;
+gloc_subsample_min_dist_px: 0.0    # 0 = disabled;
 
 # Optimization
 gloc_min_pairs: 3               # min valid slots after first snap
@@ -328,9 +328,9 @@ gloc_w_world_prior: 2.0        # weight for world prior (when snapped)
 gloc_w_mesh_prior: 1.0        # weight for mesh prior
 gloc_mesh_sigma_m: 0.3
 gloc_huber_delta: 1.0           # Huber loss delta (virtual pixels)
-gloc_inlier_thresh_px: 10.0     # reprojection inlier threshold (virtual pixels)
+gloc_inlier_thresh_px: 30.0     # reprojection inlier threshold (virtual pixels)
 gloc_max_iters: 150             # main solver iterations
 gloc_init_iters: 20             # initialization pass iterations (before main solve)
-gloc_min_inlier_ratio: 0.01      # min inlier fraction to accept solution
+gloc_min_inlier_ratio: 0.1      # min inlier fraction to accept solution
 gloc_max_depth_m: 30.0          # inverse-depth lower bound: rho >= 1/max_depth
 gloc_min_mesh_prior_points: 30

@@ -38,9 +38,7 @@ Panels:
         - /VIO1/OdomHigh1/Shape1
         - /VIO1/OdomLow1/Shape1
         - /GLOC1
-        - /GLOC1/MapPoints1
         - /GLOC1/OdomIMUWorld1/Shape1
-        - /GLOC1/OdomIMURaw1
         - /GLOC1/OdomIMURaw1/Shape1
       Splitter Ratio: 0.5222772359848022
     Tree Height: 902
@@ -562,7 +560,7 @@ Visualization Manager:
           Marker Topic: /herix/gloc/kf_status
           Name: OptKfStatus
           Namespaces:
-            gloc_kf_status: true
+            {}
           Queue Size: 100
           Value: true
         - Angle Tolerance: 0.05000000074505806
@@ -640,7 +638,7 @@ Visualization Manager:
           Marker Topic: /herix/gloc/vote_lines
           Name: VoteLines
           Namespaces:
-            gloc_vote_lines: true
+            {}
           Queue Size: 100
           Value: true
         - Class: rviz/Marker
@@ -648,7 +646,7 @@ Visualization Manager:
           Marker Topic: /herix/gloc/corr_lines
           Name: CorrLines
           Namespaces:
-            gloc_corr_lines: true
+            {}
           Queue Size: 100
           Value: true
       Enabled: true
@@ -679,7 +677,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz/Orbit
-      Distance: 51.99090576171875
+      Distance: 53.92397689819336
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
@@ -687,17 +685,17 @@ Visualization Manager:
         Value: false
       Field of View: 0.7853981852531433
       Focal Point:
-        X: 6.691719055175781
-        Y: 0.6285864114761353
-        Z: -3.3803820610046387
+        X: 3.117051601409912
+        Y: 1.6093885898590088
+        Z: -1.8112434148788452
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 1.5697963237762451
+      Pitch: 1.3347967863082886
       Target Frame: body_world
-      Yaw: 3.1472880840301514
+      Yaw: 3.1322944164276123
     Saved: ~
 Window Geometry:
   Displays:
