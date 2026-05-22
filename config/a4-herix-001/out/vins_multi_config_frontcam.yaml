@@ -229,7 +229,6 @@ gloc_startup_delay_s: 10.0   # wait XXs after first snapshot before processing
 # gloc_colmap_img_folder: "/mnt/EXDISK/HiveGround/colmap_ws/SCGP/images_2"
 # gloc_colmap_mesh_file: "/mnt/EXDISK/HiveGround/colmap_ws/SCGP/colmap/_dense/0/mesh.ply"
 # gloc_world_tmat_file: "/mnt/EXDISK/HiveGround/colmap_ws/SCGP/world_transform.txt"
-# gloc_dbow3_database: ""     # "/mnt/EXDISK/HiveGround/colmap_ws/_SCGP_database/database_orb.bin"
 # gloc_dbow3_vocab: "/mnt/EXDISK/HiveGround/dbow3/orbvoc.dbow3"
 # gloc_dbow3_auto_created_db_folder: ""
 
@@ -238,7 +237,6 @@ gloc_colmap_sparse_folder: "/home/a4/workspace/Arm/SCGP_map/colmap/_sparse/0"
 gloc_colmap_img_folder: "/home/a4/workspace/Arm/SCGP_map/images_2"
 gloc_colmap_mesh_file: "/home/a4/workspace/Arm/SCGP_map/mesh.ply"
 gloc_world_tmat_file: "/home/a4/workspace/Arm/SCGP_map/world_transform.txt"
-gloc_dbow3_database: ""     # "/home/a4/workspace/Arm/SCGP_map/database_orb.bin"
 gloc_dbow3_vocab: "/home/a4/workspace/Arm/SCGP_map/orbvoc.dbow3"
 gloc_dbow3_auto_created_db_folder: "/home/a4/workspace/Arm/SCGP_map/db_auto"
 

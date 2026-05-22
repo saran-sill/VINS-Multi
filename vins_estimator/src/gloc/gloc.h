@@ -230,6 +230,8 @@ struct Map
 
     // Per-image features, index-aligned with images
     std::vector<dbow3::ImageFeatures> feats;
+
+    std::vector<size_t> db_idx_to_train_idx; // DB entry ID → map_.images index
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -272,7 +272,7 @@ void load_dbow3_database(const std::string &db_path,
     // ── 2. Feature cache ─────────────────────────────────────────────────────
     // The cache lives in a sibling folder of the DB file, named img_feats/.
     // This convention is fixed by place_recog_dbow3.
-    const std::string feat_cache_dir = fs::path(db_path).parent_path().string() + "/img_feats";
+    const std::string feat_cache_dir = fs::path(db_path).parent_path().string();
 
     std::cout << "  [DBoW3] Loading feature cache: "
               << feat_cache_dir << "/train_features.bin ...\n";

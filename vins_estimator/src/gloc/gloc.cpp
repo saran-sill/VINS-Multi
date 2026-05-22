@@ -495,7 +495,6 @@ void Gloc::setEstimator(vins_multi::Estimator *estimator)
 // ─────────────────────────────────────────────────────────────────────────────
 // init
 // ─────────────────────────────────────────────────────────────────────────────
-
 bool Gloc::init()
 {
     if (estimator_ptr_ == nullptr)
@@ -514,58 +513,6 @@ bool Gloc::init()
 
     if (!loadMesh())
         return false;
-
-    // ── Precompute undistorted train keypoints (parallel) ────────────────────
-    GLOC_INFO("[init] Precomputing undistorted train keypoints for %zu images ...",
-              map_.feats.size());
-    map_.undist_train_kps.resize(map_.feats.size());
-
-    {
-        const std::size_t n = map_.feats.size();
-        const std::size_t n_threads = std::max(1u, std::thread::hardware_concurrency());
-        const std::size_t chunk = (n + n_threads - 1) / n_threads;
-
-        std::vector<std::future<void>> futs;
-        futs.reserve(n_threads);
-
-        for (std::size_t t = 0; t < n_threads; ++t)
-        {
-            const std::size_t begin = t * chunk;
-            const std::size_t end = std::min(begin + chunk, n);
-            if (begin >= end)
-                break;
-
-            futs.push_back(std::async(std::launch::async, [&, begin, end]() {
-                for (std::size_t ti = begin; ti < end; ++ti)
-                {
-                    const auto &kp1 = map_.feats[ti].keypoints;
-                    auto cal_it = map_.calibs.find(map_.images[ti].camera_id);
-                    if (cal_it == map_.calibs.end() || kp1.empty())
-                    {
-                        map_.undist_train_kps[ti] = kp1;
-                        continue;
-                    }
-                    const colmap::CameraCalib &cal = cal_it->second;
-                    const double cx = cal.width / 2.0;
-                    const double cy = cal.height / 2.0;
-                    std::vector<cv::KeyPoint> undist(kp1.size());
-                    for (std::size_t j = 0; j < kp1.size(); ++j)
-                    {
-                        const Eigen::Vector2d u = colmap::undistort_point(
-                            Eigen::Vector2d(kp1[j].pt.x, kp1[j].pt.y), cal);
-                        undist[j].pt = cv::Point2f(
-                            (float)(vins_multi::FOCAL_LENGTH * (u.x() - cal.cx) / cal.fx + cx),
-                            (float)(vins_multi::FOCAL_LENGTH * (u.y() - cal.cy) / cal.fy + cy));
-                    }
-                    map_.undist_train_kps[ti] = std::move(undist);
-                }
-            }));
-        }
-        for (auto &f : futs)
-            f.get();
-    }
-
-    GLOC_INFO("[init] Train keypoint undistortion cache ready.");
 
     // Allocate one ring buffer per gloc-side camera module. The gloc-side
     // unique_id is the index into GLOC_CAM_MODULES, which we mirror here so
@@ -679,6 +626,62 @@ bool Gloc::init()
     // GLOC_DBOW3_DATABASE is empty and on-the-fly extraction is needed.
     if (!loadDatabase())
         return false;
+
+    GLOC_INFO("[init] images=%zu feats=%zu — must be equal",
+              map_.images.size(), map_.feats.size());
+
+    // ── Precompute undistorted train keypoints (parallel) ────────────────────
+    // Must run AFTER loadDatabase() so map_.feats is populated.
+    GLOC_INFO("[init] Precomputing undistorted train keypoints for %zu images ...",
+              map_.feats.size());
+    map_.undist_train_kps.resize(map_.feats.size());
+
+    {
+        const std::size_t n = map_.feats.size();
+        const std::size_t n_threads = std::max(1u, std::thread::hardware_concurrency());
+        const std::size_t chunk = (n + n_threads - 1) / n_threads;
+
+        std::vector<std::future<void>> futs;
+        futs.reserve(n_threads);
+
+        for (std::size_t t = 0; t < n_threads; ++t)
+        {
+            const std::size_t begin = t * chunk;
+            const std::size_t end = std::min(begin + chunk, n);
+            if (begin >= end)
+                break;
+
+            futs.push_back(std::async(std::launch::async, [&, begin, end]() {
+                for (std::size_t ti = begin; ti < end; ++ti)
+                {
+                    const auto &kp1 = map_.feats[ti].keypoints;
+                    auto cal_it = map_.calibs.find(map_.images[ti].camera_id);
+                    if (cal_it == map_.calibs.end() || kp1.empty())
+                    {
+                        map_.undist_train_kps[ti] = kp1;
+                        continue;
+                    }
+                    const colmap::CameraCalib &cal = cal_it->second;
+                    const double cx = cal.width / 2.0;
+                    const double cy = cal.height / 2.0;
+                    std::vector<cv::KeyPoint> undist(kp1.size());
+                    for (std::size_t j = 0; j < kp1.size(); ++j)
+                    {
+                        const Eigen::Vector2d u = colmap::undistort_point(
+                            Eigen::Vector2d(kp1[j].pt.x, kp1[j].pt.y), cal);
+                        undist[j].pt = cv::Point2f(
+                            (float)(vins_multi::FOCAL_LENGTH * (u.x() - cal.cx) / cal.fx + cx),
+                            (float)(vins_multi::FOCAL_LENGTH * (u.y() - cal.cy) / cal.fy + cy));
+                    }
+                    map_.undist_train_kps[ti] = std::move(undist);
+                }
+            }));
+        }
+        for (auto &f : futs)
+            f.get();
+    }
+
+    GLOC_INFO("[init] Train keypoint undistortion cache ready.");
 
     GLOC_INFO("[init] Ready.");
     return true;
@@ -4596,8 +4599,7 @@ bool Gloc::loadDatabase()
     // so subsequent startups with the same config load instantly.
     GLOC_WARN("[loadDB] No pre-built database — auto-creating from images in: %s",
               GLOC_COLMAP_IMG_FOLDER.c_str());
-    GLOC_WARN("[loadDB] This is slow on first run. Pre-build with global_localize_dbow3 "
-              "to avoid this.");
+    GLOC_WARN("[loadDB] This is slow on first run.");
 
     if (GLOC_DBOW3_AUTO_CREATED_DB_FOLDER.empty())
     {
