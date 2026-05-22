@@ -12,6 +12,7 @@
 #include "../estimator/estimator.h"
 #include "../estimator/parameters.h"
 #include "../gloc/gloc.h"
+#include "../utility/utility.h"
 #include "CameraPoseVisualization.h"
 #include <cv_bridge/cv_bridge.h>
 #include <eigen3/Eigen/Dense>
@@ -30,7 +31,6 @@
 #include <std_msgs/Header.h>
 #include <tf/transform_broadcaster.h>
 #include <visualization_msgs/Marker.h>
-#include "../utility/utility.h"
 
 namespace vins_multi
 {
@@ -104,5 +104,10 @@ void pubGlocVoteLines(
     const std::vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>> &query_train_pairs);
 void pubGlocCorrLines(
     const std::vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>> &query_train_pairs);
+
+// Publish ray-mesh intersection 3D points in world frame.
+// Topic: gloc/mesh_intersect_pts  (cyan points)
+// Called from runOptimization_FixedRel after building flat_obs.
+void pubGlocMeshIntersectPts(const std::vector<Eigen::Vector3d> &pts);
 
 } // namespace vins_multi

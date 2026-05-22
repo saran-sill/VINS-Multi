@@ -3980,6 +3980,7 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
         MeshRayPriorCost mesh_prior;
         bool has_mesh_prior = false;
         int kf_idx;
+        Eigen::Vector3d X_mesh{0.0, 0.0, 0.0}; // ray-mesh intersection in world frame
     };
     std::vector<FlatObs> flat_obs;
     flat_obs.reserve(4096);
@@ -4150,7 +4151,16 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
                         }
                     }
 
-                    flat_obs.push_back({rep, epi, mesh_prior, has_mesh_prior, i});
+                    FlatObs obs{rep, epi, mesh_prior, has_mesh_prior, i};
+                    if (has_mesh_prior)
+                    {
+                        // X_mesh = o_j + lambda_mesh * Rtm_normalised
+                        // rho_mesh = 1/lambda_mesh, Rtm is unnormalised bearing
+                        // so lambda in ||Rtm|| units → X_mesh = o_j + (1/rho_mesh) * Rtm
+                        const double lambda = 1.0 / mesh_prior.rho_mesh;
+                        obs.X_mesh = o_j + lambda * Rtm;
+                    }
+                    flat_obs.push_back(obs);
                     rhos.push_back(has_mesh_prior ? mesh_prior.rho_mesh : 0.1);
                 }
 
@@ -4191,6 +4201,17 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
     }
     GLOC_DEBUG("[opt_fr] X=%d keyframes N=%d observations mesh_hits=%d (fixed-rel, %s)",
                X, N, n_mesh_hit, use_4dof ? "4DOF" : "6DOF");
+
+    // Publish ray-mesh intersection points for visualization
+    if (use_mesh && n_mesh_hit > 0)
+    {
+        std::vector<Eigen::Vector3d> mesh_pts;
+        mesh_pts.reserve(n_mesh_hit);
+        for (const auto &obs : flat_obs)
+            if (obs.has_mesh_prior)
+                mesh_pts.push_back(obs.X_mesh);
+        vins_multi::pubGlocMeshIntersectPts(mesh_pts);
+    }
 
     // ── Solver options ────────────────────────────────────────────────────────
     ceres::Solver::Options solver_opts;
@@ -4254,6 +4275,8 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
                                       new ceres::ScaledLoss(nullptr, GLOC_W_WORLD_PRIOR_ROT,
                                                             ceres::TAKE_OWNERSHIP),
                                       omega_map.data());
+
+                GLOC_INFO("[opt_fr] add GlocFixedRelWorldPriorRotCost");
             }
 
             if (GLOC_W_WORLD_PRIOR_TRANS > 0.0)
@@ -4270,6 +4293,8 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
                                       new ceres::ScaledLoss(nullptr, GLOC_W_WORLD_PRIOR_TRANS,
                                                             ceres::TAKE_OWNERSHIP),
                                       t_map.data());
+
+                GLOC_INFO("[opt_fr] add GlocFixedRelWorldPriorTransCost");
             }
         }
 
@@ -4385,6 +4410,13 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
     }
 
     // ── 5. Main solve ─────────────────────────────────────────────────────────
+    GLOC_INFO("[opt_fr] seed:       t=[%.3f %.3f %.3f]  omega=[%.4f %.4f %.4f]",
+              t_map_seed[0], t_map_seed[1], t_map_seed[2],
+              omega_map_seed[0], omega_map_seed[1], omega_map_seed[2]);
+    GLOC_INFO("[opt_fr] solve_init: t=[%.3f %.3f %.3f]  omega=[%.4f %.4f %.4f]",
+              t_map[0], t_map[1], t_map[2],
+              omega_map[0], omega_map[1], omega_map[2]);
+
     ceres::Problem main_prob(prob_opts);
     auto *main_ord = new ceres::ParameterBlockOrdering;
     build_problem(main_prob, main_ord, /*add_epi=*/true);
@@ -4396,6 +4428,13 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
     ceres::Solver::Summary main_sum;
     ceres::Solve(main_opts, &main_prob, &main_sum);
     GLOC_DEBUG("[opt_fr] %s", main_sum.BriefReport().c_str());
+    GLOC_INFO("[opt_fr] result:     t=[%.3f %.3f %.3f]  omega=[%.4f %.4f %.4f]  "
+              "Δt=%.3fm",
+              t_map[0], t_map[1], t_map[2],
+              omega_map[0], omega_map[1], omega_map[2],
+              std::sqrt((t_map[0] - t_map_seed[0]) * (t_map[0] - t_map_seed[0]) +
+                        (t_map[1] - t_map_seed[1]) * (t_map[1] - t_map_seed[1]) +
+                        (t_map[2] - t_map_seed[2]) * (t_map[2] - t_map_seed[2])));
 
     if (main_sum.termination_type != ceres::CONVERGENCE &&
         main_sum.termination_type != ceres::USER_SUCCESS)

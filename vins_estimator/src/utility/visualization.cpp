@@ -22,6 +22,7 @@ ros::Publisher pub_gloc_map_frustums, pub_gloc_map_path, pub_gloc_mesh_cloud;
 ros::Publisher pub_gloc_opt_poses, pub_gloc_opt_path, pub_gloc_kf_status, pub_gloc_match_lines;
 ros::Publisher pub_gloc_vote_lines;
 ros::Publisher pub_gloc_corr_lines;
+ros::Publisher pub_gloc_mesh_intersect;
 ros::Publisher pub_path;
 std::vector<ros::Publisher> pub_point_cloud;
 ros::Publisher pub_margin_cloud;
@@ -77,6 +78,8 @@ void registerPub(ros::NodeHandle &n)
         "gloc/vote_lines", 10);
     pub_gloc_corr_lines = n.advertise<visualization_msgs::Marker>(
         "gloc/corr_lines", 10);
+    pub_gloc_mesh_intersect = n.advertise<sensor_msgs::PointCloud>(
+        "gloc/mesh_intersect_pts", 10);
     pub_path = n.advertise<nav_msgs::Path>("path", 1000);
     pub_odometry = n.advertise<nav_msgs::Odometry>("odomimu_lowhz", 1000);
     // pub_key_poses = n.advertise<visualization_msgs::Marker>("key_poses", 1000);
@@ -1233,6 +1236,46 @@ void pubGlocCorrLines(
     }
 
     pub_gloc_corr_lines.publish(m);
+}
+
+// Publish ray-mesh intersection points in world frame.
+// Called from runOptimization_FixedRel after building flat_obs.
+// Points are colored cyan (r=0 g=1 b=1) to distinguish from the mesh cloud.
+void pubGlocMeshIntersectPts(const std::vector<Eigen::Vector3d> &pts)
+{
+    if (pub_gloc_mesh_intersect.getNumSubscribers() == 0)
+        return;
+
+    sensor_msgs::PointCloud cloud;
+    cloud.header.frame_id = "world";
+    cloud.header.stamp = ros::Time::now();
+    cloud.points.reserve(pts.size());
+
+    sensor_msgs::ChannelFloat32 ch_r, ch_g, ch_b;
+    ch_r.name = "r";
+    ch_r.values.reserve(pts.size());
+    ch_g.name = "g";
+    ch_g.values.reserve(pts.size());
+    ch_b.name = "b";
+    ch_b.values.reserve(pts.size());
+
+    for (const auto &p : pts)
+    {
+        geometry_msgs::Point32 gp;
+        gp.x = static_cast<float>(p.x());
+        gp.y = static_cast<float>(p.y());
+        gp.z = static_cast<float>(p.z());
+        cloud.points.push_back(gp);
+        ch_r.values.push_back(0.0f);
+        ch_g.values.push_back(1.0f);
+        ch_b.values.push_back(1.0f);
+    }
+
+    cloud.channels.push_back(ch_r);
+    cloud.channels.push_back(ch_g);
+    cloud.channels.push_back(ch_b);
+
+    pub_gloc_mesh_intersect.publish(cloud);
 }
 
 } // namespace vins_multi
