@@ -2737,38 +2737,46 @@ bool Gloc::runOptimization_6DOF(std::vector<KeyframeGlocState> &working_set)
         }
 
         // World prior from last snapped T_map_local
-        if (add_prior && (GLOC_W_WORLD_PRIOR_ROT > 0.0 || GLOC_W_WORLD_PRIOR_TRANS > 0.0))
+        if (add_prior && (GLOC_W_WORLD_PRIOR_ROT > 0.0 || GLOC_W_WORLD_PRIOR_TRANS > 0.0) && snapped_local)
         {
-            std::lock_guard<std::mutex> lk(snap_mutex_);
-            if (!snapped_)
-                return;
-
             for (int i = 0; i < X; ++i)
             {
                 const auto &kf = working_set[i];
                 const Mat3d R_local_body = kf.R_local.toRotationMatrix();
 
-                // T_map_body_prior[i]:
-                //   R_prior = R_map_local * R_local_body[i]
-                //   t_prior = R_map_local * P_local[i] + t_map_local
-                const Mat3d R_prior = T_map_local_R_ * R_local_body;
-                const Vec3d t_prior = T_map_local_R_ * kf.P_local + T_map_local_t_;
+                // T_map_body_prior[i] using pre-captured snap (never re-read live):
+                const Mat3d R_prior = R_map_local * R_local_body;
+                const Vec3d t_prior = R_map_local * kf.P_local + t_map_local;
 
-                GlocWorldPriorCost c{};
-                for (int r = 0; r < 3; ++r)
-                    for (int col = 0; col < 3; ++col)
-                        c.R_prior[r * 3 + col] = R_prior(r, col);
-                c.t_prior[0] = t_prior.x();
-                c.t_prior[1] = t_prior.y();
-                c.t_prior[2] = t_prior.z();
-                c.w_rot = GLOC_W_WORLD_PRIOR_ROT;
-                c.w_trans = GLOC_W_WORLD_PRIOR_TRANS;
+                // ── Rotation prior (SO(3) geodesic error) ────────────────────
+                if (GLOC_W_WORLD_PRIOR_ROT > 0.0)
+                {
+                    GlocWorldPriorRotCost cr{};
+                    for (int r = 0; r < 3; ++r)
+                        for (int col = 0; col < 3; ++col)
+                            cr.R_prior[r * 3 + col] = R_prior(r, col);
+                    auto *cost = new ceres::AutoDiffCostFunction<GlocWorldPriorRotCost, 3, 3>(
+                        new GlocWorldPriorRotCost(cr));
+                    prob.AddResidualBlock(cost,
+                                          new ceres::ScaledLoss(nullptr, GLOC_W_WORLD_PRIOR_ROT,
+                                                                ceres::TAKE_OWNERSHIP),
+                                          omega_kf[i].data());
+                }
 
-                auto *cost = new ceres::AutoDiffCostFunction<GlocWorldPriorCost, 6, 3, 3>(
-                    new GlocWorldPriorCost(c));
-
-                prob.AddResidualBlock(cost, nullptr,
-                                      omega_kf[i].data(), t_kf[i].data());
+                // ── Translation prior (L2 in metres) ────────────────────────
+                if (GLOC_W_WORLD_PRIOR_TRANS > 0.0)
+                {
+                    GlocWorldPriorTransCost ct{};
+                    ct.t_prior[0] = t_prior.x();
+                    ct.t_prior[1] = t_prior.y();
+                    ct.t_prior[2] = t_prior.z();
+                    auto *cost = new ceres::AutoDiffCostFunction<GlocWorldPriorTransCost, 3, 3>(
+                        new GlocWorldPriorTransCost(ct));
+                    prob.AddResidualBlock(cost,
+                                          new ceres::ScaledLoss(nullptr, GLOC_W_WORLD_PRIOR_TRANS,
+                                                                ceres::TAKE_OWNERSHIP),
+                                          t_kf[i].data());
+                }
             }
         }
     };
@@ -2861,6 +2869,14 @@ bool Gloc::runOptimization_6DOF(std::vector<KeyframeGlocState> &working_set)
     ceres::Solve(main_opts, &main_prob, &main_summary);
 
     GLOC_DEBUG("[opt] %s", main_summary.BriefReport().c_str());
+
+    if (main_summary.termination_type != ceres::CONVERGENCE &&
+        main_summary.termination_type != ceres::USER_SUCCESS)
+    {
+        GLOC_WARN("[opt] solver did not converge (%s) - skip",
+                  ceres::TerminationTypeToString(main_summary.termination_type));
+        return false;
+    }
 
     // ── 6. Inlier check ───────────────────────────────────────────────────────
     int inliers = 0;
@@ -3488,29 +3504,44 @@ bool Gloc::runOptimization_4DOF(std::vector<KeyframeGlocState> &working_set)
             }
         }
 
-        if (add_prior && (GLOC_W_WORLD_PRIOR_ROT > 0.0 || GLOC_W_WORLD_PRIOR_TRANS > 0.0))
+        if (add_prior && (GLOC_W_WORLD_PRIOR_ROT > 0.0 || GLOC_W_WORLD_PRIOR_TRANS > 0.0) && snapped_local)
         {
-            std::lock_guard<std::mutex> lk(snap_mutex_);
-            if (!snapped_)
-                return;
             for (int i = 0; i < X; ++i)
             {
                 const auto &kf = working_set[i];
                 const Mat3d R_local_body = kf.R_local.toRotationMatrix();
-                const Mat3d R_prior = T_map_local_R_ * R_local_body;
-                const Vec3d t_prior = T_map_local_R_ * kf.P_local + T_map_local_t_;
-                GlocWorldPriorCost c{};
-                for (int r = 0; r < 3; ++r)
-                    for (int col = 0; col < 3; ++col)
-                        c.R_prior[r * 3 + col] = R_prior(r, col);
-                c.t_prior[0] = t_prior.x();
-                c.t_prior[1] = t_prior.y();
-                c.t_prior[2] = t_prior.z();
-                c.w_rot = GLOC_W_WORLD_PRIOR_ROT;
-                c.w_trans = GLOC_W_WORLD_PRIOR_TRANS;
-                auto *cost = new ceres::AutoDiffCostFunction<GlocWorldPriorCost, 6, 3, 3>(
-                    new GlocWorldPriorCost(c));
-                prob.AddResidualBlock(cost, nullptr, omega_kf[i].data(), t_kf[i].data());
+                const Mat3d R_prior = R_map_local * R_local_body;
+                const Vec3d t_prior = R_map_local * kf.P_local + t_map_local;
+
+                // ── Rotation prior ───────────────────────────────────────────
+                if (GLOC_W_WORLD_PRIOR_ROT > 0.0)
+                {
+                    GlocWorldPriorRotCost cr{};
+                    for (int r = 0; r < 3; ++r)
+                        for (int col = 0; col < 3; ++col)
+                            cr.R_prior[r * 3 + col] = R_prior(r, col);
+                    auto *cost = new ceres::AutoDiffCostFunction<GlocWorldPriorRotCost, 3, 3>(
+                        new GlocWorldPriorRotCost(cr));
+                    prob.AddResidualBlock(cost,
+                                          new ceres::ScaledLoss(nullptr, GLOC_W_WORLD_PRIOR_ROT,
+                                                                ceres::TAKE_OWNERSHIP),
+                                          omega_kf[i].data());
+                }
+
+                // ── Translation prior ────────────────────────────────────────
+                if (GLOC_W_WORLD_PRIOR_TRANS > 0.0)
+                {
+                    GlocWorldPriorTransCost ct{};
+                    ct.t_prior[0] = t_prior.x();
+                    ct.t_prior[1] = t_prior.y();
+                    ct.t_prior[2] = t_prior.z();
+                    auto *cost = new ceres::AutoDiffCostFunction<GlocWorldPriorTransCost, 3, 3>(
+                        new GlocWorldPriorTransCost(ct));
+                    prob.AddResidualBlock(cost,
+                                          new ceres::ScaledLoss(nullptr, GLOC_W_WORLD_PRIOR_TRANS,
+                                                                ceres::TAKE_OWNERSHIP),
+                                          t_kf[i].data());
+                }
             }
         }
     };
@@ -3586,6 +3617,14 @@ bool Gloc::runOptimization_4DOF(std::vector<KeyframeGlocState> &working_set)
     ceres::Solver::Summary main_summary;
     ceres::Solve(main_opts, &main_prob, &main_summary);
     GLOC_DEBUG("[opt4] %s", main_summary.BriefReport().c_str());
+
+    if (main_summary.termination_type != ceres::CONVERGENCE &&
+        main_summary.termination_type != ceres::USER_SUCCESS)
+    {
+        GLOC_WARN("[opt4] solver did not converge (%s) - skip",
+                  ceres::TerminationTypeToString(main_summary.termination_type));
+        return false;
+    }
 
     // ── 6. Inlier check ───────────────────────────────────────────────────────
     int inliers = 0;
@@ -4172,32 +4211,49 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
 
         // ── World prior (snapped only) ────────────────────────────────────────
         // Proper SO(3) prior anchoring T_map_local to its seed from the last
-        // accepted snap. Uses geodesic rotation error, not parameter-space L2.
+        // accepted snap. Rotation and translation weighted independently via
+        // ScaledLoss so weights are on the same scale as GLOC_W_REPROJ.
         if (snapped_local && (GLOC_W_WORLD_PRIOR_ROT > 0.0 || GLOC_W_WORLD_PRIOR_TRANS > 0.0))
         {
-            GlocFixedRelWorldPriorCost c{};
-            // R_seed = R_map_local_seed  (row-major)
+            // Build R_seed from omega_map_seed
             const Eigen::Map<const Eigen::Vector3d> ov_seed(omega_map_seed.data());
-            const double angle = ov_seed.norm();
+            const double seed_norm = ov_seed.norm();
             Eigen::Matrix3d R_seed_mat = Eigen::Matrix3d::Identity();
-            if (angle > 1e-12)
+            if (seed_norm > 1e-12)
             {
-                const Eigen::AngleAxisd aa(angle, ov_seed / angle);
+                const Eigen::AngleAxisd aa(seed_norm, (ov_seed / seed_norm).eval());
                 R_seed_mat = aa.toRotationMatrix();
             }
-            for (int r = 0; r < 3; ++r)
-                for (int col = 0; col < 3; ++col)
-                    c.R_seed[r * 3 + col] = R_seed_mat(r, col);
-            c.t_seed[0] = t_map_seed[0];
-            c.t_seed[1] = t_map_seed[1];
-            c.t_seed[2] = t_map_seed[2];
-            c.w_rot = GLOC_W_WORLD_PRIOR_ROT;
-            c.w_trans = GLOC_W_WORLD_PRIOR_TRANS;
 
-            auto *cost = new ceres::AutoDiffCostFunction<GlocFixedRelWorldPriorCost, 6, 3, 3>(
-                new GlocFixedRelWorldPriorCost(c));
-            prob.AddResidualBlock(cost, nullptr,
-                                  omega_map.data(), t_map.data());
+            if (GLOC_W_WORLD_PRIOR_ROT > 0.0)
+            {
+                GlocFixedRelWorldPriorRotCost cr{};
+                for (int r = 0; r < 3; ++r)
+                    for (int c = 0; c < 3; ++c)
+                        cr.R_seed[r * 3 + c] = R_seed_mat(r, c);
+                auto *cost = new ceres::AutoDiffCostFunction<
+                    GlocFixedRelWorldPriorRotCost, 3, 3>(
+                    new GlocFixedRelWorldPriorRotCost(cr));
+                prob.AddResidualBlock(cost,
+                                      new ceres::ScaledLoss(nullptr, GLOC_W_WORLD_PRIOR_ROT,
+                                                            ceres::TAKE_OWNERSHIP),
+                                      omega_map.data());
+            }
+
+            if (GLOC_W_WORLD_PRIOR_TRANS > 0.0)
+            {
+                GlocFixedRelWorldPriorTransCost ct{};
+                ct.t_seed[0] = t_map_seed[0];
+                ct.t_seed[1] = t_map_seed[1];
+                ct.t_seed[2] = t_map_seed[2];
+                auto *cost = new ceres::AutoDiffCostFunction<
+                    GlocFixedRelWorldPriorTransCost, 3, 3>(
+                    new GlocFixedRelWorldPriorTransCost(ct));
+                prob.AddResidualBlock(cost,
+                                      new ceres::ScaledLoss(nullptr, GLOC_W_WORLD_PRIOR_TRANS,
+                                                            ceres::TAKE_OWNERSHIP),
+                                      t_map.data());
+            }
         }
 
         for (int k = 0; k < N; ++k)
@@ -4323,6 +4379,14 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
     ceres::Solver::Summary main_sum;
     ceres::Solve(main_opts, &main_prob, &main_sum);
     GLOC_DEBUG("[opt_fr] %s", main_sum.BriefReport().c_str());
+
+    if (main_sum.termination_type != ceres::CONVERGENCE &&
+        main_sum.termination_type != ceres::USER_SUCCESS)
+    {
+        GLOC_WARN("[opt_fr] solver did not converge (%s) - skip",
+                  ceres::TerminationTypeToString(main_sum.termination_type));
+        return false;
+    }
 
     // ── 6. Inlier check ───────────────────────────────────────────────────────
     int inliers = 0;
