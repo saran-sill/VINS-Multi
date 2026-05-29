@@ -81,6 +81,9 @@ int MAX_TRACK_NUM_PER_MODULE;
 int VIS_CIRCLE_RADIUS;
 int VIS_ARROW_THICKNESS;
 
+Eigen::Vector3d GLOC_DEBUG_P_LOCAL_OFFSET = Eigen::Vector3d::Zero();
+double GLOC_DEBUG_YAW_LOCAL_OFFSET_DEG = 0.0;
+
 template <typename T>
 T readParam(ros::NodeHandle &n, std::string name)
 {
@@ -490,6 +493,28 @@ void readParameters(std::string config_file)
 
     VIS_CIRCLE_RADIUS = fsSettings["vis_circle_radius"];
     VIS_ARROW_THICKNESS = fsSettings["vis_arrow_thickness"];
+
+    {
+        cv::FileNode n = fsSettings["gloc_debug_p_local_offset"];
+        if (!n.empty() && n.size() == 3)
+        {
+            GLOC_DEBUG_P_LOCAL_OFFSET.x() = static_cast<double>(n[0]);
+            GLOC_DEBUG_P_LOCAL_OFFSET.y() = static_cast<double>(n[1]);
+            GLOC_DEBUG_P_LOCAL_OFFSET.z() = static_cast<double>(n[2]);
+        }
+    }
+    printf("GLOC_DEBUG_P_LOCAL_OFFSET : [%.2f %.2f %.2f]\n",
+           GLOC_DEBUG_P_LOCAL_OFFSET.x(),
+           GLOC_DEBUG_P_LOCAL_OFFSET.y(),
+           GLOC_DEBUG_P_LOCAL_OFFSET.z());
+
+    {
+        cv::FileNode n = fsSettings["gloc_debug_yaw_local_offset_deg"];
+        if (!n.empty())
+            GLOC_DEBUG_YAW_LOCAL_OFFSET_DEG = static_cast<double>(n);
+    }
+    printf("GLOC_DEBUG_YAW_LOCAL_OFFSET_DEG : %.2f\n",
+           GLOC_DEBUG_YAW_LOCAL_OFFSET_DEG);
 
     // ESTIMATE_EXTRINSIC = fsSettings["estimate_extrinsic"];
     // if (ESTIMATE_EXTRINSIC == 2)

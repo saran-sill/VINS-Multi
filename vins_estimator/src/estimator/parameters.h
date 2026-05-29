@@ -287,6 +287,16 @@ extern int ESTIMATE_EXTRINSIC;
 extern int VIS_CIRCLE_RADIUS;
 extern int VIS_ARROW_THICKNESS;
 
+// Debug: offset applied to P_local in every gloc snapshot entry.
+// Simulates a VINS origin far from the map origin to stress-test pre-snap RANSAC.
+// Zero vector (default) = no effect.
+extern Eigen::Vector3d GLOC_DEBUG_P_LOCAL_OFFSET;
+
+// Debug: yaw rotation (degrees) applied to the entire local frame in every
+// gloc snapshot entry. Rotates both R_local and P_local by Rz(yaw_deg) so
+// the frame is self-consistent. Zero (default) = no effect.
+extern double GLOC_DEBUG_YAW_LOCAL_OFFSET_DEG;
+
 extern std::mutex GPU_MUTEX;
 
 void readParameters(std::string config_file);

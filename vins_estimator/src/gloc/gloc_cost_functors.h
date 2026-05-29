@@ -808,3 +808,255 @@ struct MeshRayPriorCost
         return true;
     }
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GlocFixedRelReprojCostYaw / GlocFixedRelEpipolarCostYaw
+//
+// 4-DOF variants of GlocFixedRelReprojCost / GlocFixedRelEpipolarCost where
+// R_map_local is represented as a scalar yaw angle (radians) instead of a
+// 3-vector axis-angle.
+//
+// Motivation: YawOnlyParameterization on omega_map[3] is numerically unstable
+// when the yaw is near ±π/2 or larger — AngleAxisd(rotation_matrix) can flip
+// sign across the π boundary as the optimizer accumulates steps, jumping to
+// the antipodal solution and producing 0 inliers. Representing R_map_local as
+// a single scalar yaw eliminates the singularity entirely since cos/sin are
+// smooth and periodic.
+//
+// R_map_local = Rz(yaw_map):
+//   [ cos  -sin  0 ]
+//   [ sin   cos  0 ]
+//   [  0     0   1 ]
+//
+// Variables: yaw_map[1]  yaw of R_map_local (radians, local → world)
+//            t_map[3]    t_map_local
+//            rho[1]      inverse depth  (ReprojCostYaw only)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Helper: build col-major R_ml from scalar yaw and rotate a point.
+// Used inside both yaw functors — avoids repeating the same 9 lines.
+template <typename T>
+inline void yaw_to_R_ml(const T yaw, T R_ml[9])
+{
+    const T c = ceres::cos(yaw);
+    const T s = ceres::sin(yaw);
+    // col-major: col0=(c,s,0) col1=(-s,c,0) col2=(0,0,1)
+    R_ml[0] = c;
+    R_ml[3] = -s;
+    R_ml[6] = T(0);
+    R_ml[1] = s;
+    R_ml[4] = c;
+    R_ml[7] = T(0);
+    R_ml[2] = T(0);
+    R_ml[5] = T(0);
+    R_ml[8] = T(1);
+}
+
+template <typename T>
+inline void R_ml_rotate(const T R_ml[9], const double p[3], T out[3])
+{
+    // out = R_ml * p  (col-major R_ml, double p)
+    out[0] = R_ml[0] * T(p[0]) + R_ml[3] * T(p[1]) + R_ml[6] * T(p[2]);
+    out[1] = R_ml[1] * T(p[0]) + R_ml[4] * T(p[1]) + R_ml[7] * T(p[2]);
+    out[2] = R_ml[2] * T(p[0]) + R_ml[5] * T(p[1]) + R_ml[8] * T(p[2]);
+}
+
+struct GlocFixedRelReprojCostYaw
+{
+    // Same fields as GlocFixedRelReprojCost
+    double R_local_body[9];
+    double P_local[3];
+    double Rtm[3];
+    double oj[3];
+    double pq[2];
+    double Rcr[9];
+    double tcr[3];
+    double fx, fy, cx_, cy_;
+
+    template <typename T>
+    bool operator()(const T *__restrict__ yaw_map,
+                    const T *__restrict__ t_map,
+                    const T *__restrict__ rho,
+                    T *__restrict__ res) const
+    {
+        // Build R_ml from scalar yaw
+        T R_ml[9];
+        yaw_to_R_ml(yaw_map[0], R_ml);
+
+        // R_wb = R_ml * R_local_body  (col-major, R_local_body row-major)
+        T R_wb[9];
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+            {
+                R_wb[r + c * 3] = T(0);
+                for (int k = 0; k < 3; ++k)
+                    R_wb[r + c * 3] += R_ml[r + k * 3] * T(R_local_body[k * 3 + c]);
+            }
+
+        // t_world_body = R_ml * P_local + t_map
+        T t_i[3];
+        R_ml_rotate(R_ml, P_local, t_i);
+        t_i[0] += t_map[0];
+        t_i[1] += t_map[1];
+        t_i[2] += t_map[2];
+
+        // omega_bw = AA(R_wb^T)
+        T R_bw_cm[9];
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                R_bw_cm[r + c * 3] = R_wb[c + r * 3];
+        T omega_bw[3];
+        ceres::RotationMatrixToAngleAxis(R_bw_cm, omega_bw);
+
+        // Identical to GlocFixedRelReprojCost from here ───────────────────────
+        const T neg_t[3] = {-t_i[0], -t_i[1], -t_i[2]};
+        T t_bw[3];
+        ceres::AngleAxisRotatePoint(omega_bw, neg_t, t_bw);
+
+        const T oj_w[3] = {T(oj[0]), T(oj[1]), T(oj[2])};
+        const T Rtm_w[3] = {T(Rtm[0]), T(Rtm[1]), T(Rtm[2])};
+        T oj_b[3], Rtm_b[3];
+        ceres::AngleAxisRotatePoint(omega_bw, oj_w, oj_b);
+        ceres::AngleAxisRotatePoint(omega_bw, Rtm_w, Rtm_b);
+        oj_b[0] += t_bw[0];
+        oj_b[1] += t_bw[1];
+        oj_b[2] += t_bw[2];
+
+        T b[3], f[3];
+        for (int i = 0; i < 3; ++i)
+        {
+            b[i] = T(Rcr[i * 3 + 0]) * oj_b[0] + T(Rcr[i * 3 + 1]) * oj_b[1] + T(Rcr[i * 3 + 2]) * oj_b[2] + T(tcr[i]);
+            f[i] = T(Rcr[i * 3 + 0]) * Rtm_b[0] + T(Rcr[i * 3 + 1]) * Rtm_b[1] + T(Rcr[i * 3 + 2]) * Rtm_b[2];
+        }
+
+        const T h0 = rho[0] * b[0] + f[0];
+        const T h1 = rho[0] * b[1] + f[1];
+        const T h2 = rho[0] * b[2] + f[2];
+        if (h2 < T(1e-7))
+        {
+            res[0] = T(1000.0);
+            res[1] = T(1000.0);
+            return true;
+        }
+        const T inv_h2 = T(1.0) / h2;
+        res[0] = T(fx) * h0 * inv_h2 + T(cx_) - T(pq[0]);
+        res[1] = T(fy) * h1 * inv_h2 + T(cy_) - T(pq[1]);
+        return true;
+    }
+};
+
+struct GlocFixedRelEpipolarCostYaw
+{
+    // Same fields as GlocFixedRelEpipolarCost
+    double R_local_body[9];
+    double P_local[3];
+    double x_q[3];
+    double x_t[3];
+    double R_j[9];
+    double t_j[3];
+    double Rcr[9];
+    double tcr[3];
+    double scale;
+
+    template <typename T>
+    bool operator()(const T *__restrict__ yaw_map,
+                    const T *__restrict__ t_map,
+                    T *__restrict__ res) const
+    {
+        // Build R_ml from scalar yaw
+        T R_ml[9];
+        yaw_to_R_ml(yaw_map[0], R_ml);
+
+        // R_wb = R_ml * R_local_body
+        T R_wb[9];
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+            {
+                R_wb[r + c * 3] = T(0);
+                for (int k = 0; k < 3; ++k)
+                    R_wb[r + c * 3] += R_ml[r + k * 3] * T(R_local_body[k * 3 + c]);
+            }
+
+        // t_world_body = R_ml * P_local + t_map
+        T t_i[3];
+        R_ml_rotate(R_ml, P_local, t_i);
+        t_i[0] += t_map[0];
+        t_i[1] += t_map[1];
+        t_i[2] += t_map[2];
+
+        // omega_bw = AA(R_wb^T)
+        T R_bw_cm[9];
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                R_bw_cm[r + c * 3] = R_wb[c + r * 3];
+        T omega_bw[3];
+        ceres::RotationMatrixToAngleAxis(R_bw_cm, omega_bw);
+
+        // Identical to GlocFixedRelEpipolarCost from here ─────────────────────
+        const T neg_t[3] = {-t_i[0], -t_i[1], -t_i[2]};
+        T t_bw[3];
+        ceres::AngleAxisRotatePoint(omega_bw, neg_t, t_bw);
+
+        T t_qw[3];
+        for (int i = 0; i < 3; ++i)
+            t_qw[i] = T(Rcr[i * 3 + 0]) * t_bw[0] + T(Rcr[i * 3 + 1]) * t_bw[1] + T(Rcr[i * 3 + 2]) * t_bw[2] + T(tcr[i]);
+
+        T R_bw2[9];
+        ceres::AngleAxisToRotationMatrix(omega_bw, R_bw2);
+        T R_qw[9];
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j)
+            {
+                R_qw[i * 3 + j] = T(0);
+                for (int k = 0; k < 3; ++k)
+                    R_qw[i * 3 + j] += T(Rcr[i * 3 + k]) * R_bw2[k + j * 3];
+            }
+
+        T R_rel[9];
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j)
+            {
+                R_rel[i * 3 + j] = T(0);
+                for (int k = 0; k < 3; ++k)
+                    R_rel[i * 3 + j] += R_qw[i * 3 + k] * T(R_j[j * 3 + k]);
+            }
+
+        T t_rel[3];
+        for (int i = 0; i < 3; ++i)
+        {
+            t_rel[i] = t_qw[i];
+            for (int j = 0; j < 3; ++j)
+                t_rel[i] -= R_rel[i * 3 + j] * T(t_j[j]);
+        }
+
+        T E[9];
+        for (int j = 0; j < 3; ++j)
+        {
+            E[0 * 3 + j] = -t_rel[2] * R_rel[1 * 3 + j] + t_rel[1] * R_rel[2 * 3 + j];
+            E[1 * 3 + j] = t_rel[2] * R_rel[0 * 3 + j] - t_rel[0] * R_rel[2 * 3 + j];
+            E[2 * 3 + j] = -t_rel[1] * R_rel[0 * 3 + j] + t_rel[0] * R_rel[1 * 3 + j];
+        }
+
+        T Ex_t[3] = {T(0), T(0), T(0)};
+        T ETx_q[3] = {T(0), T(0), T(0)};
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j)
+            {
+                Ex_t[i] += E[i * 3 + j] * T(x_t[j]);
+                ETx_q[i] += E[j * 3 + i] * T(x_q[j]);
+            }
+
+        T f_val = T(0);
+        for (int i = 0; i < 3; ++i)
+            f_val += T(x_q[i]) * Ex_t[i];
+
+        const T denom = Ex_t[0] * Ex_t[0] + Ex_t[1] * Ex_t[1] + ETx_q[0] * ETx_q[0] + ETx_q[1] * ETx_q[1];
+        if (denom < T(1e-14))
+        {
+            res[0] = T(1000.0);
+            return true;
+        }
+        res[0] = T(scale) * f_val / ceres::sqrt(denom);
+        return true;
+    }
+};

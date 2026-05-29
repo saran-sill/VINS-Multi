@@ -224,6 +224,12 @@ gloc_fix_rel_poses: true   # fix relative poses, optimize only T_map_local
 gloc_use_4dof: true        # yaw-only rotation (4-DOF); false = full 6-DOF
 gloc_startup_delay_s: 10.0   # wait XXs after first snapshot before processing
 
+gloc_debug_p_local_offset: [50.0, -50.0, 0.0]
+gloc_debug_yaw_local_offset_deg: 90.0
+
+# gloc_debug_p_local_offset: [0.0, 0.0, 0.0]
+# gloc_debug_yaw_local_offset_deg: 0.0
+
 #======================= PC =======================
 gloc_colmap_sparse_folder: "/mnt/EXDISK/HiveGround/colmap_ws/SCGP/colmap/_sparse/0"
 gloc_colmap_img_folder: "/mnt/EXDISK/HiveGround/colmap_ws/SCGP/images_2"
@@ -285,10 +291,11 @@ gloc_dbow3_max_results: 5
 gloc_dbow3_min_score: 0.01
 
 # Consensus voting
-gloc_vote_eps_m: 3.0
+gloc_vote_ransac_eps_m: 3.0
 gloc_vote_min_votes: 2            # -1 = majority rule (ceil((X-1)/2))
 gloc_vote_max_dist_m: 3.0          # reject candidates >XXm from current position
 gloc_vote_max_matches: 2           # keep top-3 inlier matches per keyframe (default: 1)
+gloc_pre_snap_history_size: 15
 
 # ORB feature extraction
 gloc_orb_nfeatures: 500

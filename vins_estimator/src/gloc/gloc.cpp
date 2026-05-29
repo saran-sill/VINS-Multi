@@ -1194,6 +1194,44 @@ void Gloc::processLoop()
         // Run optimization and capture the success flag for visualization
         bool opt_success = runOptimization(working_set);
 
+        // ── Post-snap pipeline reset ──────────────────────────────────────────
+        // On the round that first snaps, all carried-over keyframes have stale
+        // correspondences computed without a valid T_map_local. Reset their
+        // pipeline_done so the next round re-runs voting + correspondences
+        // against the fresh T_map_local.
+        {
+            bool do_reset = false;
+            {
+                std::lock_guard<std::mutex> lk(snap_mutex_);
+                if (just_snapped_)
+                {
+                    just_snapped_ = false;
+                    do_reset = true;
+                }
+            }
+            if (do_reset)
+            {
+                std::lock_guard<std::mutex> lk(state_mutex_);
+
+                // Keep only the newest keyframe — it will be processed fresh
+                // next round. All carried-over keyframes have stale pre-snap
+                // correspondences and are cheaper to drop than to recompute.
+                if (state_map_.size() > 1)
+                {
+                    auto last = std::prev(state_map_.end());
+                    state_map_.erase(state_map_.begin(), last);
+                }
+
+                // Reset the surviving entry so it goes through the full pipeline.
+                for (auto &[t, s] : state_map_)
+                    for (auto &slot : s.per_gloc)
+                        slot.pipeline_done = false;
+
+                GLOC_INFO("[processLoop] snap: cleared carried-over keyframes, keeping newest t=%.4f",
+                          state_map_.empty() ? 0.0 : state_map_.rbegin()->first);
+            }
+        }
+
         if (opt_success && vins_multi::hasGlocOptimizedSubscribers())
         {
             // Publish all keyframes in world frame using the just-updated
@@ -1562,6 +1600,62 @@ void Gloc::runOrbAndDbow(std::vector<KeyframeGlocState> &working_set)
             if (GLOC_DEBUG_FOLDER.empty())
                 slot.preprocessed_image.release();
         }
+
+        // ── Pre-snap history accumulation ─────────────────────────────────────
+        // After all g slots have been DBoW-queried for this keyframe, push it
+        // into the history so future rounds have more voters for the pre-snap
+        // RANSAC. Only accumulate before snapping; cleared on snap.
+        // Disabled when GLOC_PRE_SNAP_HISTORY_SIZE == 0 (default).
+        if (GLOC_PRE_SNAP_HISTORY_SIZE > 0)
+        {
+            bool already_snapped;
+            {
+                std::lock_guard<std::mutex> lk(snap_mutex_);
+                already_snapped = snapped_;
+            }
+            if (!already_snapped)
+            {
+                // Skip if this keyframe is already in the history (re-entrant rounds).
+                bool already_present = false;
+                for (const auto &h : pre_snap_history_)
+                    if (h.t_kf == kf_state.t_kf)
+                    {
+                        already_present = true;
+                        break;
+                    }
+
+                if (!already_present)
+                {
+                    // Only push if at least one module produced candidates.
+                    bool any_candidates = false;
+                    for (const auto &slot : kf_state.per_gloc)
+                        if (!slot.dbow_candidates.empty())
+                        {
+                            any_candidates = true;
+                            break;
+                        }
+
+                    if (any_candidates)
+                    {
+                        PreSnapHistoryEntry entry;
+                        entry.t_kf = kf_state.t_kf;
+                        entry.P_local = kf_state.P_local;
+                        entry.dbow_candidates.resize(kf_state.per_gloc.size());
+                        for (std::size_t g = 0; g < kf_state.per_gloc.size(); ++g)
+                            entry.dbow_candidates[g] = kf_state.per_gloc[g].dbow_candidates;
+
+                        pre_snap_history_.push_back(std::move(entry));
+
+                        // Drop oldest when over capacity.
+                        while (static_cast<int>(pre_snap_history_.size()) > GLOC_PRE_SNAP_HISTORY_SIZE)
+                            pre_snap_history_.pop_front();
+
+                        GLOC_DEBUG("[preSnapHistory] added t_kf=%.4f history_size=%zu",
+                                   kf_state.t_kf, pre_snap_history_.size());
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1574,7 +1668,7 @@ void Gloc::runOrbAndDbow(std::vector<KeyframeGlocState> &working_set)
 // least one candidate m satisfying:
 //
 //   | ||world_pos(c_in) - world_pos(c_jm)|| - ||P_local_i - P_local_j|| |
-//       < GLOC_VOTE_EPS_M
+//       < GLOC_VOTE_RANSAC_EPS_M
 //
 // Candidates that agree with fewer than min_votes_threshold other keyframes are
 // rejected. Among survivors the one with the highest DBoW3 score is elected as
@@ -1663,8 +1757,30 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
                                      slot.dbow_candidates[ni].first});
         }
 
+        // ── 1a. Append pre-snap history voters ────────────────────────────────
+        // History entries use sentinel kf_idx=-1 so they are never touched by
+        // the assignment step — they vote in RANSAC only.
+        // cand_idx is also set to -1 (unused for history entries).
+        if (!snapped_local && GLOC_PRE_SNAP_HISTORY_SIZE > 0)
+        {
+            for (const auto &h : pre_snap_history_)
+            {
+                if (g >= h.dbow_candidates.size())
+                    continue;
+                for (const auto &[sc, ti] : h.dbow_candidates[g])
+                    all_cands.push_back({/*kf_idx=*/-1, /*cand_idx=*/-1,
+                                         h.P_local,
+                                         train_world_pos(ti),
+                                         sc});
+            }
+            GLOC_DEBUG("[vote] g=%zu all_cands=%zu (window=%d history=%zu)",
+                       g, all_cands.size(), X, pre_snap_history_.size());
+        }
+
         // ── 1b. Pre-filter by max distance ────────────────────────────────────
-        if (GLOC_VOTE_MAX_DIST_M > 0.0)
+        // Only meaningful after snapping — requires a valid T_map_local to
+        // project VINS local poses into world. Skip entirely before snapping.
+        if (snapped_local && GLOC_VOTE_MAX_DIST_M > 0.0)
         {
             all_cands.erase(
                 std::remove_if(all_cands.begin(), all_cands.end(),
@@ -1716,7 +1832,7 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
                 {
                     const Eigen::Vector3d wp =
                         train_world_pos(slot.dbow_candidates[ni].second);
-                    if ((wp - predicted).norm() < GLOC_VOTE_EPS_M)
+                    if ((wp - predicted).norm() < GLOC_VOTE_RANSAC_EPS_M)
                     {
                         const double sc = slot.dbow_candidates[ni].first;
                         if (sc > assignment_score[i])
@@ -1835,7 +1951,7 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
             KfCandList cl;
             cl.kf_idx = i;
             for (const auto &[sc, ti] : slot.dbow_candidates)
-                if ((train_world_pos(ti) - predicted).norm() < GLOC_VOTE_EPS_M)
+                if ((train_world_pos(ti) - predicted).norm() < GLOC_VOTE_RANSAC_EPS_M)
                     cl.ranked.push_back({sc, static_cast<int>(ti)});
 
             std::sort(cl.ranked.begin(), cl.ranked.end(),
@@ -2979,6 +3095,10 @@ bool Gloc::runOptimization_6DOF(std::vector<KeyframeGlocState> &working_set)
         T_map_local_R_ = q_mean.toRotationMatrix();
         T_map_local_t_ = t_acc / w_total;
         snapped_ = true;
+        just_snapped_ = true;
+
+        // Pre-snap history is no longer needed once snapped.
+        pre_snap_history_.clear();
 
         // Persist local poses used in this solve for delta tracking
         last_snap_poses_.clear();
@@ -3719,6 +3839,8 @@ bool Gloc::runOptimization_4DOF(std::vector<KeyframeGlocState> &working_set)
                                        : q_mean.toRotationMatrix();
         T_map_local_t_ = t_acc / w_total;
         snapped_ = true;
+        just_snapped_ = true;
+        pre_snap_history_.clear();
         last_snap_poses_.clear();
         for (int i = 0; i < X; ++i)
         {
@@ -3894,28 +4016,39 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
     }
 
     // ── 2. Init T_map_local variables ─────────────────────────────────────────
-    // omega_map[3]: AA(R_map_local)   t_map[3]: t_map_local
-    std::array<double, 3> omega_map;
+    // 6DOF: omega_map[3] axis-angle of R_map_local + t_map[3]
+    // 4DOF: yaw_map[1]  scalar yaw of R_map_local + t_map[3]
+    //
+    // The 4DOF path uses a scalar yaw instead of axis-angle + YawOnlyParameterization
+    // to avoid the ±π angle-axis singularity when R_map_local has a large yaw
+    // (e.g. 90°). cos/sin are smooth and periodic so there is no flip.
+    std::array<double, 3> omega_map{};
+    double yaw_map = 0.0;
     std::array<double, 3> t_map;
 
     bool snapped_local;
-    // Fixed seeds captured before any solve — used by the world prior.
-    // Must not be inside build_problem (lambda captures omega_map/t_map by
-    // ref so a seed taken there would track the variable being optimised).
     std::array<double, 3> omega_map_seed{};
+    double yaw_map_seed = 0.0;
     std::array<double, 3> t_map_seed{};
     {
         std::lock_guard<std::mutex> lk(snap_mutex_);
         snapped_local = snapped_;
         if (snapped_local)
         {
-            // Seed from current T_map_local
-            const Eigen::AngleAxisd aa(T_map_local_R_);
-            const Vec3d ov = aa.axis() * aa.angle();
-            omega_map = {ov.x(), ov.y(), ov.z()};
+            if (use_4dof)
+            {
+                // Extract yaw directly from T_map_local_R_ — no angle-axis needed
+                yaw_map = std::atan2(T_map_local_R_(1, 0), T_map_local_R_(0, 0));
+                yaw_map_seed = yaw_map;
+            }
+            else
+            {
+                const Eigen::AngleAxisd aa(T_map_local_R_);
+                const Vec3d ov = aa.axis() * aa.angle();
+                omega_map = {ov.x(), ov.y(), ov.z()};
+                omega_map_seed = omega_map;
+            }
             t_map = {T_map_local_t_.x(), T_map_local_t_.y(), T_map_local_t_.z()};
-            // Capture fixed seeds NOW, before the lambda or any solve modifies them
-            omega_map_seed = omega_map;
             t_map_seed = t_map;
         }
     }
@@ -3955,9 +4088,17 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
             const Mat3d R_ml_seed = use_4dof ? yawOnlyR(R_ml) : R_ml;
             const Vec3d t_ml_seed = use_4dof ? (t_wb - R_ml_seed * P_l)
                                              : (t_wb - R_ml * P_l);
-            const Eigen::AngleAxisd aa(R_ml_seed);
-            const Vec3d ov = aa.axis() * aa.angle();
-            omega_map = {ov.x(), ov.y(), ov.z()};
+
+            if (use_4dof)
+            {
+                yaw_map = std::atan2(R_ml_seed(1, 0), R_ml_seed(0, 0));
+            }
+            else
+            {
+                const Eigen::AngleAxisd aa(R_ml_seed);
+                const Vec3d ov = aa.axis() * aa.angle();
+                omega_map = {ov.x(), ov.y(), ov.z()};
+            }
             t_map = {t_ml_seed.x(), t_ml_seed.y(), t_ml_seed.z()};
 
             seeded = true;
@@ -3977,10 +4118,12 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
     {
         GlocFixedRelReprojCost rep;
         GlocFixedRelEpipolarCost epi;
+        GlocFixedRelReprojCostYaw rep_yaw;
+        GlocFixedRelEpipolarCostYaw epi_yaw;
         MeshRayPriorCost mesh_prior;
         bool has_mesh_prior = false;
         int kf_idx;
-        int train_idx = -1; // voted_train_idxs[match_k]
+        int train_idx = -1;
         Eigen::Vector3d X_mesh{0.0, 0.0, 0.0};
     };
     std::vector<FlatObs> flat_obs;
@@ -4152,7 +4295,30 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
                         }
                     }
 
-                    FlatObs obs{rep, epi, mesh_prior, has_mesh_prior, i};
+                    FlatObs obs{rep, epi, {}, {}, mesh_prior, has_mesh_prior, i};
+                    // Yaw variants share the same data — copy fields across
+                    std::memcpy(obs.rep_yaw.R_local_body, rep.R_local_body, sizeof(rep.R_local_body));
+                    std::memcpy(obs.rep_yaw.P_local, rep.P_local, sizeof(rep.P_local));
+                    std::memcpy(obs.rep_yaw.Rtm, rep.Rtm, sizeof(rep.Rtm));
+                    std::memcpy(obs.rep_yaw.oj, rep.oj, sizeof(rep.oj));
+                    std::memcpy(obs.rep_yaw.pq, rep.pq, sizeof(rep.pq));
+                    std::memcpy(obs.rep_yaw.Rcr, rep.Rcr, sizeof(rep.Rcr));
+                    std::memcpy(obs.rep_yaw.tcr, rep.tcr, sizeof(rep.tcr));
+                    obs.rep_yaw.fx = rep.fx;
+                    obs.rep_yaw.fy = rep.fy;
+                    obs.rep_yaw.cx_ = rep.cx_;
+                    obs.rep_yaw.cy_ = rep.cy_;
+
+                    std::memcpy(obs.epi_yaw.R_local_body, epi.R_local_body, sizeof(epi.R_local_body));
+                    std::memcpy(obs.epi_yaw.P_local, epi.P_local, sizeof(epi.P_local));
+                    std::memcpy(obs.epi_yaw.x_q, epi.x_q, sizeof(epi.x_q));
+                    std::memcpy(obs.epi_yaw.x_t, epi.x_t, sizeof(epi.x_t));
+                    std::memcpy(obs.epi_yaw.R_j, epi.R_j, sizeof(epi.R_j));
+                    std::memcpy(obs.epi_yaw.t_j, epi.t_j, sizeof(epi.t_j));
+                    std::memcpy(obs.epi_yaw.Rcr, epi.Rcr, sizeof(epi.Rcr));
+                    std::memcpy(obs.epi_yaw.tcr, epi.tcr, sizeof(epi.tcr));
+                    obs.epi_yaw.scale = epi.scale;
+
                     obs.train_idx = static_cast<int>(ti);
                     if (has_mesh_prior)
                     {
@@ -4201,7 +4367,10 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
         {
             const int ti = flat_obs[k].train_idx;
             double res[2];
-            flat_obs[k].rep(omega_map.data(), t_map.data(), &rhos[k], res);
+            if (use_4dof)
+                flat_obs[k].rep_yaw(&yaw_map, t_map.data(), &rhos[k], res);
+            else
+                flat_obs[k].rep(omega_map.data(), t_map.data(), &rhos[k], res);
             const double err = std::sqrt(res[0] * res[0] + res[1] * res[1]);
             auto &e = train_check[ti];
             e.second++;
@@ -4295,17 +4464,19 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
     auto build_problem = [&](ceres::Problem &prob,
                              ceres::ParameterBlockOrdering *ord,
                              bool add_epi) {
-        ord->AddElementToGroup(omega_map.data(), 1);
-        ord->AddElementToGroup(t_map.data(), 1);
-
         if (use_4dof)
         {
-            // Fix pitch and roll only — yaw, X, Y, Z are all free (5DOF).
-            prob.AddParameterBlock(omega_map.data(), 3, new YawOnlyParameterization());
+            ord->AddElementToGroup(&yaw_map, 1);
+            ord->AddElementToGroup(t_map.data(), 1);
+            // yaw_map is a plain scalar — no parameterization needed, no singularity
+        }
+        else
+        {
+            ord->AddElementToGroup(omega_map.data(), 1);
+            ord->AddElementToGroup(t_map.data(), 1);
         }
 
         // ── World prior (snapped only) ────────────────────────────────────────
-        // Proper SO(3) prior anchoring T_map_local to its seed.
         // Residuals pixel-scaled so weights are on the same scale as GLOC_W_REPROJ.
         if (snapped_local && (GLOC_W_WORLD_PRIOR_ROT > 0.0 || GLOC_W_WORLD_PRIOR_TRANS > 0.0))
         {
@@ -4313,30 +4484,54 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
             const double r_scale = vins_multi::FOCAL_LENGTH * ref_depth;
             const double t_scale = vins_multi::FOCAL_LENGTH / ref_depth;
 
-            // Build R_seed from omega_map_seed
-            const Eigen::Map<const Eigen::Vector3d> ov_seed(omega_map_seed.data());
-            const double seed_norm = ov_seed.norm();
-            Eigen::Matrix3d R_seed_mat = Eigen::Matrix3d::Identity();
-            if (seed_norm > 1e-12)
-            {
-                const Eigen::AngleAxisd aa(seed_norm, (ov_seed / seed_norm).eval());
-                R_seed_mat = aa.toRotationMatrix();
-            }
-
             if (GLOC_W_WORLD_PRIOR_ROT > 0.0)
             {
-                GlocFixedRelWorldPriorRotCost cr{};
-                for (int r = 0; r < 3; ++r)
-                    for (int c = 0; c < 3; ++c)
-                        cr.R_seed[r * 3 + c] = R_seed_mat(r, c);
-                cr.r_scale = r_scale;
-                auto *cost = new ceres::AutoDiffCostFunction<
-                    GlocFixedRelWorldPriorRotCost, 3, 3>(
-                    new GlocFixedRelWorldPriorRotCost(cr));
-                prob.AddResidualBlock(cost,
-                                      new ceres::ScaledLoss(nullptr, GLOC_W_WORLD_PRIOR_ROT,
-                                                            ceres::TAKE_OWNERSHIP),
-                                      omega_map.data());
+                if (use_4dof)
+                {
+                    // Yaw prior: penalise deviation from yaw_map_seed.
+                    // Residual = r_scale * sin(yaw_map - yaw_map_seed)
+                    // ≈ r_scale * (yaw_map - yaw_map_seed) near seed.
+                    // Use a simple scalar cost via lambda.
+                    struct YawPriorCost
+                    {
+                        double yaw_seed, r_scale;
+                        bool operator()(const double *yaw, double *res) const
+                        {
+                            res[0] = r_scale * std::sin(yaw[0] - yaw_seed);
+                            return true;
+                        }
+                    };
+                    auto *cost = new ceres::NumericDiffCostFunction<
+                        YawPriorCost, ceres::CENTRAL, 1, 1>(
+                        new YawPriorCost{yaw_map_seed, r_scale});
+                    prob.AddResidualBlock(cost,
+                                          new ceres::ScaledLoss(nullptr, GLOC_W_WORLD_PRIOR_ROT,
+                                                                ceres::TAKE_OWNERSHIP),
+                                          &yaw_map);
+                }
+                else
+                {
+                    const Eigen::Map<const Eigen::Vector3d> ov_seed(omega_map_seed.data());
+                    const double seed_norm = ov_seed.norm();
+                    Eigen::Matrix3d R_seed_mat = Eigen::Matrix3d::Identity();
+                    if (seed_norm > 1e-12)
+                    {
+                        const Eigen::AngleAxisd aa(seed_norm, (ov_seed / seed_norm).eval());
+                        R_seed_mat = aa.toRotationMatrix();
+                    }
+                    GlocFixedRelWorldPriorRotCost cr{};
+                    for (int r = 0; r < 3; ++r)
+                        for (int c = 0; c < 3; ++c)
+                            cr.R_seed[r * 3 + c] = R_seed_mat(r, c);
+                    cr.r_scale = r_scale;
+                    auto *cost = new ceres::AutoDiffCostFunction<
+                        GlocFixedRelWorldPriorRotCost, 3, 3>(
+                        new GlocFixedRelWorldPriorRotCost(cr));
+                    prob.AddResidualBlock(cost,
+                                          new ceres::ScaledLoss(nullptr, GLOC_W_WORLD_PRIOR_ROT,
+                                                                ceres::TAKE_OWNERSHIP),
+                                          omega_map.data());
+                }
             }
 
             if (GLOC_W_WORLD_PRIOR_TRANS > 0.0)
@@ -4358,38 +4553,59 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
 
         for (int k = 0; k < N; ++k)
         {
-            // rho is group-0 (marginalised first by Schur complement)
             ord->AddElementToGroup(&rhos[k], 0);
 
             if (GLOC_W_REPROJ > 0.0)
             {
-                auto *cost = new ceres::AutoDiffCostFunction<
-                    GlocFixedRelReprojCost, 2, 3, 3, 1>(
-                    new GlocFixedRelReprojCost(flat_obs[k].rep));
-                auto *loss = new ceres::ScaledLoss(
-                    new ceres::HuberLoss(GLOC_HUBER_DELTA),
-                    GLOC_W_REPROJ, ceres::TAKE_OWNERSHIP);
-                prob.AddResidualBlock(cost, loss,
-                                      omega_map.data(), t_map.data(), &rhos[k]);
+                if (use_4dof)
+                {
+                    auto *cost = new ceres::AutoDiffCostFunction<
+                        GlocFixedRelReprojCostYaw, 2, 1, 3, 1>(
+                        new GlocFixedRelReprojCostYaw(flat_obs[k].rep_yaw));
+                    auto *loss = new ceres::ScaledLoss(
+                        new ceres::HuberLoss(GLOC_HUBER_DELTA),
+                        GLOC_W_REPROJ, ceres::TAKE_OWNERSHIP);
+                    prob.AddResidualBlock(cost, loss,
+                                          &yaw_map, t_map.data(), &rhos[k]);
+                }
+                else
+                {
+                    auto *cost = new ceres::AutoDiffCostFunction<
+                        GlocFixedRelReprojCost, 2, 3, 3, 1>(
+                        new GlocFixedRelReprojCost(flat_obs[k].rep));
+                    auto *loss = new ceres::ScaledLoss(
+                        new ceres::HuberLoss(GLOC_HUBER_DELTA),
+                        GLOC_W_REPROJ, ceres::TAKE_OWNERSHIP);
+                    prob.AddResidualBlock(cost, loss,
+                                          omega_map.data(), t_map.data(), &rhos[k]);
+                }
                 prob.SetParameterLowerBound(&rhos[k], 0, 1.0 / kMaxDepthM);
             }
 
             if (add_epi && GLOC_W_EPIPOLAR > 0.0)
             {
-                auto *cost = new ceres::AutoDiffCostFunction<
-                    GlocFixedRelEpipolarCost, 1, 3, 3>(
-                    new GlocFixedRelEpipolarCost(flat_obs[k].epi));
-                auto *loss = new ceres::ScaledLoss(
-                    new ceres::HuberLoss(GLOC_HUBER_DELTA),
-                    GLOC_W_EPIPOLAR, ceres::TAKE_OWNERSHIP);
-                prob.AddResidualBlock(cost, loss, omega_map.data(), t_map.data());
+                if (use_4dof)
+                {
+                    auto *cost = new ceres::AutoDiffCostFunction<
+                        GlocFixedRelEpipolarCostYaw, 1, 1, 3>(
+                        new GlocFixedRelEpipolarCostYaw(flat_obs[k].epi_yaw));
+                    auto *loss = new ceres::ScaledLoss(
+                        new ceres::HuberLoss(GLOC_HUBER_DELTA),
+                        GLOC_W_EPIPOLAR, ceres::TAKE_OWNERSHIP);
+                    prob.AddResidualBlock(cost, loss, &yaw_map, t_map.data());
+                }
+                else
+                {
+                    auto *cost = new ceres::AutoDiffCostFunction<
+                        GlocFixedRelEpipolarCost, 1, 3, 3>(
+                        new GlocFixedRelEpipolarCost(flat_obs[k].epi));
+                    auto *loss = new ceres::ScaledLoss(
+                        new ceres::HuberLoss(GLOC_HUBER_DELTA),
+                        GLOC_W_EPIPOLAR, ceres::TAKE_OWNERSHIP);
+                    prob.AddResidualBlock(cost, loss, omega_map.data(), t_map.data());
+                }
             }
 
-            // ── Mesh ray prior (rho-only, group-0) ───────────────────────────
-            // Only added when a mesh hit was found at observation-build time.
-            // Huber wrapping handles mesh outliers (holes, behind-surface hits).
-            // Because this residual block touches only &rhos[k] (group-0) it
-            // does not disturb the Schur complement for the pose blocks.
             if (flat_obs[k].has_mesh_prior && GLOC_W_MESH_PRIOR > 0.0)
             {
                 auto *cost = new ceres::AutoDiffCostFunction<MeshRayPriorCost, 1, 1>(
@@ -4409,29 +4625,38 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
         const double kYawStep = 2.0 * M_PI / kNumYaw;
         double best_cost = std::numeric_limits<double>::max();
         std::array<double, 3> best_omega = omega_map;
+        double best_yaw = yaw_map;
         std::array<double, 3> best_t = t_map;
         std::vector<double> best_rhos = rhos;
         const auto orig_omega = omega_map;
+        const double orig_yaw = yaw_map;
         const auto orig_rhos = rhos;
 
         for (int yk = 0; yk < kNumYaw; ++yk)
         {
-            omega_map = orig_omega;
             rhos = orig_rhos;
 
-            const Eigen::Map<const Eigen::Vector3d> ov(omega_map.data());
-            const double norm = ov.norm();
-            const Mat3d R_orig = Eigen::AngleAxisd(
-                                     norm,
-                                     norm > 1e-8 ? (ov / norm).eval()
-                                                 : Eigen::Vector3d::UnitZ())
+            if (use_4dof)
+            {
+                yaw_map = orig_yaw + yk * kYawStep;
+            }
+            else
+            {
+                omega_map = orig_omega;
+                const Eigen::Map<const Eigen::Vector3d> ov(omega_map.data());
+                const double norm = ov.norm();
+                const Mat3d R_orig = Eigen::AngleAxisd(
+                                         norm,
+                                         norm > 1e-8 ? (ov / norm).eval()
+                                                     : Eigen::Vector3d::UnitZ())
+                                         .toRotationMatrix();
+                const Mat3d Rz = Eigen::AngleAxisd(yk * kYawStep,
+                                                   Eigen::Vector3d::UnitZ())
                                      .toRotationMatrix();
-            const Mat3d Rz = Eigen::AngleAxisd(yk * kYawStep,
-                                               Eigen::Vector3d::UnitZ())
-                                 .toRotationMatrix();
-            const Eigen::AngleAxisd aa_new(Rz * R_orig);
-            const Eigen::Vector3d ov_new = aa_new.axis() * aa_new.angle();
-            omega_map = {ov_new.x(), ov_new.y(), ov_new.z()};
+                const Eigen::AngleAxisd aa_new(Rz * R_orig);
+                const Eigen::Vector3d ov_new = aa_new.axis() * aa_new.angle();
+                omega_map = {ov_new.x(), ov_new.y(), ov_new.z()};
+            }
 
             ceres::Problem init_prob(prob_opts);
             auto *init_ord = new ceres::ParameterBlockOrdering;
@@ -4458,22 +4683,34 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
             {
                 best_cost = init_sum.final_cost;
                 best_omega = omega_map;
+                best_yaw = yaw_map;
                 best_t = t_map;
                 best_rhos = rhos;
             }
         }
         omega_map = best_omega;
+        yaw_map = best_yaw;
         t_map = best_t;
         rhos = best_rhos;
     }
 
     // ── 5. Main solve ─────────────────────────────────────────────────────────
-    GLOC_INFO("[opt_fr] seed:       t=[%.3f %.3f %.3f]  omega=[%.4f %.4f %.4f]",
-              t_map_seed[0], t_map_seed[1], t_map_seed[2],
-              omega_map_seed[0], omega_map_seed[1], omega_map_seed[2]);
-    GLOC_INFO("[opt_fr] solve_init: t=[%.3f %.3f %.3f]  omega=[%.4f %.4f %.4f]",
-              t_map[0], t_map[1], t_map[2],
-              omega_map[0], omega_map[1], omega_map[2]);
+    if (use_4dof)
+    {
+        GLOC_INFO("[opt_fr] seed:       t=[%.3f %.3f %.3f]  yaw=%.4f",
+                  t_map_seed[0], t_map_seed[1], t_map_seed[2], yaw_map_seed);
+        GLOC_INFO("[opt_fr] solve_init: t=[%.3f %.3f %.3f]  yaw=%.4f",
+                  t_map[0], t_map[1], t_map[2], yaw_map);
+    }
+    else
+    {
+        GLOC_INFO("[opt_fr] seed:       t=[%.3f %.3f %.3f]  omega=[%.4f %.4f %.4f]",
+                  t_map_seed[0], t_map_seed[1], t_map_seed[2],
+                  omega_map_seed[0], omega_map_seed[1], omega_map_seed[2]);
+        GLOC_INFO("[opt_fr] solve_init: t=[%.3f %.3f %.3f]  omega=[%.4f %.4f %.4f]",
+                  t_map[0], t_map[1], t_map[2],
+                  omega_map[0], omega_map[1], omega_map[2]);
+    }
 
     ceres::Problem main_prob(prob_opts);
     auto *main_ord = new ceres::ParameterBlockOrdering;
@@ -4486,13 +4723,18 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
     ceres::Solver::Summary main_sum;
     ceres::Solve(main_opts, &main_prob, &main_sum);
     GLOC_DEBUG("[opt_fr] %s", main_sum.BriefReport().c_str());
-    GLOC_INFO("[opt_fr] result:     t=[%.3f %.3f %.3f]  omega=[%.4f %.4f %.4f]  "
-              "Δt=%.3fm",
-              t_map[0], t_map[1], t_map[2],
-              omega_map[0], omega_map[1], omega_map[2],
-              std::sqrt((t_map[0] - t_map_seed[0]) * (t_map[0] - t_map_seed[0]) +
-                        (t_map[1] - t_map_seed[1]) * (t_map[1] - t_map_seed[1]) +
-                        (t_map[2] - t_map_seed[2]) * (t_map[2] - t_map_seed[2])));
+
+    const double dt_result = std::sqrt(
+        (t_map[0] - t_map_seed[0]) * (t_map[0] - t_map_seed[0]) +
+        (t_map[1] - t_map_seed[1]) * (t_map[1] - t_map_seed[1]) +
+        (t_map[2] - t_map_seed[2]) * (t_map[2] - t_map_seed[2]));
+    if (use_4dof)
+        GLOC_INFO("[opt_fr] result:     t=[%.3f %.3f %.3f]  yaw=%.4f  Δt=%.3fm",
+                  t_map[0], t_map[1], t_map[2], yaw_map, dt_result);
+    else
+        GLOC_INFO("[opt_fr] result:     t=[%.3f %.3f %.3f]  omega=[%.4f %.4f %.4f]  Δt=%.3fm",
+                  t_map[0], t_map[1], t_map[2],
+                  omega_map[0], omega_map[1], omega_map[2], dt_result);
 
     if (main_sum.termination_type != ceres::CONVERGENCE &&
         main_sum.termination_type != ceres::USER_SUCCESS)
@@ -4508,10 +4750,12 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
     for (int k = 0; k < N; ++k)
     {
         double res[2];
-        flat_obs[k].rep(omega_map.data(), t_map.data(), &rhos[k], res);
+        if (use_4dof)
+            flat_obs[k].rep_yaw(&yaw_map, t_map.data(), &rhos[k], res);
+        else
+            flat_obs[k].rep(omega_map.data(), t_map.data(), &rhos[k], res);
         const double err = std::sqrt(res[0] * res[0] + res[1] * res[1]);
         const int kf_i = flat_obs[k].kf_idx;
-        // voted_train_idxs[0] is the primary match for this kf slot
         const int ti = working_set[kf_i].per_gloc[0].best_train_idx;
         auto &entry = train_inlier_map[ti];
         entry.second++;
@@ -4524,7 +4768,6 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
     const double inlier_ratio = static_cast<double>(inliers) / N;
     GLOC_DEBUG("[opt_fr] inliers=%d/%d (%.1f%%)", inliers, N, inlier_ratio * 100.0);
 
-    // Per-train-image inlier breakdown — helps diagnose wrong matches
     for (const auto &[ti, ic] : train_inlier_map)
         GLOC_DEBUG("[opt_fr]   train=%d  inliers=%d/%d (%.0f%%)",
                    ti, ic.first, ic.second,
@@ -4538,13 +4781,25 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
     }
 
     // ── 7. T_map_local is the result directly ─────────────────────────────────
-    const Eigen::Map<const Eigen::Vector3d> ov(omega_map.data());
-    const double norm = ov.norm();
-    const Mat3d R_ml = Eigen::AngleAxisd(
-                           norm,
-                           norm > 1e-8 ? (ov / norm).eval()
-                                       : Eigen::Vector3d::UnitZ())
-                           .toRotationMatrix();
+    Mat3d R_ml;
+    if (use_4dof)
+    {
+        // Build Rz directly from scalar yaw — no angle-axis, no singularity
+        const double c = std::cos(yaw_map), s = std::sin(yaw_map);
+        R_ml << c, -s, 0,
+            s, c, 0,
+            0, 0, 1;
+    }
+    else
+    {
+        const Eigen::Map<const Eigen::Vector3d> ov(omega_map.data());
+        const double norm = ov.norm();
+        R_ml = Eigen::AngleAxisd(
+                   norm,
+                   norm > 1e-8 ? (ov / norm).eval()
+                               : Eigen::Vector3d::UnitZ())
+                   .toRotationMatrix();
+    }
     const Vec3d t_ml(t_map[0], t_map[1], t_map[2]);
 
     // ── 8. Update snapped state ───────────────────────────────────────────────
@@ -4556,6 +4811,8 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
         // Pitch and roll are stripped from R via yawOnlyR when use_4dof.
         T_map_local_t_ = t_ml;
         snapped_ = true;
+        just_snapped_ = true;
+        pre_snap_history_.clear();
         last_snap_poses_.clear();
         for (int i = 0; i < X; ++i)
         {

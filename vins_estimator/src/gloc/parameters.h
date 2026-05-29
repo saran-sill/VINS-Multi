@@ -37,7 +37,7 @@ extern double GLOC_DBOW3_MIN_SCORE;
 
 // Tolerance (metres) on |world_dist - local_dist| for two candidates across
 // different keyframes to be considered "agreeing".
-extern double GLOC_VOTE_EPS_M;
+extern double GLOC_VOTE_RANSAC_EPS_M;
 
 // Minimum number of other keyframes whose candidate agrees with this one
 // before it is accepted.  When set to -1 the code uses ceil((X-1)/2) where
@@ -57,6 +57,8 @@ extern int GLOC_VOTE_MAX_MATCHES;
 // Seconds to wait after the first onSnapshotChanged before processing any
 // working_set. Gives VINS time to build a stable window. Default: 0 (disabled).
 extern double GLOC_STARTUP_DELAY_S;
+
+extern int GLOC_PRE_SNAP_HISTORY_SIZE;
 
 // ── ORB feature extraction ───────────────────────────────────────────────────
 

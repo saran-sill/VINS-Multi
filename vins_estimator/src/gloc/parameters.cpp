@@ -19,11 +19,12 @@ int GLOC_DBOW3_MAX_RESULTS = 5;
 double GLOC_DBOW3_MIN_SCORE = 0.01;
 
 // Consensus voting
-double GLOC_VOTE_EPS_M = 1.0;
+double GLOC_VOTE_RANSAC_EPS_M = 1.0;
 int GLOC_VOTE_MIN_VOTES = -1;
 double GLOC_VOTE_MAX_DIST_M = -1.0;
 int GLOC_VOTE_MAX_MATCHES = 1;
 double GLOC_STARTUP_DELAY_S = 0.0;
+int GLOC_PRE_SNAP_HISTORY_SIZE = 0;
 
 // ORB
 int GLOC_ORB_NFEATURES = 500;
@@ -166,11 +167,12 @@ void readParameters(std::string config_file)
 
     read_if(fsSettings, "gloc_dbow3_max_results", gloc::GLOC_DBOW3_MAX_RESULTS);
     read_if(fsSettings, "gloc_dbow3_min_score", gloc::GLOC_DBOW3_MIN_SCORE);
-    read_if(fsSettings, "gloc_vote_eps_m", gloc::GLOC_VOTE_EPS_M);
+    read_if(fsSettings, "gloc_vote_eps_m", gloc::GLOC_VOTE_RANSAC_EPS_M);
     read_if(fsSettings, "gloc_vote_min_votes", gloc::GLOC_VOTE_MIN_VOTES);
     read_if(fsSettings, "gloc_vote_max_dist_m", gloc::GLOC_VOTE_MAX_DIST_M);
     read_if(fsSettings, "gloc_vote_max_matches", gloc::GLOC_VOTE_MAX_MATCHES);
     read_if(fsSettings, "gloc_startup_delay_s", gloc::GLOC_STARTUP_DELAY_S);
+    read_if(fsSettings, "gloc_pre_snap_history_size", gloc::GLOC_PRE_SNAP_HISTORY_SIZE);
     read_if(fsSettings, "gloc_orb_nfeatures", gloc::GLOC_ORB_NFEATURES);
     read_if(fsSettings, "gloc_orb_scale_factor", gloc::GLOC_ORB_SCALE_FACTOR);
     read_if(fsSettings, "gloc_orb_nlevels", gloc::GLOC_ORB_NLEVELS);
@@ -266,11 +268,12 @@ void readParameters(std::string config_file)
     printf("GLOC_WORLD_TMAT_FILE      : %s\n", gloc::GLOC_WORLD_TMAT_FILE.c_str());
     printf("GLOC_DBOW3_MAX_RESULTS    : %d\n", gloc::GLOC_DBOW3_MAX_RESULTS);
     printf("GLOC_DBOW3_MIN_SCORE      : %.4f\n", gloc::GLOC_DBOW3_MIN_SCORE);
-    printf("GLOC_VOTE_EPS_M           : %.2f\n", gloc::GLOC_VOTE_EPS_M);
+    printf("GLOC_VOTE_RANSAC_EPS_M           : %.2f\n", gloc::GLOC_VOTE_RANSAC_EPS_M);
     printf("GLOC_VOTE_MIN_VOTES       : %d\n", gloc::GLOC_VOTE_MIN_VOTES);
     printf("GLOC_VOTE_MAX_DIST_M      : %.2f\n", gloc::GLOC_VOTE_MAX_DIST_M);
     printf("GLOC_VOTE_MAX_MATCHES     : %d\n", gloc::GLOC_VOTE_MAX_MATCHES);
     printf("GLOC_STARTUP_DELAY_S      : %.1f\n", gloc::GLOC_STARTUP_DELAY_S);
+    printf("GLOC_PRE_SNAP_HISTORY_SIZE: %d\n", gloc::GLOC_PRE_SNAP_HISTORY_SIZE);
     printf("GLOC_USE_BEBLID           : %d\n", gloc::GLOC_USE_BEBLID);
     printf("GLOC_BEBLID_SCALE_FACTOR  : %.2f\n", gloc::GLOC_BEBLID_SCALE_FACTOR);
     printf("GLOC_BEBLID_N_BITS        : %d\n", gloc::GLOC_BEBLID_N_BITS);

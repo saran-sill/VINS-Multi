@@ -814,13 +814,25 @@ void Estimator::initFirstIMUPose(const deque<State>::iterator img_it)
     R0 = Utility::ypr2R(Eigen::Vector3d{-yaw, 0, 0}) * R0;
     img_it->Q_ = R0;
     img_it->P_ = Vector3d::Zero();
+
+    // Debug perturbation: shift the VINS local frame origin so all poses
+    // downstream (odomimu_raw, gloc snapshot, etc.) are in the perturbed frame.
+    if (GLOC_DEBUG_YAW_LOCAL_OFFSET_DEG != 0.0)
+    {
+        const double yaw_rad = GLOC_DEBUG_YAW_LOCAL_OFFSET_DEG * M_PI / 180.0;
+        const Eigen::Matrix3d Rz =
+            Eigen::AngleAxisd(yaw_rad, Eigen::Vector3d::UnitZ())
+                .toRotationMatrix();
+        img_it->Q_ = Eigen::Quaterniond(Rz * R0);
+    }
+    img_it->P_ = GLOC_DEBUG_P_LOCAL_OFFSET;
     img_it->V_ = Vector3d::Zero();
     img_it->Ba_ = Vector3d::Zero();
     img_it->Bg_ = Vector3d::Zero();
     img_it->un_gyr_ = img_it->imu_data_.bottomRows(3);
 
-    img_it->Q_lpf_ = R0;
-    img_it->P_lpf_ = Vector3d::Zero();
+    img_it->Q_lpf_ = img_it->Q_;
+    img_it->P_lpf_ = GLOC_DEBUG_P_LOCAL_OFFSET;
     img_it->V_lpf_ = Vector3d::Zero();
 
     setImageState(img_it);

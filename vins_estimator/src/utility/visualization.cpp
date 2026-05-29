@@ -391,6 +391,16 @@ void pubLatestOdometry(const Estimator &estimator)
     w_R_center = R * center_R_imu;
     w_T_center = P - w_R_center * center_T_imu;
 
+    // On the very first publish, seed last_pos from the actual position so
+    // the lerp doesn't draw a straight line from (0,0,0) to the initial pose
+    // (which may be far from origin due to the debug perturbation).
+    static bool first_publish = true;
+    if (first_publish)
+    {
+        last_pos = w_T_center;
+        first_publish = false;
+    }
+
     w_T_center = Utility::lerp(last_pos, w_T_center, interpolation_alpha);
 
     odometry.pose.pose.position.x = w_T_center.x();
@@ -446,6 +456,16 @@ void pubLatestOdometry(const Estimator &estimator)
         std::lock_guard<std::mutex> lk(estimator.t_map_mutex_);
         const Eigen::Matrix3d &Rm = estimator.t_map_local_R_;
         const Eigen::Vector3d &tm = estimator.t_map_local_t_;
+
+        // Clear world path on the first frame after snapping so it starts
+        // from the snap point rather than showing the pre-snap trajectory
+        // projected into world frame.
+        static bool was_snapped = false;
+        if (estimator.t_map_snapped_ && !was_snapped)
+        {
+            path_odom_world.poses.clear();
+            was_snapped = true;
+        }
 
         const Eigen::Vector3d t_world = Rm * w_T_center + tm;
         const Eigen::Matrix3d R_world = Rm * w_R_center;
@@ -1191,6 +1211,8 @@ void pubGlocVoteLines(
 {
     if (pub_gloc_vote_lines.getNumSubscribers() == 0)
         return;
+    if (query_train_pairs.empty())
+        return;
 
     visualization_msgs::Marker m;
     m.header.frame_id = "world";
@@ -1237,6 +1259,8 @@ void pubGlocCorrLines(
     const std::vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>> &query_train_pairs)
 {
     if (pub_gloc_corr_lines.getNumSubscribers() == 0)
+        return;
+    if (query_train_pairs.empty())
         return;
 
     visualization_msgs::Marker m;

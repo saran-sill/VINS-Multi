@@ -569,6 +569,11 @@ class Gloc
     Eigen::Matrix3d T_map_local_R_{Eigen::Matrix3d::Identity()};
     Eigen::Vector3d T_map_local_t_{Eigen::Vector3d::Zero()};
 
+    // Set to true on the round that first sets snapped_. Consumed by
+    // processLoop to reset pipeline_done on all carried-over keyframes so
+    // their correspondences are recomputed against the fresh T_map_local.
+    bool just_snapped_{false};
+
     // Snapshot of local poses used in the last successful solve.
     // Keyed by t_kf so we can match against new snapshots by timestamp.
     // Used to compute ΔT_map_local when VINS re-adjusts local poses.
@@ -579,6 +584,26 @@ class Gloc
         double weight;              // correspondence count (for weighted mean)
     };
     std::map<double, SnapPose> last_snap_poses_; // t_kf → SnapPose
+
+    // ── Pre-snap history ──────────────────────────────────────────────────────
+    //
+    // Accumulates DBoW3 candidates from keyframes that have left the VINS
+    // sliding window before snapping. Provides additional voters for the
+    // pre-snap RANSAC in runConsensusVoting so the consensus is not limited
+    // to the current window size X.
+    //
+    // Each entry stores P_local and dbow_candidates[g] as they were at the
+    // time of DBoW3 query (frozen — not updated by VINS re-optimisation).
+    // Entries are pushed in runOrbAndDbow and capped at GLOC_PRE_SNAP_HISTORY_SIZE.
+    // Cleared on the first successful snap.
+    struct PreSnapHistoryEntry
+    {
+        double t_kf;
+        Eigen::Vector3d P_local;
+        // [g][n] — dbow_candidates per gloc module
+        std::vector<std::vector<std::pair<double, std::size_t>>> dbow_candidates;
+    };
+    std::deque<PreSnapHistoryEntry> pre_snap_history_;
 
     // Stage 2: build and solve the Ceres problem on working_set.
     // Returns true if the solution was accepted (inlier ratio ≥ threshold)

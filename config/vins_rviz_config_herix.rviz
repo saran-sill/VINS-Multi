@@ -42,7 +42,9 @@ Panels:
         - /GLOC1/MapPoints1/Autocompute Value Bounds1
         - /GLOC1/OdomIMUWorld1/Shape1
         - /GLOC1/OdomIMURaw1/Shape1
-      Splitter Ratio: 0.7029411792755127
+        - /GLOC1/VoteLines1/Status1
+        - /GLOC1/CorrLines1/Status1
+      Splitter Ratio: 0.770588219165802
     Tree Height: 902
 Preferences:
   PromptSaveOnExit: true
@@ -88,13 +90,13 @@ Visualization Manager:
       Value: false
     - Alpha: 1
       Class: rviz/Axes
-      Enabled: false
-      Length: 0.5
+      Enabled: true
+      Length: 5
       Name: Axes
       Radius: 0.05000000074505806
       Reference Frame: <Fixed Frame>
       Show Trail: false
-      Value: false
+      Value: true
     - Class: rviz/Group
       Displays:
         - Alpha: 1
@@ -498,7 +500,7 @@ Visualization Manager:
           Channel Name: intensity
           Class: rviz/PointCloud
           Color: 255; 255; 255
-          Color Transformer: AxisColor
+          Color Transformer: FlatColor
           Decay Time: 0
           Enabled: false
           Invert Rainbow: false
@@ -562,7 +564,7 @@ Visualization Manager:
           Marker Topic: /herix/gloc/kf_status
           Name: OptKfStatus
           Namespaces:
-            {}
+            gloc_kf_status: true
           Queue Size: 100
           Value: true
         - Angle Tolerance: 0.05000000074505806
@@ -688,7 +690,7 @@ Visualization Manager:
           Marker Topic: /herix/gloc/vote_lines
           Name: VoteLines
           Namespaces:
-            {}
+            gloc_vote_lines: true
           Queue Size: 100
           Value: true
         - Class: rviz/Marker
@@ -696,7 +698,7 @@ Visualization Manager:
           Marker Topic: /herix/gloc/corr_lines
           Name: CorrLines
           Namespaces:
-            {}
+            gloc_corr_lines: true
           Queue Size: 100
           Value: true
         - Alpha: 1
@@ -755,7 +757,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz/Orbit
-      Distance: 39.87916564941406
+      Distance: 100.80252075195312
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
@@ -763,17 +765,17 @@ Visualization Manager:
         Value: false
       Field of View: 0.7853981852531433
       Focal Point:
-        X: 6.631824493408203
-        Y: 13.507676124572754
-        Z: 2.6193299293518066
+        X: 27.432777404785156
+        Y: -5.729496479034424
+        Z: -13.135225296020508
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 1.129795789718628
+      Pitch: 0.8847970366477966
       Target Frame: <Fixed Frame>
-      Yaw: 3.308135747909546
+      Yaw: 3.583096981048584
     Saved: ~
 Window Geometry:
   Displays:
