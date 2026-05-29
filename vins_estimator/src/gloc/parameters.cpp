@@ -72,6 +72,7 @@ double GLOC_INLIER_THRESH_PX = 10.0;
 int GLOC_MAX_ITERS = 150;
 int GLOC_INIT_ITERS = 20;
 double GLOC_MIN_INLIER_RATIO = 0.3;
+double GLOC_MIN_TRAIN_INLIER_RATIO = 0.3;
 double GLOC_MAX_DEPTH_M = 200.0;
 bool GLOC_USE_4DOF = false;
 bool GLOC_FIX_REL_POSES = false;
@@ -208,6 +209,7 @@ void readParameters(std::string config_file)
     read_if(fsSettings, "gloc_max_iters", gloc::GLOC_MAX_ITERS);
     read_if(fsSettings, "gloc_init_iters", gloc::GLOC_INIT_ITERS);
     read_if(fsSettings, "gloc_min_inlier_ratio", gloc::GLOC_MIN_INLIER_RATIO);
+    read_if(fsSettings, "gloc_min_train_inlier_ratio", gloc::GLOC_MIN_TRAIN_INLIER_RATIO);
     read_if(fsSettings, "gloc_max_depth_m", gloc::GLOC_MAX_DEPTH_M);
     read_if(fsSettings, "gloc_use_4dof", gloc::GLOC_USE_4DOF);
     read_if(fsSettings, "gloc_fix_rel_poses", gloc::GLOC_FIX_REL_POSES);
@@ -296,6 +298,7 @@ void readParameters(std::string config_file)
     printf("GLOC_MAX_ITERS            : %d\n", gloc::GLOC_MAX_ITERS);
     printf("GLOC_INIT_ITERS           : %d\n", gloc::GLOC_INIT_ITERS);
     printf("GLOC_MIN_INLIER_RATIO     : %.2f\n", gloc::GLOC_MIN_INLIER_RATIO);
+    printf("GLOC_MIN_TRAIN_INLIER_RATIO     : %.2f\n", gloc::GLOC_MIN_TRAIN_INLIER_RATIO);
     printf("GLOC_MAX_DEPTH_M          : %.1f\n", gloc::GLOC_MAX_DEPTH_M);
     printf("GLOC_USE_4DOF             : %d\n", gloc::GLOC_USE_4DOF);
     printf("GLOC_FIX_REL_POSES        : %d\n", gloc::GLOC_FIX_REL_POSES);

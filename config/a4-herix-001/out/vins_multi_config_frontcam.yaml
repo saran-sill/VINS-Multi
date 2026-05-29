@@ -225,20 +225,20 @@ gloc_use_4dof: true        # yaw-only rotation (4-DOF); false = full 6-DOF
 gloc_startup_delay_s: 10.0   # wait XXs after first snapshot before processing
 
 #======================= PC =======================
-# gloc_colmap_sparse_folder: "/mnt/EXDISK/HiveGround/colmap_ws/SCGP/colmap/_sparse/0"
-# gloc_colmap_img_folder: "/mnt/EXDISK/HiveGround/colmap_ws/SCGP/images_2"
-# gloc_colmap_mesh_file: "/mnt/EXDISK/HiveGround/colmap_ws/SCGP/colmap/_dense/0/mesh.ply"
-# gloc_world_tmat_file: "/mnt/EXDISK/HiveGround/colmap_ws/SCGP/world_transform.txt"
-# gloc_dbow3_vocab: "/mnt/EXDISK/HiveGround/dbow3/orbvoc.dbow3"
-# gloc_dbow3_auto_created_db_folder: ""
+gloc_colmap_sparse_folder: "/mnt/EXDISK/HiveGround/colmap_ws/SCGP/colmap/_sparse/0"
+gloc_colmap_img_folder: "/mnt/EXDISK/HiveGround/colmap_ws/SCGP/images_2"
+gloc_colmap_mesh_file: "/mnt/EXDISK/HiveGround/colmap_ws/SCGP/colmap/_dense/0/mesh.ply"
+gloc_world_tmat_file: "/mnt/EXDISK/HiveGround/colmap_ws/SCGP/world_transform.txt"
+gloc_dbow3_vocab: "/mnt/EXDISK/HiveGround/dbow3/orbvoc.dbow3"
+gloc_dbow3_auto_created_db_folder: "/mnt/EXDISK/tmp/vins-multi-auto-created-db"
 
 #======================= Jetson =======================
-gloc_colmap_sparse_folder: "/home/a4/workspace/Arm/SCGP_map/colmap/_sparse/0"
-gloc_colmap_img_folder: "/home/a4/workspace/Arm/SCGP_map/images_2"
-gloc_colmap_mesh_file: "/home/a4/workspace/Arm/SCGP_map/mesh.ply"
-gloc_world_tmat_file: "/home/a4/workspace/Arm/SCGP_map/world_transform.txt"
-gloc_dbow3_vocab: "/home/a4/workspace/Arm/SCGP_map/orbvoc.dbow3"
-gloc_dbow3_auto_created_db_folder: "/home/a4/workspace/Arm/SCGP_map/db_auto"
+# gloc_colmap_sparse_folder: "/home/a4/workspace/Arm/SCGP_map/colmap/_sparse/0"
+# gloc_colmap_img_folder: "/home/a4/workspace/Arm/SCGP_map/images_2"
+# gloc_colmap_mesh_file: "/home/a4/workspace/Arm/SCGP_map/mesh.ply"
+# gloc_world_tmat_file: "/home/a4/workspace/Arm/SCGP_map/world_transform.txt"
+# gloc_dbow3_vocab: "/home/a4/workspace/Arm/SCGP_map/orbvoc.dbow3"
+# gloc_dbow3_auto_created_db_folder: "/home/a4/workspace/Arm/SCGP_map/db_auto"
 
 #======================================================
 
@@ -322,7 +322,7 @@ gloc_min_pairs: 3               # min valid slots after first snap
 gloc_min_pairs_first_snap: 3    # min valid slots for first snap (stricter)
 gloc_rel_pose_k: 2              # chain half-width (1 = adjacent only)
 gloc_w_rel_pose: 1.0            # weight for relative local pose term
-gloc_w_epipolar: 0.0            # weight for Sampson epipolar term
+gloc_w_epipolar: 1.0            # weight for Sampson epipolar term
 gloc_w_reproj: 1.0              # weight for inverse-depth reprojection term
 gloc_w_world_prior_rot: 1.0   # same scale as gloc_w_reproj
 gloc_w_world_prior_trans: 5.0   # same scale as gloc_w_reproj
@@ -333,6 +333,7 @@ gloc_huber_delta: 1.0           # Huber loss delta (virtual pixels)
 gloc_inlier_thresh_px: 30.0     # reprojection inlier threshold (virtual pixels)
 gloc_max_iters: 150             # main solver iterations
 gloc_init_iters: 20             # initialization pass iterations (before main solve)
-gloc_min_inlier_ratio: 0.05      # min inlier fraction to accept solution
-gloc_max_depth_m: 30.0          # inverse-depth lower bound: rho >= 1/max_depth
+gloc_min_train_inlier_ratio: 0.3   # reject train images with <30% pre-check inliers
+gloc_min_inlier_ratio: 0.3      # min inlier fraction to accept solution
+gloc_max_depth_m: 100.0          # inverse-depth lower bound: rho >= 1/max_depth
 gloc_min_mesh_prior_points: 30

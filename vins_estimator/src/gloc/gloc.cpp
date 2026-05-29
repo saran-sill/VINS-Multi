@@ -3980,7 +3980,8 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
         MeshRayPriorCost mesh_prior;
         bool has_mesh_prior = false;
         int kf_idx;
-        Eigen::Vector3d X_mesh{0.0, 0.0, 0.0}; // ray-mesh intersection in world frame
+        int train_idx = -1; // voted_train_idxs[match_k]
+        Eigen::Vector3d X_mesh{0.0, 0.0, 0.0};
     };
     std::vector<FlatObs> flat_obs;
     flat_obs.reserve(4096);
@@ -4152,6 +4153,7 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
                     }
 
                     FlatObs obs{rep, epi, mesh_prior, has_mesh_prior, i};
+                    obs.train_idx = static_cast<int>(ti);
                     if (has_mesh_prior)
                     {
                         // X_mesh = o_j + lambda_mesh * Rtm_normalised
@@ -4179,6 +4181,68 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
         }
     }
 
+    // Quick size guard before pre-filter
+    if (static_cast<int>(flat_obs.size()) < GLOC_MIN_PAIRS)
+    {
+        GLOC_DEBUG("[opt_fr] too few observations (%zu) - skip", flat_obs.size());
+        return false;
+    }
+
+    // ── Pre-filter bad train images using seed position ───────────────────────
+    // For each train image, evaluate reprojection at seed. Reject slots
+    // where fewer than GLOC_MIN_TRAIN_INLIER_RATIO of correspondences are
+    // within GLOC_INLIER_THRESH_PX * 3.0 (loose threshold at seed).
+    if (GLOC_MIN_TRAIN_INLIER_RATIO > 0.0)
+    {
+        std::map<int, std::pair<int, int>> train_check; // train_idx → {inliers, total}
+        const double loose_thresh = GLOC_INLIER_THRESH_PX * 3.0;
+
+        for (int k = 0; k < static_cast<int>(flat_obs.size()); ++k)
+        {
+            const int ti = flat_obs[k].train_idx;
+            double res[2];
+            flat_obs[k].rep(omega_map.data(), t_map.data(), &rhos[k], res);
+            const double err = std::sqrt(res[0] * res[0] + res[1] * res[1]);
+            auto &e = train_check[ti];
+            e.second++;
+            if (err < loose_thresh)
+                e.first++;
+        }
+
+        std::set<int> bad_trains;
+        for (const auto &[ti, ic] : train_check)
+        {
+            const double ratio = static_cast<double>(ic.first) / ic.second;
+            if (ratio < GLOC_MIN_TRAIN_INLIER_RATIO)
+            {
+                bad_trains.insert(ti);
+                GLOC_DEBUG("[opt_fr] pre-filter: train=%d ratio=%.0f%% (%d/%d) - REJECT",
+                           ti, ratio * 100.0, ic.first, ic.second);
+            }
+        }
+
+        if (!bad_trains.empty())
+        {
+            std::vector<FlatObs> filtered_obs;
+            std::vector<double> filtered_rhos;
+            filtered_obs.reserve(flat_obs.size());
+            filtered_rhos.reserve(rhos.size());
+            for (int k = 0; k < static_cast<int>(flat_obs.size()); ++k)
+            {
+                if (bad_trains.count(flat_obs[k].train_idx) == 0)
+                {
+                    filtered_obs.push_back(flat_obs[k]);
+                    filtered_rhos.push_back(rhos[k]);
+                }
+            }
+            GLOC_DEBUG("[opt_fr] pre-filter: removed %zu/%zu observations (%zu trains rejected)",
+                       flat_obs.size() - filtered_obs.size(), flat_obs.size(), bad_trains.size());
+            flat_obs = std::move(filtered_obs);
+            rhos = std::move(filtered_rhos);
+        }
+    }
+
+    // Recompute N and n_mesh_hit AFTER pre-filter — flat_obs may have shrunk.
     const int N = static_cast<int>(flat_obs.size());
     const int n_mesh_hit = static_cast<int>(
         std::count_if(flat_obs.begin(), flat_obs.end(),
@@ -4186,9 +4250,10 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
 
     if (N < GLOC_MIN_PAIRS)
     {
-        GLOC_DEBUG("[opt_fr] too few observations (%d) - skip", N);
+        GLOC_DEBUG("[opt_fr] too few observations after pre-filter (%d) - skip", N);
         return false;
     }
+
     // When a mesh is active every surviving point has a prior (misses were
     // already rejected above), so n_mesh_hit == N.  The check below catches
     // the degenerate case where the mesh exists but almost no rays hit it
@@ -4235,11 +4300,8 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
 
         if (use_4dof)
         {
-            // Fix t_map Z: 4-DOF solves XY+yaw only.
+            // Fix pitch and roll only — yaw, X, Y, Z are all free (5DOF).
             prob.AddParameterBlock(omega_map.data(), 3, new YawOnlyParameterization());
-            // SubsetParameterization fixes Z (index 2) — compatible with DENSE_SCHUR.
-            prob.AddParameterBlock(t_map.data(), 3,
-                                   new ceres::SubsetParameterization(3, {2}));
         }
 
         // ── World prior (snapped only) ────────────────────────────────────────
@@ -4275,8 +4337,6 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
                                       new ceres::ScaledLoss(nullptr, GLOC_W_WORLD_PRIOR_ROT,
                                                             ceres::TAKE_OWNERSHIP),
                                       omega_map.data());
-
-                GLOC_INFO("[opt_fr] add GlocFixedRelWorldPriorRotCost");
             }
 
             if (GLOC_W_WORLD_PRIOR_TRANS > 0.0)
@@ -4293,8 +4353,6 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
                                       new ceres::ScaledLoss(nullptr, GLOC_W_WORLD_PRIOR_TRANS,
                                                             ceres::TAKE_OWNERSHIP),
                                       t_map.data());
-
-                GLOC_INFO("[opt_fr] add GlocFixedRelWorldPriorTransCost");
             }
         }
 
@@ -4446,16 +4504,32 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
 
     // ── 6. Inlier check ───────────────────────────────────────────────────────
     int inliers = 0;
+    std::map<int, std::pair<int, int>> train_inlier_map; // train_idx → {inliers, total}
     for (int k = 0; k < N; ++k)
     {
         double res[2];
         flat_obs[k].rep(omega_map.data(), t_map.data(), &rhos[k], res);
         const double err = std::sqrt(res[0] * res[0] + res[1] * res[1]);
+        const int kf_i = flat_obs[k].kf_idx;
+        // voted_train_idxs[0] is the primary match for this kf slot
+        const int ti = working_set[kf_i].per_gloc[0].best_train_idx;
+        auto &entry = train_inlier_map[ti];
+        entry.second++;
         if (err < GLOC_INLIER_THRESH_PX)
+        {
             ++inliers;
+            entry.first++;
+        }
     }
     const double inlier_ratio = static_cast<double>(inliers) / N;
     GLOC_DEBUG("[opt_fr] inliers=%d/%d (%.1f%%)", inliers, N, inlier_ratio * 100.0);
+
+    // Per-train-image inlier breakdown — helps diagnose wrong matches
+    for (const auto &[ti, ic] : train_inlier_map)
+        GLOC_DEBUG("[opt_fr]   train=%d  inliers=%d/%d (%.0f%%)",
+                   ti, ic.first, ic.second,
+                   100.0 * ic.first / std::max(1, ic.second));
+
     if (inlier_ratio < GLOC_MIN_INLIER_RATIO)
     {
         GLOC_WARN("[opt_fr] rejected: inlier ratio %.2f < %.2f",
@@ -4478,30 +4552,9 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
         std::lock_guard<std::mutex> lk(snap_mutex_);
         T_map_local_R_ = use_4dof ? yawOnlyR(R_ml) : R_ml;
 
-        // When stripping pitch/roll, recompute t_ml consistently with the
-        // new rotation using the first valid keyframe as anchor so the
-        // world position of that keyframe is preserved.
-        if (use_4dof)
-        {
-            const Mat3d R_stripped = T_map_local_R_;
-            for (int i = 0; i < X; ++i)
-            {
-                const auto &kf = working_set[i];
-                double w = 0.0;
-                for (const auto &slot : kf.per_gloc)
-                    if (slot.pipeline_done && slot.best_train_idx >= 0)
-                        w += static_cast<double>(slot.pt_pairs_undistorted.size());
-                if (w < 1.0)
-                    continue;
-                const Vec3d t_world_body_i = R_ml * kf.P_local + t_ml;
-                T_map_local_t_ = t_world_body_i - R_stripped * kf.P_local;
-                break;
-            }
-        }
-        else
-        {
-            T_map_local_t_ = t_ml;
-        }
+        // Z is free — use t_ml directly from the optimizer.
+        // Pitch and roll are stripped from R via yawOnlyR when use_4dof.
+        T_map_local_t_ = t_ml;
         snapped_ = true;
         last_snap_poses_.clear();
         for (int i = 0; i < X; ++i)

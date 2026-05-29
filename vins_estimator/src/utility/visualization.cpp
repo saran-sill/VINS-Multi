@@ -23,6 +23,12 @@ ros::Publisher pub_gloc_opt_poses, pub_gloc_opt_path, pub_gloc_kf_status, pub_gl
 ros::Publisher pub_gloc_vote_lines;
 ros::Publisher pub_gloc_corr_lines;
 ros::Publisher pub_gloc_mesh_intersect;
+
+// Accumulated paths for odomimu_world and odomimu_raw
+static nav_msgs::Path path_odom_world;
+static nav_msgs::Path path_odom_raw;
+static ros::Publisher pub_path_odom_world;
+static ros::Publisher pub_path_odom_raw;
 ros::Publisher pub_path;
 std::vector<ros::Publisher> pub_point_cloud;
 ros::Publisher pub_margin_cloud;
@@ -80,6 +86,12 @@ void registerPub(ros::NodeHandle &n)
         "gloc/corr_lines", 10);
     pub_gloc_mesh_intersect = n.advertise<sensor_msgs::PointCloud>(
         "gloc/mesh_intersect_pts", 10);
+
+    // Paths for odomimu_world and odomimu_raw
+    pub_path_odom_world = n.advertise<nav_msgs::Path>("odomimu_world_path", 1000);
+    pub_path_odom_raw = n.advertise<nav_msgs::Path>("odomimu_raw_path", 1000);
+    path_odom_world.header.frame_id = "world";
+    path_odom_raw.header.frame_id = "world";
     pub_path = n.advertise<nav_msgs::Path>("path", 1000);
     pub_odometry = n.advertise<nav_msgs::Odometry>("odomimu_lowhz", 1000);
     // pub_key_poses = n.advertise<visualization_msgs::Marker>("key_poses", 1000);
@@ -416,6 +428,17 @@ void pubLatestOdometry(const Estimator &estimator)
     odomimu_raw.header.frame_id = "world";
     pub_latest_odometry_raw.publish(odomimu_raw);
 
+    // ── Accumulate odomimu_raw path ───────────────────────────────────────────
+    if (pub_path_odom_raw.getNumSubscribers() > 0)
+    {
+        geometry_msgs::PoseStamped ps;
+        ps.header = odomimu_raw.header;
+        ps.pose = odomimu_raw.pose.pose;
+        path_odom_raw.header.stamp = odomimu_raw.header.stamp;
+        path_odom_raw.poses.push_back(ps);
+        pub_path_odom_raw.publish(path_odom_raw);
+    }
+
     // ── World-frame odometry ──────────────────────────────────────────────────
     // Both topics use: X_world = T_map_local_R_ * X_local + T_map_local_t_
     // Before snap T_map_local is identity so world == odom.
@@ -440,6 +463,17 @@ void pubLatestOdometry(const Estimator &estimator)
             odom_world.pose.pose.orientation.z = q_world.z();
             odom_world.pose.pose.orientation.w = q_world.w();
             pub_latest_odometry_world.publish(odom_world);
+
+            // ── Accumulate odomimu_world path ─────────────────────────────────
+            if (pub_path_odom_world.getNumSubscribers() > 0)
+            {
+                geometry_msgs::PoseStamped ps;
+                ps.header = odom_world.header;
+                ps.pose = odom_world.pose.pose;
+                path_odom_world.header.stamp = odom_world.header.stamp;
+                path_odom_world.poses.push_back(ps);
+                pub_path_odom_world.publish(path_odom_world);
+            }
         }
 
         // Broadcast world → body_world TF at IMU rate so RViz "Follow" view

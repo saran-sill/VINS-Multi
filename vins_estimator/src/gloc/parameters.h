@@ -139,6 +139,8 @@ extern int GLOC_INIT_ITERS; // fast burn-in pass before main solve
 // Minimum inlier fraction required to accept the solution and set snapped.
 extern double GLOC_MIN_INLIER_RATIO;
 
+extern double GLOC_MIN_TRAIN_INLIER_RATIO;
+
 // Maximum depth (metres) for inverse-depth lower bound: rho >= 1/GLOC_MAX_DEPTH_M.
 extern double GLOC_MAX_DEPTH_M;
 
