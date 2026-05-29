@@ -574,6 +574,11 @@ class Gloc
     // their correspondences are recomputed against the fresh T_map_local.
     bool just_snapped_{false};
 
+    // Set to true after the first successful snap has been processed.
+    // Prevents the state_map_ reset from firing on subsequent re-snaps,
+    // which would cause a gap after every successful optimization.
+    bool was_snapped_before_{false};
+
     // Snapshot of local poses used in the last successful solve.
     // Keyed by t_kf so we can match against new snapshots by timestamp.
     // Used to compute ΔT_map_local when VINS re-adjusts local poses.

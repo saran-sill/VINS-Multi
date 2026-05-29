@@ -90,13 +90,13 @@ Visualization Manager:
       Value: false
     - Alpha: 1
       Class: rviz/Axes
-      Enabled: true
+      Enabled: false
       Length: 5
       Name: Axes
       Radius: 0.05000000074505806
       Reference Frame: <Fixed Frame>
       Show Trail: false
-      Value: true
+      Value: false
     - Class: rviz/Group
       Displays:
         - Alpha: 1
@@ -564,7 +564,7 @@ Visualization Manager:
           Marker Topic: /herix/gloc/kf_status
           Name: OptKfStatus
           Namespaces:
-            gloc_kf_status: true
+            {}
           Queue Size: 100
           Value: true
         - Angle Tolerance: 0.05000000074505806
@@ -690,7 +690,7 @@ Visualization Manager:
           Marker Topic: /herix/gloc/vote_lines
           Name: VoteLines
           Namespaces:
-            gloc_vote_lines: true
+            {}
           Queue Size: 100
           Value: true
         - Class: rviz/Marker
@@ -698,7 +698,7 @@ Visualization Manager:
           Marker Topic: /herix/gloc/corr_lines
           Name: CorrLines
           Namespaces:
-            gloc_corr_lines: true
+            {}
           Queue Size: 100
           Value: true
         - Alpha: 1
@@ -757,7 +757,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz/Orbit
-      Distance: 100.80252075195312
+      Distance: 73.14981079101562
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
@@ -765,17 +765,17 @@ Visualization Manager:
         Value: false
       Field of View: 0.7853981852531433
       Focal Point:
-        X: 27.432777404785156
-        Y: -5.729496479034424
-        Z: -13.135225296020508
+        X: 17.892427444458008
+        Y: 19.12494468688965
+        Z: -6.891760349273682
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.8847970366477966
+      Pitch: 1.0347963571548462
       Target Frame: <Fixed Frame>
-      Yaw: 3.583096981048584
+      Yaw: 3.248077392578125
     Saved: ~
 Window Geometry:
   Displays:

@@ -1194,11 +1194,15 @@ void Gloc::processLoop()
         // Run optimization and capture the success flag for visualization
         bool opt_success = runOptimization(working_set);
 
-        // ── Post-snap pipeline reset ──────────────────────────────────────────
-        // On the round that first snaps, all carried-over keyframes have stale
-        // correspondences computed without a valid T_map_local. Reset their
-        // pipeline_done so the next round re-runs voting + correspondences
-        // against the fresh T_map_local.
+        // ── Post-first-snap pipeline reset ───────────────────────────────────
+        // On the round that FIRST snaps (unsnapped → snapped transition),
+        // carried-over keyframes have stale pre-snap correspondences computed
+        // without a valid T_map_local. Clear the window to the newest keyframe
+        // so the next round builds fresh correspondences against the real T_map_local.
+        //
+        // This reset does NOT fire on subsequent successful snaps (re-snaps) —
+        // those already have valid post-snap correspondences and wiping the window
+        // every round would cause a gap after every optimization success.
         {
             bool do_reset = false;
             {
@@ -1206,7 +1210,11 @@ void Gloc::processLoop()
                 if (just_snapped_)
                 {
                     just_snapped_ = false;
-                    do_reset = true;
+                    // Only reset on the very first snap — when we were previously unsnapped.
+                    // After the first snap, subsequent optimizations are already post-snap
+                    // and their correspondences are valid.
+                    do_reset = !was_snapped_before_;
+                    was_snapped_before_ = true;
                 }
             }
             if (do_reset)
@@ -1222,12 +1230,11 @@ void Gloc::processLoop()
                     state_map_.erase(state_map_.begin(), last);
                 }
 
-                // Reset the surviving entry so it goes through the full pipeline.
                 for (auto &[t, s] : state_map_)
                     for (auto &slot : s.per_gloc)
                         slot.pipeline_done = false;
 
-                GLOC_INFO("[processLoop] snap: cleared carried-over keyframes, keeping newest t=%.4f",
+                GLOC_INFO("[processLoop] first snap: cleared carried-over keyframes, keeping newest t=%.4f",
                           state_map_.empty() ? 0.0 : state_map_.rbegin()->first);
             }
         }
@@ -1297,7 +1304,7 @@ void Gloc::processLoop()
 
         // ── DEBUG: visualize vote results ─────────────────────────────────────
         // Draw lines between each keyframe's position and its voted train image camera centre in world.
-        if (vins_multi::pub_gloc_vote_lines.getNumSubscribers() > 0)
+        if (opt_success && vins_multi::pub_gloc_vote_lines.getNumSubscribers() > 0)
         {
             std::vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>> vote_pairs;
             for (const auto &kf : working_set)
@@ -1332,7 +1339,7 @@ void Gloc::processLoop()
         // ── Correspondence line visualization (magenta, gloc/corr_lines) ─────
         // Draw magenta lines from query body position to matched train image
         // camera centre for slots that passed geometric verification.
-        if (vins_multi::pub_gloc_corr_lines.getNumSubscribers() > 0)
+        if (opt_success && vins_multi::pub_gloc_corr_lines.getNumSubscribers() > 0)
         {
             std::vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>> corr_pairs;
             for (const auto &kf : working_set)

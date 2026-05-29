@@ -224,8 +224,8 @@ gloc_fix_rel_poses: true   # fix relative poses, optimize only T_map_local
 gloc_use_4dof: true        # yaw-only rotation (4-DOF); false = full 6-DOF
 gloc_startup_delay_s: 10.0   # wait XXs after first snapshot before processing
 
-gloc_debug_p_local_offset: [50.0, -50.0, 0.0]
-gloc_debug_yaw_local_offset_deg: 90.0
+gloc_debug_p_local_offset: [50.0, 50.0, 0.0]
+gloc_debug_yaw_local_offset_deg: 180.0
 
 # gloc_debug_p_local_offset: [0.0, 0.0, 0.0]
 # gloc_debug_yaw_local_offset_deg: 0.0
@@ -288,13 +288,13 @@ gloc_preprocess_sharpen_amount: 1.5
 
 # DBoW3 retrieval
 gloc_dbow3_max_results: 5
-gloc_dbow3_min_score: 0.01
+gloc_dbow3_min_score: 0.005
 
 # Consensus voting
 gloc_vote_ransac_eps_m: 3.0
 gloc_vote_min_votes: 2            # -1 = majority rule (ceil((X-1)/2))
 gloc_vote_max_dist_m: 3.0          # reject candidates >XXm from current position
-gloc_vote_max_matches: 2           # keep top-3 inlier matches per keyframe (default: 1)
+gloc_vote_max_matches: 3           # keep top-3 inlier matches per keyframe (default: 1)
 gloc_pre_snap_history_size: 15
 
 # ORB feature extraction
@@ -321,8 +321,8 @@ gloc_match_max_dist: 72
 gloc_match_geom_reproj_th: 5.0
 gloc_match_geom_confidence: 0.99
 gloc_match_geom_sampson_sq: -1.0    # negative = disabled
-gloc_match_min_inliers: 10
-gloc_subsample_min_dist_px: 0.0    # 0 = disabled;
+gloc_match_min_inliers: 20
+gloc_subsample_min_dist_px: 10.0    # 0 = disabled;
 
 # Optimization
 gloc_min_pairs: 3               # min valid slots after first snap
@@ -333,14 +333,14 @@ gloc_w_epipolar: 1.0            # weight for Sampson epipolar term
 gloc_w_reproj: 1.0              # weight for inverse-depth reprojection term
 gloc_w_world_prior_rot: 1.0   # same scale as gloc_w_reproj
 gloc_w_world_prior_trans: 5.0   # same scale as gloc_w_reproj
-gloc_w_world_prior_ref_depth_m: 10.0   # drone flight altitude in metres
+gloc_w_world_prior_ref_depth_m: 5.0   # drone flight altitude in metres
 gloc_w_mesh_prior: 5.0        # weight for mesh prior
 gloc_mesh_sigma_m: 0.1
 gloc_huber_delta: 1.0           # Huber loss delta (virtual pixels)
 gloc_inlier_thresh_px: 30.0     # reprojection inlier threshold (virtual pixels)
 gloc_max_iters: 150             # main solver iterations
 gloc_init_iters: 20             # initialization pass iterations (before main solve)
-gloc_min_train_inlier_ratio: 0.3   # reject train images with <30% pre-check inliers
+gloc_min_train_inlier_ratio: 0.5   # reject train images with <30% pre-check inliers
 gloc_min_inlier_ratio: 0.3      # min inlier fraction to accept solution
 gloc_max_depth_m: 100.0          # inverse-depth lower bound: rho >= 1/max_depth
 gloc_min_mesh_prior_points: 30
