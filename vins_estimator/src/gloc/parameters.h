@@ -60,6 +60,8 @@ extern double GLOC_STARTUP_DELAY_S;
 
 extern int GLOC_PRE_SNAP_HISTORY_SIZE;
 
+extern int GLOC_NUM_THREADS;
+
 // ── ORB feature extraction ───────────────────────────────────────────────────
 
 extern int GLOC_ORB_NFEATURES;
@@ -137,6 +139,7 @@ extern double GLOC_INLIER_THRESH_PX;
 // Solver iteration limits.
 extern int GLOC_MAX_ITERS;
 extern int GLOC_INIT_ITERS; // fast burn-in pass before main solve
+extern double GLOC_MAX_SOLVER_TIME;
 
 // Minimum inlier fraction required to accept the solution and set snapped.
 extern double GLOC_MIN_INLIER_RATIO;

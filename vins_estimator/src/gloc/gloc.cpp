@@ -638,7 +638,7 @@ bool Gloc::init()
 
     {
         const std::size_t n = map_.feats.size();
-        const std::size_t n_threads = std::max(1u, std::thread::hardware_concurrency());
+        const std::size_t n_threads = static_cast<std::size_t>(std::max(1, GLOC_NUM_THREADS));
         const std::size_t chunk = (n + n_threads - 1) / n_threads;
 
         std::vector<std::future<void>> futs;
@@ -1488,12 +1488,76 @@ static void saveDebugImages(const std::string &base_dir,
 // Stage 1a: for every Found slot that hasn't been processed yet, convert the
 // cached image to grayscale, extract ORB features, and query DBoW3 to populate
 // dbow_candidates (sorted descending by score, capped at GLOC_DBOW3_MAX_RESULTS).
+//
+// Parallelised over keyframes via std::async (one task per keyframe), mirroring
+// runCorrespondences.  Thread-safety notes:
+//
+//   orb_extractor_ / beblid_extractor_
+//       Not thread-safe for concurrent use.  Each task uses a thread_local
+//       instance constructed from the same GLOC_ORB_* / GLOC_BEBLID_* globals.
+//       The globals are read-only after readParameters(), so construction is
+//       safe from any thread.
+//
+//   map_.db.query()
+//       DBoW3::Database::query() is read-only and thread-safe for concurrent
+//       calls from multiple threads.
+//
+//   undist_map_x_ / undist_map_y_
+//       Read-only after init(). Thread-safe.
+//
+//   snap_mutex_ / snapped_
+//       Locked briefly per keyframe to read snapped_.  Standard mutex — safe.
+//
+//   pre_snap_history_
+//       Written after per-slot work completes for a keyframe.  Protected by
+//       the dedicated history_mutex (local to this call) so concurrent tasks
+//       do not race on the deque.
 // ─────────────────────────────────────────────────────────────────────────────
 
 void Gloc::runOrbAndDbow(std::vector<KeyframeGlocState> &working_set)
 {
-    for (auto &kf_state : working_set)
-    {
+    // Factory that builds a fresh ORB extractor with the same parameters as
+    // orb_extractor_.  Used by the thread_local extractor below.
+    auto make_orb_extractor = []() -> std::unique_ptr<PointFeatureExtractor> {
+        const int score_type = (GLOC_ORB_SCORE_TYPE == 1)
+                                   ? cv::ORB::FAST_SCORE
+                                   : cv::ORB::HARRIS_SCORE;
+        PointFeatureExtractorORB::Parameters p(
+            GLOC_ORB_NFEATURES,
+            GLOC_ORB_SCALE_FACTOR,
+            GLOC_ORB_NLEVELS,
+            GLOC_ORB_EDGE_THRESHOLD,
+            GLOC_ORB_FIRST_LEVEL,
+            GLOC_ORB_WTA_K,
+            score_type,
+            GLOC_ORB_PATCH_SIZE,
+            GLOC_ORB_FAST_THRESHOLD);
+        return std::make_unique<PointFeatureExtractorORB>(p);
+    };
+
+    // Factory for a per-thread BEBLID extractor (null when BEBLID is disabled).
+    auto make_beblid_extractor = []() -> cv::Ptr<cv::xfeatures2d::BEBLID> {
+        if (!GLOC_USE_BEBLID)
+            return {};
+        const int n_bits = (GLOC_BEBLID_N_BITS == 256)
+                               ? cv::xfeatures2d::BEBLID::SIZE_256_BITS
+                               : cv::xfeatures2d::BEBLID::SIZE_512_BITS;
+        return cv::xfeatures2d::BEBLID::create(GLOC_BEBLID_SCALE_FACTOR, n_bits);
+    };
+
+    // Serialises writes to pre_snap_history_ from concurrent keyframe tasks.
+    std::mutex history_mutex;
+
+    // Per-keyframe work — fully independent across keyframes.
+    // Reads map_ (const after init()), GLOC_* globals (const after readParameters()),
+    // undist_map_x_/y_ (const after init()), and snap_mutex_/snapped_ (via lock).
+    // Writes only kf_state (exclusively owned by this task) and pre_snap_history_
+    // (serialised through history_mutex).
+    auto process_kf = [&](KeyframeGlocState &kf_state) {
+        // One ORB extractor per OS thread — constructed lazily on first use.
+        thread_local std::unique_ptr<PointFeatureExtractor> tl_orb = make_orb_extractor();
+        thread_local cv::Ptr<cv::xfeatures2d::BEBLID> tl_beblid = make_beblid_extractor();
+
         for (std::size_t g = 0; g < kf_state.per_gloc.size(); ++g)
         {
             auto &slot = kf_state.per_gloc[g];
@@ -1511,7 +1575,6 @@ void Gloc::runOrbAndDbow(std::vector<KeyframeGlocState> &working_set)
             // ── ORB extraction ───────────────────────────────────────────────
             auto _orb_t0 = std::chrono::steady_clock::now();
 
-            // ── ORB extraction ───────────────────────────────────────────────
             cv::Mat gray;
             if (slot.preprocessed_image.channels() == 1)
                 gray = slot.preprocessed_image;
@@ -1519,9 +1582,9 @@ void Gloc::runOrbAndDbow(std::vector<KeyframeGlocState> &working_set)
                 cv::cvtColor(slot.preprocessed_image, gray, cv::COLOR_BGR2GRAY);
 
             slot.query_feats.image_size = gray.size();
-            orb_extractor_->extract(gray,
-                                    slot.query_feats.keypoints,
-                                    &slot.query_feats.orb_descriptors);
+            tl_orb->extract(gray,
+                            slot.query_feats.keypoints,
+                            &slot.query_feats.orb_descriptors);
 
             if (slot.query_feats.orb_descriptors.empty())
             {
@@ -1536,11 +1599,11 @@ void Gloc::runOrbAndDbow(std::vector<KeyframeGlocState> &working_set)
                 slot.query_feats.orb_descriptors = slot.query_feats.orb_descriptors.clone();
 
             // ── BEBLID (optional) ────────────────────────────────────────────
-            if (beblid_extractor_ && !slot.query_feats.keypoints.empty())
+            if (tl_beblid && !slot.query_feats.keypoints.empty())
             {
-                beblid_extractor_->compute(gray,
-                                           slot.query_feats.keypoints,
-                                           slot.query_feats.beblid_descriptors);
+                tl_beblid->compute(gray,
+                                   slot.query_feats.keypoints,
+                                   slot.query_feats.beblid_descriptors);
             }
 
             // ── Cache undistorted query keypoints ────────────────────────────
@@ -1565,6 +1628,7 @@ void Gloc::runOrbAndDbow(std::vector<KeyframeGlocState> &working_set)
             }
 
             // ── DBoW3 query ──────────────────────────────────────────────────
+            // map_.db.query() is read-only and thread-safe for concurrent calls.
             auto _dbow_t0 = std::chrono::steady_clock::now();
             DBoW3::QueryResults dbow_ret;
             map_.db.query(slot.query_feats.orb_descriptors,
@@ -1613,6 +1677,9 @@ void Gloc::runOrbAndDbow(std::vector<KeyframeGlocState> &working_set)
         // into the history so future rounds have more voters for the pre-snap
         // RANSAC. Only accumulate before snapping; cleared on snap.
         // Disabled when GLOC_PRE_SNAP_HISTORY_SIZE == 0 (default).
+        //
+        // Serialised through history_mutex so concurrent keyframe tasks do not
+        // race on pre_snap_history_ (a std::deque owned by this Gloc instance).
         if (GLOC_PRE_SNAP_HISTORY_SIZE > 0)
         {
             bool already_snapped;
@@ -1622,6 +1689,8 @@ void Gloc::runOrbAndDbow(std::vector<KeyframeGlocState> &working_set)
             }
             if (!already_snapped)
             {
+                std::lock_guard<std::mutex> hist_lk(history_mutex);
+
                 // Skip if this keyframe is already in the history (re-entrant rounds).
                 bool already_present = false;
                 for (const auto &h : pre_snap_history_)
@@ -1663,7 +1732,41 @@ void Gloc::runOrbAndDbow(std::vector<KeyframeGlocState> &working_set)
                 }
             }
         }
+    }; // end process_kf lambda
+
+    // ── Dispatch one task per keyframe, bounded by GLOC_NUM_THREADS ──────────
+    // Each task owns its kf_state slots exclusively; map_ is read-only after
+    // init(); GLOC_* params are const globals — no shared mutable state except
+    // pre_snap_history_ (serialised through history_mutex above).
+    //
+    // std::async(launch::async) spawns one OS thread per task regardless of
+    // how many are already running.  We cap concurrency at GLOC_NUM_THREADS
+    // with a semaphore so the CPU budget matches the configured limit.
+    const int max_threads = std::max(1, GLOC_NUM_THREADS);
+    int running = 0;
+    std::mutex run_mutex;
+    std::condition_variable run_cv;
+
+    std::vector<std::future<void>> futures;
+    futures.reserve(working_set.size());
+    for (auto &kf_state : working_set)
+    {
+        {
+            std::unique_lock<std::mutex> lk(run_mutex);
+            run_cv.wait(lk, [&] { return running < max_threads; });
+            ++running;
+        }
+        futures.push_back(std::async(std::launch::async, [&, &kf_state = kf_state]() {
+            process_kf(kf_state);
+            {
+                std::lock_guard<std::mutex> lk(run_mutex);
+                --running;
+            }
+            run_cv.notify_one();
+        }));
     }
+    for (auto &f : futures)
+        f.get();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2389,13 +2492,32 @@ void Gloc::runCorrespondences(std::vector<KeyframeGlocState> &working_set,
         }
     };
 
-    // ── Dispatch one task per keyframe ────────────────────────────────────────
+    // ── Dispatch one task per keyframe, bounded by GLOC_NUM_THREADS ──────────
     // Each task owns its kf_state slots exclusively; map_ is read-only after
     // init(); GLOC_* params are const globals — no shared mutable state.
+    const int max_threads = std::max(1, GLOC_NUM_THREADS);
+    int running = 0;
+    std::mutex run_mutex;
+    std::condition_variable run_cv;
+
     std::vector<std::future<void>> futures;
     futures.reserve(working_set.size());
     for (auto &kf_state : working_set)
-        futures.push_back(std::async(std::launch::async, process_kf, std::ref(kf_state)));
+    {
+        {
+            std::unique_lock<std::mutex> lk(run_mutex);
+            run_cv.wait(lk, [&] { return running < max_threads; });
+            ++running;
+        }
+        futures.push_back(std::async(std::launch::async, [&, &kf_state = kf_state]() {
+            process_kf(kf_state);
+            {
+                std::lock_guard<std::mutex> lk(run_mutex);
+                --running;
+            }
+            run_cv.notify_one();
+        }));
+    }
     for (auto &f : futures)
         f.get();
 }
@@ -2769,7 +2891,7 @@ bool Gloc::runOptimization_6DOF(std::vector<KeyframeGlocState> &working_set)
     solver_opts.gradient_tolerance = 1e-10;
     solver_opts.parameter_tolerance = 1e-8;
     solver_opts.minimizer_progress_to_stdout = false;
-    solver_opts.num_threads = 1;
+    solver_opts.num_threads = gloc::GLOC_NUM_THREADS;
 
     ceres::HuberLoss huber_loss(GLOC_HUBER_DELTA);
     ceres::Problem::Options prob_opts;
@@ -3559,7 +3681,7 @@ bool Gloc::runOptimization_4DOF(std::vector<KeyframeGlocState> &working_set)
     solver_opts.gradient_tolerance = 1e-10;
     solver_opts.parameter_tolerance = 1e-8;
     solver_opts.minimizer_progress_to_stdout = false;
-    solver_opts.num_threads = 1;
+    solver_opts.num_threads = gloc::GLOC_NUM_THREADS;
 
     ceres::HuberLoss huber_loss(GLOC_HUBER_DELTA);
     ceres::Problem::Options prob_opts;
@@ -4464,7 +4586,7 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
     solver_opts.gradient_tolerance = 1e-10;
     solver_opts.parameter_tolerance = 1e-8;
     solver_opts.minimizer_progress_to_stdout = false;
-    solver_opts.num_threads = 1;
+    solver_opts.num_threads = gloc::GLOC_NUM_THREADS;
 
     ceres::Problem::Options prob_opts;
 
@@ -4726,6 +4848,7 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
     ceres::Solver::Options main_opts = solver_opts;
     main_opts.linear_solver_ordering.reset(main_ord);
     main_opts.max_num_iterations = GLOC_MAX_ITERS;
+    main_opts.max_solver_time_in_seconds = gloc::GLOC_MAX_SOLVER_TIME;
 
     ceres::Solver::Summary main_sum;
     ceres::Solve(main_opts, &main_prob, &main_sum);
@@ -4762,8 +4885,8 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
         else
             flat_obs[k].rep(omega_map.data(), t_map.data(), &rhos[k], res);
         const double err = std::sqrt(res[0] * res[0] + res[1] * res[1]);
-        const int kf_i = flat_obs[k].kf_idx;
-        const int ti = working_set[kf_i].per_gloc[0].best_train_idx;
+        const int ti = flat_obs[k].train_idx;
+
         auto &entry = train_inlier_map[ti];
         entry.second++;
         if (err < GLOC_INLIER_THRESH_PX)

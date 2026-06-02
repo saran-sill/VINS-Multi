@@ -14,6 +14,8 @@ std::string GLOC_WORLD_TMAT_FILE;
 std::string GLOC_COLMAP_MESH_FILE;
 std::string GLOC_DBOW3_AUTO_CREATED_DB_FOLDER;
 
+int GLOC_NUM_THREADS = 1;
+
 // DBoW3
 int GLOC_DBOW3_MAX_RESULTS = 5;
 double GLOC_DBOW3_MIN_SCORE = 0.01;
@@ -72,6 +74,7 @@ double GLOC_HUBER_DELTA = 5.0;
 double GLOC_INLIER_THRESH_PX = 10.0;
 int GLOC_MAX_ITERS = 150;
 int GLOC_INIT_ITERS = 20;
+double GLOC_MAX_SOLVER_TIME = 0.1;
 double GLOC_MIN_INLIER_RATIO = 0.3;
 double GLOC_MIN_TRAIN_INLIER_RATIO = 0.3;
 double GLOC_MAX_DEPTH_M = 200.0;
@@ -165,6 +168,8 @@ void readParameters(std::string config_file)
     read_if(fsSettings, "gloc_world_tmat_file", gloc::GLOC_WORLD_TMAT_FILE);
     read_if(fsSettings, "gloc_colmap_mesh_file", gloc::GLOC_COLMAP_MESH_FILE);
 
+    read_if(fsSettings, "gloc_num_threads", gloc::GLOC_NUM_THREADS);
+
     read_if(fsSettings, "gloc_dbow3_max_results", gloc::GLOC_DBOW3_MAX_RESULTS);
     read_if(fsSettings, "gloc_dbow3_min_score", gloc::GLOC_DBOW3_MIN_SCORE);
     read_if(fsSettings, "gloc_vote_eps_m", gloc::GLOC_VOTE_RANSAC_EPS_M);
@@ -210,6 +215,7 @@ void readParameters(std::string config_file)
     read_if(fsSettings, "gloc_inlier_thresh_px", gloc::GLOC_INLIER_THRESH_PX);
     read_if(fsSettings, "gloc_max_iters", gloc::GLOC_MAX_ITERS);
     read_if(fsSettings, "gloc_init_iters", gloc::GLOC_INIT_ITERS);
+    read_if(fsSettings, "gloc_max_solver_time", gloc::GLOC_MAX_SOLVER_TIME);
     read_if(fsSettings, "gloc_min_inlier_ratio", gloc::GLOC_MIN_INLIER_RATIO);
     read_if(fsSettings, "gloc_min_train_inlier_ratio", gloc::GLOC_MIN_TRAIN_INLIER_RATIO);
     read_if(fsSettings, "gloc_max_depth_m", gloc::GLOC_MAX_DEPTH_M);
@@ -260,6 +266,7 @@ void readParameters(std::string config_file)
     }
 
     printf("GLOC_ENABLED              : %d\n", gloc::GLOC_ENABLED);
+    printf("GLOC_NUM_THREADS              : %d\n", gloc::GLOC_NUM_THREADS);
     printf("GLOC_COLMAP_SPARSE_FOLDER : %s\n", gloc::GLOC_COLMAP_SPARSE_FOLDER.c_str());
     printf("GLOC_COLMAP_IMG_FOLDER    : %s\n", gloc::GLOC_COLMAP_IMG_FOLDER.c_str());
     printf("GLOC_DBOW3_DATABASE       : %s\n", gloc::GLOC_DBOW3_DATABASE.c_str());
@@ -300,6 +307,7 @@ void readParameters(std::string config_file)
     printf("GLOC_INLIER_THRESH_PX     : %.2f\n", gloc::GLOC_INLIER_THRESH_PX);
     printf("GLOC_MAX_ITERS            : %d\n", gloc::GLOC_MAX_ITERS);
     printf("GLOC_INIT_ITERS           : %d\n", gloc::GLOC_INIT_ITERS);
+    printf("GLOC_MAX_SOLVER_TIME     : %.2f\n", gloc::GLOC_MAX_SOLVER_TIME);
     printf("GLOC_MIN_INLIER_RATIO     : %.2f\n", gloc::GLOC_MIN_INLIER_RATIO);
     printf("GLOC_MIN_TRAIN_INLIER_RATIO     : %.2f\n", gloc::GLOC_MIN_TRAIN_INLIER_RATIO);
     printf("GLOC_MAX_DEPTH_M          : %.1f\n", gloc::GLOC_MAX_DEPTH_M);
