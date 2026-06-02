@@ -171,7 +171,7 @@ static cv::Mat gloc_preprocessImage(const cv::Mat &image)
     if (was_gray && (GLOC_PREPROCESS_WHITE_BALANCE ||
                      GLOC_PREPROCESS_DENOISE_COLOR ||
                      GLOC_PREPROCESS_TONEMAP ||
-                    //  GLOC_PREPROCESS_CLAHE || // CLAHE handles grayscale directly — no upconversion needed
+                     //  GLOC_PREPROCESS_CLAHE || // CLAHE handles grayscale directly — no upconversion needed
                      GLOC_PREPROCESS_CLARITY))
         cv::cvtColor(result, result, cv::COLOR_GRAY2BGR);
 
@@ -786,7 +786,7 @@ void Gloc::onSnapshotChanged(const Snapshot &snapshot)
         // resetting all accumulated pipeline state (orb_done, dbow_candidates, etc.)
         std::set<double> snapshot_keys;
         for (const auto &kf : snapshot.keyframes)
-            snapshot_keys.insert(kf.t_image);   // stable raw timestamp
+            snapshot_keys.insert(kf.t_image); // stable raw timestamp
 
         // Drop entries whose frame is no longer in the window.
         for (auto it = state_map_.begin(); it != state_map_.end();)
@@ -802,7 +802,7 @@ void Gloc::onSnapshotChanged(const Snapshot &snapshot)
         // needs the current td-corrected value as the soft-constraint anchor.
         for (const auto &kf : snapshot.keyframes)
         {
-            auto [it, inserted] = state_map_.try_emplace(kf.t_image);  // key = t_image
+            auto [it, inserted] = state_map_.try_emplace(kf.t_image); // key = t_image
             auto &s = it->second;
             if (inserted)
             {
@@ -812,7 +812,7 @@ void Gloc::onSnapshotChanged(const Snapshot &snapshot)
                 s.per_gloc.assign(n_modules, PerModuleResolution{});
             }
             // Refresh t_kf every snapshot so pose optimization uses the current td.
-            s.t_kf    = kf.t_kf;
+            s.t_kf = kf.t_kf;
             s.R_local = kf.R_local;
             s.P_local = kf.P_local;
         }
@@ -1298,19 +1298,26 @@ void Gloc::processLoop()
             vins_multi::pubGlocKeyframeStatus(kf_status_vec);
         }
 
-        // Visualize here
+        // Visualize here — use snapped_ (not opt_success) so that frames where
+        // the optimizer ran but was rejected still draw in world coordinates as
+        // long as a valid T_map_local exists from any prior successful snap.
         Eigen::Matrix3d vis_R = Eigen::Matrix3d::Identity();
         Eigen::Vector3d vis_t = Eigen::Vector3d::Zero();
-        if (opt_success)
+        bool vis_snapped = false;
         {
             std::lock_guard<std::mutex> lk(snap_mutex_);
-            vis_R = T_map_local_R_;
-            vis_t = T_map_local_t_;
+            vis_snapped = snapped_;
+            if (vis_snapped)
+            {
+                vis_R = T_map_local_R_;
+                vis_t = T_map_local_t_;
+            }
         }
 
         // ── DEBUG: visualize vote results ─────────────────────────────────────
-        // Draw lines between each keyframe's position and its voted train image camera centre in world.
-        if (opt_success && vins_multi::pub_gloc_vote_lines.getNumSubscribers() > 0)
+        // Draw lines between each keyframe's position and its voted train image
+        // camera centre. Before snapped: local frame. After snapped: world frame.
+        if (vins_multi::pub_gloc_vote_lines.getNumSubscribers() > 0)
         {
             std::vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>> vote_pairs;
             for (const auto &kf : working_set)
@@ -1321,12 +1328,9 @@ void Gloc::processLoop()
                     if (slot.voted_train_idxs.empty())
                         continue;
 
-                    // Query position: Use optimized world pose if available, else local
                     Eigen::Vector3d q_pos = kf.P_local;
-                    if (opt_success)
-                    {
+                    if (vis_snapped)
                         q_pos = vis_R * q_pos + vis_t;
-                    }
 
                     // Draw one line per voted match
                     for (int ti : slot.voted_train_idxs)
@@ -1345,7 +1349,8 @@ void Gloc::processLoop()
         // ── Correspondence line visualization (magenta, gloc/corr_lines) ─────
         // Draw magenta lines from query body position to matched train image
         // camera centre for slots that passed geometric verification.
-        if (opt_success && vins_multi::pub_gloc_corr_lines.getNumSubscribers() > 0)
+        // Before snapped: local frame. After snapped: world frame.
+        if (vins_multi::pub_gloc_corr_lines.getNumSubscribers() > 0)
         {
             std::vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>> corr_pairs;
             for (const auto &kf : working_set)
@@ -1357,12 +1362,9 @@ void Gloc::processLoop()
                         slot.pt_pairs_undistorted.empty())
                         continue;
 
-                    // Query position: Use optimized world pose if available, else local
                     Eigen::Vector3d q_pos = kf.P_local;
-                    if (opt_success)
-                    {
+                    if (vis_snapped)
                         q_pos = vis_R * q_pos + vis_t;
-                    }
 
                     for (int match_k = 0;
                          match_k < static_cast<int>(slot.voted_train_idxs.size()); ++match_k)
@@ -1776,7 +1778,6 @@ void Gloc::runOrbAndDbow(std::vector<KeyframeGlocState> &working_set)
     for (auto &f : futures)
         f.get();
 }
-
 
 //
 // Stage 1b: cross-keyframe magnitude-consistency filter.
@@ -2525,7 +2526,6 @@ void Gloc::runCorrespondences(std::vector<KeyframeGlocState> &working_set,
     for (auto &f : futures)
         f.get();
 }
-
 
 // ─────────────────────────────────────────────────────────────────────────────
 // writeBackOrbDone
