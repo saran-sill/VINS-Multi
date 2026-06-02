@@ -308,6 +308,13 @@ struct PerModuleResolution
     // for this slot. Guards against reprocessing on subsequent rounds.
     bool pipeline_done{false};
 
+    // True once ORB extraction + DBoW query have completed for this slot.
+    // Set by runOrbAndDbow on the success path so that writeBackToStateMap
+    // releases state_map_'s image reference and prevents re-extraction in
+    // subsequent rounds. Separate from pipeline_done so that runCorrespondences
+    // can still run after ORB results are cached.
+    bool orb_done{false};
+
     // ORB features extracted from `image`.
     dbow3::ImageFeatures query_feats;
 
@@ -633,7 +640,12 @@ class Gloc
     void runCorrespondences(std::vector<KeyframeGlocState> &working_set,
                             uint64_t snapshot_id);
 
-    // Stage 1d: re-acquire state_mutex_ briefly and flush pipeline results from
+    // Stage 1a flush: immediately after runOrbAndDbow — persists orb_done,
+    // query_feats, dbow_candidates, and releases the image ref in state_map_
+    // before onSnapshotChanged can erase entries during the long pipeline phases.
+    void writeBackOrbDone(const std::vector<KeyframeGlocState> &working_set);
+
+    // Stage 1d: re-acquire state_mutex_ briefly and flush pipeline_done slots from
     // the working_set copy back into state_map_.
     void writeBackToStateMap(const std::vector<KeyframeGlocState> &working_set);
 

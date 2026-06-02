@@ -110,8 +110,10 @@ static cv::Mat gloc_preprocessTonemap(const cv::Mat &img,
 static cv::Mat gloc_preprocessCLAHE(const cv::Mat &img,
                                     double clip_limit, int grid_size)
 {
+    // Create once per thread — parameters are fixed after readParameters().
+    thread_local cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(clip_limit, cv::Size(grid_size, grid_size));
+
     cv::Mat r;
-    auto clahe = cv::createCLAHE(clip_limit, cv::Size(grid_size, grid_size));
     if (img.channels() == 1)
     {
         clahe->apply(img, r);
@@ -169,7 +171,7 @@ static cv::Mat gloc_preprocessImage(const cv::Mat &image)
     if (was_gray && (GLOC_PREPROCESS_WHITE_BALANCE ||
                      GLOC_PREPROCESS_DENOISE_COLOR ||
                      GLOC_PREPROCESS_TONEMAP ||
-                     GLOC_PREPROCESS_CLAHE ||
+                    //  GLOC_PREPROCESS_CLAHE || // CLAHE handles grayscale directly — no upconversion needed
                      GLOC_PREPROCESS_CLARITY))
         cv::cvtColor(result, result, cv::COLOR_GRAY2BGR);
 
@@ -776,16 +778,17 @@ void Gloc::onSnapshotChanged(const Snapshot &snapshot)
 
         // ── Phase 1: reconcile state_map_ with snapshot ─────────────────────
         //
-        // Build a set of snapshot t_kf values for fast "is this key still
-        // present?" lookup. snapshot.keyframes is ordered ascending, so a
-        // single linear merge would also work; std::set is clearer.
+        // state_map_ is keyed by t_image (raw hardware timestamp, no td offset).
+        // t_image is stable across snapshots — the same physical frame always has
+        // the same t_image. t_kf = t_image + td is NOT used as the key because td
+        // is estimated online and drifts slightly between snapshots, which would
+        // cause every existing entry to be erased and re-inserted each round,
+        // resetting all accumulated pipeline state (orb_done, dbow_candidates, etc.)
         std::set<double> snapshot_keys;
         for (const auto &kf : snapshot.keyframes)
-            snapshot_keys.insert(kf.t_kf);
+            snapshot_keys.insert(kf.t_image);   // stable raw timestamp
 
-        // Drop entries whose t_kf is no longer in the window. These keyframes
-        // have been marginalised out by VINS; their state (image, future
-        // ORB/DBoW caches) is no longer needed.
+        // Drop entries whose frame is no longer in the window.
         for (auto it = state_map_.begin(); it != state_map_.end();)
         {
             if (snapshot_keys.find(it->first) == snapshot_keys.end())
@@ -794,22 +797,22 @@ void Gloc::onSnapshotChanged(const Snapshot &snapshot)
                 ++it;
         }
 
-        // Insert new entries; refresh local pose on existing ones. The
-        // per_gloc vector is sized to n_modules on insertion and never
-        // resized again (number of gloc modules is fixed at init).
+        // Insert new entries; refresh poses and t_kf on existing ones.
+        // t_kf is refreshed every snapshot because td drifts — the optimizer
+        // needs the current td-corrected value as the soft-constraint anchor.
         for (const auto &kf : snapshot.keyframes)
         {
-            auto [it, inserted] = state_map_.try_emplace(kf.t_kf);
+            auto [it, inserted] = state_map_.try_emplace(kf.t_image);  // key = t_image
             auto &s = it->second;
             if (inserted)
             {
                 s.t_kf = kf.t_kf;
-                s.t_image = kf.t_image; // raw image timestamp for ring-buffer lookup
+                s.t_image = kf.t_image;
                 s.cam_unique_id = kf.cam_unique_id;
                 s.per_gloc.assign(n_modules, PerModuleResolution{});
             }
-            // Refresh local pose every snapshot - VINS keeps re-optimising
-            // these and the soft-constraint anchor needs to track.
+            // Refresh t_kf every snapshot so pose optimization uses the current td.
+            s.t_kf    = kf.t_kf;
             s.R_local = kf.R_local;
             s.P_local = kf.P_local;
         }
@@ -835,10 +838,10 @@ void Gloc::onSnapshotChanged(const Snapshot &snapshot)
                 using Vec3d = Eigen::Vector3d;
                 using Quat = Eigen::Quaterniond;
 
-                // Build a lookup of new local poses by t_kf
+                // Build a lookup of new local poses by t_image (stable key)
                 std::map<double, const Snapshot::KeyframeEntry *> new_pose_map;
                 for (const auto &kf : snapshot.keyframes)
-                    new_pose_map[kf.t_kf] = &kf;
+                    new_pose_map[kf.t_image] = &kf;
 
                 // Accumulate weighted ΔT over common keyframes
                 Vec3d dt_acc = Vec3d::Zero();
@@ -1140,6 +1143,9 @@ void Gloc::processLoop()
         }
         auto _t0 = std::chrono::steady_clock::now();
         runOrbAndDbow(working_set);
+        // Flush orb_done to state_map_ immediately — before voting and Ceres
+        // give onSnapshotChanged time to erase and re-insert entries.
+        writeBackOrbDone(working_set);
         auto _t1 = std::chrono::steady_clock::now();
         runConsensusVoting(working_set);
         auto _t2 = std::chrono::steady_clock::now();
@@ -1566,7 +1572,7 @@ void Gloc::runOrbAndDbow(std::vector<KeyframeGlocState> &working_set)
                 continue;
             if (slot.pipeline_done)
                 continue;
-            if (slot.image.empty())
+            if (slot.orb_done)
                 continue;
 
             // ── Preprocessing ─────────────────────────────────────────────────
@@ -1662,6 +1668,8 @@ void Gloc::runOrbAndDbow(std::vector<KeyframeGlocState> &working_set)
                        std::chrono::duration<double, std::milli>(_dbow_t1 - _dbow_t0).count(),
                        slot.dbow_candidates.size());
 
+            slot.orb_done = true;
+
             // Release raw and preprocessed images immediately — they are only
             // needed for ORB extraction (done above) and debug saving (done in
             // runCorrespondences). Holding them wastes ~7MB per slot per round.
@@ -1749,15 +1757,15 @@ void Gloc::runOrbAndDbow(std::vector<KeyframeGlocState> &working_set)
 
     std::vector<std::future<void>> futures;
     futures.reserve(working_set.size());
-    for (auto &kf_state : working_set)
+    for (std::size_t idx = 0; idx < working_set.size(); ++idx)
     {
         {
             std::unique_lock<std::mutex> lk(run_mutex);
             run_cv.wait(lk, [&] { return running < max_threads; });
             ++running;
         }
-        futures.push_back(std::async(std::launch::async, [&, &kf_state = kf_state]() {
-            process_kf(kf_state);
+        futures.push_back(std::async(std::launch::async, [&, idx]() {
+            process_kf(working_set[idx]);
             {
                 std::lock_guard<std::mutex> lk(run_mutex);
                 --running;
@@ -1769,8 +1777,7 @@ void Gloc::runOrbAndDbow(std::vector<KeyframeGlocState> &working_set)
         f.get();
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// runConsensusVoting
+
 //
 // Stage 1b: cross-keyframe magnitude-consistency filter.
 //
@@ -2502,15 +2509,15 @@ void Gloc::runCorrespondences(std::vector<KeyframeGlocState> &working_set,
 
     std::vector<std::future<void>> futures;
     futures.reserve(working_set.size());
-    for (auto &kf_state : working_set)
+    for (std::size_t idx = 0; idx < working_set.size(); ++idx)
     {
         {
             std::unique_lock<std::mutex> lk(run_mutex);
             run_cv.wait(lk, [&] { return running < max_threads; });
             ++running;
         }
-        futures.push_back(std::async(std::launch::async, [&, &kf_state = kf_state]() {
-            process_kf(kf_state);
+        futures.push_back(std::async(std::launch::async, [&, idx]() {
+            process_kf(working_set[idx]);
             {
                 std::lock_guard<std::mutex> lk(run_mutex);
                 --running;
@@ -2520,6 +2527,52 @@ void Gloc::runCorrespondences(std::vector<KeyframeGlocState> &working_set,
     }
     for (auto &f : futures)
         f.get();
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// writeBackOrbDone
+//
+// Stage 1a flush: called immediately after runOrbAndDbow. Persists orb_done,
+// query_feats, undistorted_query_kps, dbow_candidates to state_map_ and
+// releases the image reference for every slot that just completed ORB.
+//
+// Must run before the long voting+correspondences+Ceres phase (~400ms) which
+// gives onSnapshotChanged time to erase and re-insert entries. If we wait
+// until writeBackToStateMap at the end of the round, all entries will have
+// been cycled out (marginalised_kfs=14 every round) and nothing persists.
+//
+// Uses t_image as the lookup key (stable raw timestamp, matches state_map_ key).
+// ─────────────────────────────────────────────────────────────────────────────
+
+void Gloc::writeBackOrbDone(const std::vector<KeyframeGlocState> &working_set)
+{
+    std::lock_guard<std::mutex> lk(state_mutex_);
+
+    for (const auto &kf_state : working_set)
+    {
+        auto it = state_map_.find(kf_state.t_image);
+        if (it == state_map_.end())
+            continue; // marginalised between copy and this write-back
+
+        for (std::size_t g = 0; g < kf_state.per_gloc.size(); ++g)
+        {
+            const auto &src = kf_state.per_gloc[g];
+            if (!src.orb_done)
+                continue;
+
+            auto &dst = it->second.per_gloc[g];
+            if (dst.orb_done)
+                continue; // already flushed
+
+            dst.orb_done = true;
+            dst.query_feats = src.query_feats;
+            dst.undistorted_query_kps = src.undistorted_query_kps;
+            dst.dbow_candidates = src.dbow_candidates;
+            dst.image.release();
+            dst.preprocessed_image.release();
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2537,17 +2590,19 @@ void Gloc::writeBackToStateMap(const std::vector<KeyframeGlocState> &working_set
 
     for (const auto &kf_state : working_set)
     {
-        auto it = state_map_.find(kf_state.t_kf);
+        auto it = state_map_.find(kf_state.t_image);
         if (it == state_map_.end())
             continue; // marginalised between copy and write-back
 
         for (std::size_t g = 0; g < kf_state.per_gloc.size(); ++g)
         {
             const auto &src = kf_state.per_gloc[g];
+            auto &dst = it->second.per_gloc[g];
+
+            // ── Full pipeline flush ───────────────────────────────────────────
             if (!src.pipeline_done)
                 continue;
 
-            auto &dst = it->second.per_gloc[g];
             dst.query_feats = src.query_feats;
             dst.undistorted_query_kps = src.undistorted_query_kps;
             dst.preprocessed_image = src.preprocessed_image;
@@ -3240,7 +3295,7 @@ bool Gloc::runOptimization_6DOF(std::vector<KeyframeGlocState> &working_set)
                     w += static_cast<double>(slot.pt_pairs_undistorted.size());
             if (w < 1.0)
                 continue;
-            last_snap_poses_[kf.t_kf] = {kf.R_local, kf.P_local, w};
+            last_snap_poses_[kf.t_image] = {kf.R_local, kf.P_local, w};
         }
     }
 
@@ -3980,7 +4035,7 @@ bool Gloc::runOptimization_4DOF(std::vector<KeyframeGlocState> &working_set)
                     w += static_cast<double>(slot.pt_pairs_undistorted.size());
             if (w < 1.0)
                 continue;
-            last_snap_poses_[kf.t_kf] = {kf.R_local, kf.P_local, w};
+            last_snap_poses_[kf.t_image] = {kf.R_local, kf.P_local, w};
         }
     }
 
@@ -4953,7 +5008,7 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
                     w += static_cast<double>(slot.pt_pairs_undistorted.size());
             if (w < 1.0)
                 continue;
-            last_snap_poses_[kf.t_kf] = {kf.R_local, kf.P_local, w};
+            last_snap_poses_[kf.t_image] = {kf.R_local, kf.P_local, w};
         }
     }
 

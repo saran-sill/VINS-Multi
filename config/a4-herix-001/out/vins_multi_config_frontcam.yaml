@@ -342,7 +342,7 @@ gloc_huber_delta: 1.0           # Huber loss delta (virtual pixels)
 gloc_inlier_thresh_px: 30.0     # reprojection inlier threshold (virtual pixels)
 gloc_max_iters: 150             # main solver iterations
 gloc_init_iters: 20             # initialization pass iterations (before main solve)
-gloc_max_solver_time: 0.1
+gloc_max_solver_time: 0.05
 gloc_min_train_inlier_ratio: -1.0   # reject train images with <30% pre-check inliers
 gloc_min_inlier_ratio: 0.3      # min inlier fraction to accept solution
 gloc_max_depth_m: 100.0          # inverse-depth lower bound: rho >= 1/max_depth
