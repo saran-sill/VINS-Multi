@@ -4905,6 +4905,15 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
     ceres::Solver::Summary main_sum;
     ceres::Solve(main_opts, &main_prob, &main_sum);
     GLOC_DEBUG("[opt_fr] %s", main_sum.BriefReport().c_str());
+    if (main_sum.termination_type == ceres::NO_CONVERGENCE)
+    {
+        if ((int)main_sum.iterations.size() >= main_opts.max_num_iterations)
+            GLOC_DEBUG("terminated: hit max iterations (%d)", main_opts.max_num_iterations);
+        else
+            GLOC_DEBUG("terminated: hit max solver time (%.3fs), iterations=%d",
+                       main_opts.max_solver_time_in_seconds,
+                       (int)main_sum.iterations.size());
+    }
 
     const double dt_result = std::sqrt(
         (t_map[0] - t_map_seed[0]) * (t_map[0] - t_map_seed[0]) +
