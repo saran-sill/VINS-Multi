@@ -296,7 +296,7 @@ gloc_dbow3_min_score: 0.005
 gloc_vote_ransac_eps_m: 3.0
 gloc_vote_min_votes: 2            # -1 = majority rule (ceil((X-1)/2))
 gloc_vote_max_dist_m: 3.0          # reject candidates >XXm from current position
-gloc_vote_max_matches: 1           # keep top-3 inlier matches per keyframe (default: 1)
+gloc_vote_max_matches: 2           # keep top-3 inlier matches per keyframe (default: 1)
 gloc_pre_snap_history_size: 15
 
 # ORB feature extraction

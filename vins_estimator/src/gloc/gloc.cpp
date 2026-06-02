@@ -2036,14 +2036,11 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
         // candidates used by the optimizer and are NOT exclusive; multiple
         // keyframes may share the same voted train image.
         //
-        // Seed claimed from done keyframes' primary matches only.
-        std::unordered_set<int> claimed_primary; // best_train_idx already taken
-        for (int i = 0; i < X; ++i)
-        {
-            const auto &slot = working_set[i].per_gloc[g];
-            if (slot.pipeline_done && slot.best_train_idx >= 0)
-                claimed_primary.insert(slot.best_train_idx);
-        }
+        // claimed_primary starts EMPTY each round. pipeline_done kfs are never
+        // in new_kf_idxs and will not be re-assigned, so pre-seeding their trains
+        // would only block new kfs from claiming the same trains — causing every
+        // new kf to get "no unclaimed primary" when the hypothesis has few inliers.
+        std::unordered_set<int> claimed_primary;
 
         // ── 3b. Greedy primary assignment: highest-scoring keyframe claims first
         // Build ranked candidate list per new keyframe (within eps, score-sorted),
