@@ -1866,7 +1866,6 @@ void Gloc::runConsensusVoting(
         // Inlier count is bounded by new_kf_idxs.size() (only new kfs count),
         // so cap the threshold there to keep it always reachable.
         const int N_new = static_cast<int>(new_kf_idxs.size());
-
         const int min_inliers = snapped_local
                                     ? ((GLOC_VOTE_MIN_VOTES < 0)
                                            ? std::max(1, static_cast<int>(std::ceil((N_new - 1) / 2.0)))
@@ -2092,97 +2091,81 @@ void Gloc::runConsensusVoting(
                 }
         }
 
-        // ── 3a. Build claimed set for best_train_idx only ────────────────────
-        // Only best_train_idx is exclusive — one keyframe per train image for
-        // the primary match. voted_train_idxs are additional correspondence
-        // candidates used by the optimizer and are NOT exclusive; multiple
-        // keyframes may share the same voted train image.
+        // ── 3a. Assign best_train_idx directly from RANSAC best_assignment ──────
         //
-        // claimed_primary starts EMPTY each round. pipeline_done kfs are never
-        // in new_kf_idxs and will not be re-assigned, so pre-seeding their trains
-        // would only block new kfs from claiming the same trains — causing every
-        // new kf to get "no unclaimed primary" when the hypothesis has few inliers.
+        // best_assignment[i] is already the highest-scoring candidate within
+        // GLOC_VOTE_RANSAC_EPS_M of the winning hypothesis — using it directly
+        // guarantees the new keyframe gets the exact train image RANSAC found.
+        // Rebuilding ranked candidates from t_win can miss due to floating-point
+        // differences or epsilon boundary effects, causing "no unclaimed primary"
+        // even when the keyframe was a clear RANSAC inlier.
+        //
+        // claimed_primary enforces one-train-per-keyframe exclusivity for
+        // best_train_idx. voted_train_idxs are non-exclusive (multiple keyframes
+        // may share the same train image for correspondence).
         std::unordered_set<int> claimed_primary;
 
-        // ── 3b. Greedy primary assignment: highest-scoring keyframe claims first
-        // Build ranked candidate list per new keyframe (within eps, score-sorted),
-        // then assign best_train_idx greedily. voted_train_idxs are filled
-        // independently from all inlier candidates without exclusivity.
-        struct KfCandList
-        {
-            int kf_idx;
-            double best_score;
-            std::vector<std::pair<double, int>> ranked; // (score, train_idx) desc
-        };
-        std::vector<KfCandList> kf_cand_lists;
-        kf_cand_lists.reserve(new_kf_idxs.size());
+        // Pass 1: assign best_train_idx from RANSAC result (greedy by
+        // best_assignment score, new keyframes only).
+        // Sort new_kf_idxs by descending assignment score so the highest-
+        // confidence new keyframe claims its train image first.
+        std::vector<int> sorted_new_kf_idxs = new_kf_idxs;
+        std::sort(sorted_new_kf_idxs.begin(), sorted_new_kf_idxs.end(),
+                  [&](int a, int b) {
+                      const double sa = best_assignment[a] >= 0
+                                            ? working_set[a].per_gloc[g].dbow_candidates[best_assignment[a]].first
+                                            : -1.0;
+                      const double sb = best_assignment[b] >= 0
+                                            ? working_set[b].per_gloc[g].dbow_candidates[best_assignment[b]].first
+                                            : -1.0;
+                      return sa > sb;
+                  });
 
+        for (int i : sorted_new_kf_idxs)
+        {
+            auto &slot = working_set[i].per_gloc[g];
+            slot.best_train_idx = -1;
+            slot.voted_train_idxs.clear();
+
+            if (best_assignment[i] < 0)
+                continue;
+
+            const int ti = static_cast<int>(
+                slot.dbow_candidates[best_assignment[i]].second);
+
+            if (!claimed_primary.count(ti))
+            {
+                slot.best_train_idx = ti;
+                claimed_primary.insert(ti);
+            }
+        }
+
+        // Pass 2: fill voted_train_idxs from ALL candidates within eps of
+        // t_win (non-exclusive). Includes the primary match so the optimizer
+        // sees it in voted_train_idxs too.
         for (int i : new_kf_idxs)
         {
-            const auto &slot = working_set[i].per_gloc[g];
+            auto &slot = working_set[i].per_gloc[g];
             const Eigen::Vector3d predicted = snapped_local
                                                   ? (R_ml * working_set[i].P_local + t_win).eval()
                                                   : (working_set[i].P_local + t_win).eval();
 
-            KfCandList cl;
-            cl.kf_idx = i;
             for (const auto &[sc, ti] : slot.dbow_candidates)
-                if ((train_world_pos(ti) - predicted).norm() < GLOC_VOTE_RANSAC_EPS_M)
-                    cl.ranked.push_back({sc, static_cast<int>(ti)});
-
-            std::sort(cl.ranked.begin(), cl.ranked.end(),
-                      [](const auto &a, const auto &b) { return a.first > b.first; });
-
-            cl.best_score = cl.ranked.empty() ? -1.0 : cl.ranked.front().first;
-            kf_cand_lists.push_back(std::move(cl));
-        }
-
-        // Sort so highest-confidence keyframe claims its primary first
-        std::sort(kf_cand_lists.begin(), kf_cand_lists.end(),
-                  [](const KfCandList &a, const KfCandList &b) {
-                      return a.best_score > b.best_score;
-                  });
-
-        // Pass 1: assign best_train_idx exclusively (greedy by score)
-        for (auto &cl : kf_cand_lists)
-        {
-            auto &slot = working_set[cl.kf_idx].per_gloc[g];
-            slot.best_train_idx = -1;
-            slot.voted_train_idxs.clear();
-
-            for (const auto &[sc, ti] : cl.ranked)
-            {
-                if (!claimed_primary.count(ti))
-                {
-                    slot.best_train_idx = ti;
-                    claimed_primary.insert(ti);
-                    break;
-                }
-            }
-        }
-
-        // Pass 2: fill voted_train_idxs from ALL inlier candidates (no
-        // exclusivity — same behaviour as original code). Includes the primary
-        // match so the optimizer sees it in voted_train_idxs too.
-        for (auto &cl : kf_cand_lists)
-        {
-            auto &slot = working_set[cl.kf_idx].per_gloc[g];
-
-            for (const auto &[sc, ti] : cl.ranked)
             {
                 if (static_cast<int>(slot.voted_train_idxs.size()) >= GLOC_VOTE_MAX_MATCHES)
                     break;
-                slot.voted_train_idxs.push_back(ti);
+                if ((train_world_pos(ti) - predicted).norm() < GLOC_VOTE_RANSAC_EPS_M)
+                    slot.voted_train_idxs.push_back(static_cast<int>(ti));
             }
 
             if (slot.best_train_idx >= 0)
                 GLOC_DEBUG("[vote] kf_t=%.4f g=%zu -> best train=%d voted=%d",
-                           working_set[cl.kf_idx].t_kf, g,
+                           working_set[i].t_kf, g,
                            slot.best_train_idx,
                            static_cast<int>(slot.voted_train_idxs.size()));
             else
-                GLOC_DEBUG("[vote] kf_t=%.4f g=%zu -> no unclaimed primary candidate",
-                           working_set[cl.kf_idx].t_kf, g);
+                GLOC_DEBUG("[vote] kf_t=%.4f g=%zu -> no unclaimed primary (ransac_cand=%d)",
+                           working_set[i].t_kf, g, best_assignment[i]);
         }
     }
 }
