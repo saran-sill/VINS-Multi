@@ -95,6 +95,7 @@ void pubGlocKeyframeStatus(
 extern ros::Publisher pub_gloc_match_lines;
 extern ros::Publisher pub_gloc_vote_lines;
 extern ros::Publisher pub_gloc_corr_lines;
+extern ros::Publisher pub_gloc_opt_corr_lines;
 
 // Publish magenta lines from query camera positions to matched train image
 // camera centres in world frame. Topic: gloc/match_lines
@@ -103,6 +104,9 @@ void pubGlocMatchLines(
 void pubGlocVoteLines(
     const std::vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>> &query_train_pairs);
 void pubGlocCorrLines(
+    const std::vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>> &query_train_pairs);
+
+void pubGlocOptCorrLines(
     const std::vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>> &query_train_pairs);
 
 // Publish ray-mesh intersection 3D points in world frame.

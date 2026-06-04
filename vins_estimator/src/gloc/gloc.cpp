@@ -1348,6 +1348,39 @@ void Gloc::processLoop()
             }
             vins_multi::pubGlocOptimized(opt_poses, opt_path_pts);
             vins_multi::pubGlocKeyframeStatus(kf_status_vec);
+
+            // Build and publish opt_corr_lines (green, latched)
+            if (vins_multi::pub_gloc_opt_corr_lines.getNumSubscribers() > 0)
+            {
+                std::vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>> opt_corr_pairs;
+                for (const auto &kf : working_set)
+                {
+                    for (std::size_t g = 0; g < kf.per_gloc.size(); ++g)
+                    {
+                        const auto &slot = kf.per_gloc[g];
+                        if (!slot.pipeline_done || slot.best_train_idx < 0 ||
+                            slot.pt_pairs_undistorted.empty())
+                            continue;
+
+                        const Eigen::Vector3d q_pos = pub_R * kf.P_local + pub_t;
+
+                        for (int match_k = 0;
+                             match_k < static_cast<int>(slot.voted_train_idxs.size()); ++match_k)
+                        {
+                            if (match_k >= static_cast<int>(slot.multi_pt_pairs_undistorted.size()) ||
+                                slot.multi_pt_pairs_undistorted[match_k].empty())
+                                continue;
+
+                            const colmap::Image &train_img =
+                                map_.images[static_cast<std::size_t>(slot.voted_train_idxs[match_k])];
+                            const Eigen::Matrix3d R_j = train_img.q_c_w.toRotationMatrix();
+                            const Eigen::Vector3d o_j = -(R_j.transpose() * train_img.t_c_w);
+                            opt_corr_pairs.push_back({q_pos, o_j});
+                        }
+                    }
+                }
+                vins_multi::pubGlocOptCorrLines(opt_corr_pairs);
+            }
         }
 
         // Visualize here — use snapped_ (not opt_success) so that frames where

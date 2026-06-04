@@ -22,6 +22,7 @@ ros::Publisher pub_gloc_map_frustums, pub_gloc_map_path, pub_gloc_mesh_cloud;
 ros::Publisher pub_gloc_opt_poses, pub_gloc_opt_path, pub_gloc_kf_status, pub_gloc_match_lines;
 ros::Publisher pub_gloc_vote_lines;
 ros::Publisher pub_gloc_corr_lines;
+ros::Publisher pub_gloc_opt_corr_lines;
 ros::Publisher pub_gloc_mesh_intersect;
 
 // Accumulated paths for odomimu_world and odomimu_raw
@@ -77,7 +78,9 @@ void registerPub(ros::NodeHandle &n)
     pub_gloc_opt_path = n.advertise<nav_msgs::Path>(
         "gloc/opt_path", 10);
     pub_gloc_kf_status = n.advertise<visualization_msgs::MarkerArray>(
-        "gloc/kf_status", 10);
+        "gloc/opt_kf_status", 10);
+    pub_gloc_opt_corr_lines = n.advertise<visualization_msgs::Marker>(
+        "gloc/opt_corr_lines", 10);
     pub_gloc_match_lines = n.advertise<visualization_msgs::Marker>(
         "gloc/match_lines", 10);
     pub_gloc_vote_lines = n.advertise<visualization_msgs::Marker>(
@@ -1031,7 +1034,11 @@ void pubKeyframes(const Estimator &estimator)
 
 bool hasGlocOptimizedSubscribers()
 {
-    return pub_gloc_opt_poses.getNumSubscribers() > 0 || pub_gloc_opt_path.getNumSubscribers() > 0 || pub_gloc_kf_status.getNumSubscribers() > 0 || pub_gloc_match_lines.getNumSubscribers() > 0;
+    return pub_gloc_opt_poses.getNumSubscribers() > 0 ||
+           pub_gloc_opt_path.getNumSubscribers() > 0 ||
+           pub_gloc_kf_status.getNumSubscribers() > 0 ||
+           pub_gloc_match_lines.getNumSubscribers() > 0 ||
+           pub_gloc_opt_corr_lines.getNumSubscribers() > 0;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1221,7 +1228,7 @@ void pubGlocVoteLines(
     m.id = 0;
     m.type = visualization_msgs::Marker::LINE_LIST;
     m.action = visualization_msgs::Marker::ADD;
-    m.scale.x = 0.02;
+    m.scale.x = 0.01;
     m.pose.orientation.w = 1.0;
 
     // Yellow
@@ -1270,7 +1277,7 @@ void pubGlocCorrLines(
     m.id = 0;
     m.type = visualization_msgs::Marker::LINE_LIST;
     m.action = visualization_msgs::Marker::ADD;
-    m.scale.x = 0.03;
+    m.scale.x = 0.02;
     m.pose.orientation.w = 1.0;
 
     // Magenta
@@ -1294,6 +1301,54 @@ void pubGlocCorrLines(
     }
 
     pub_gloc_corr_lines.publish(m);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// pubGlocOptCorrLines
+//
+// Publishes green correspondence lines on opt_success only.
+// Latched — persists in RViz across rounds where opt_success = false.
+// Topic: gloc/opt_corr_lines
+// ─────────────────────────────────────────────────────────────────────────────
+void pubGlocOptCorrLines(
+    const std::vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>> &query_train_pairs)
+{
+    if (pub_gloc_opt_corr_lines.getNumSubscribers() == 0)
+        return;
+    if (query_train_pairs.empty())
+        return;
+
+    visualization_msgs::Marker m;
+    m.header.frame_id = "world";
+    m.header.stamp = ros::Time::now();
+    m.ns = "gloc_opt_corr_lines";
+    m.id = 0;
+    m.type = visualization_msgs::Marker::LINE_LIST;
+    m.action = visualization_msgs::Marker::ADD;
+    m.scale.x = 0.03;
+    m.pose.orientation.w = 1.0;
+
+    // Green
+    m.color.r = 0.0f;
+    m.color.g = 1.0f;
+    m.color.b = 0.0f;
+    m.color.a = 1.0f;
+
+    m.points.reserve(query_train_pairs.size() * 2);
+    for (const auto &[q_pos, t_pos] : query_train_pairs)
+    {
+        geometry_msgs::Point pq, pt;
+        pq.x = q_pos.x();
+        pq.y = q_pos.y();
+        pq.z = q_pos.z();
+        pt.x = t_pos.x();
+        pt.y = t_pos.y();
+        pt.z = t_pos.z();
+        m.points.push_back(pq);
+        m.points.push_back(pt);
+    }
+
+    pub_gloc_opt_corr_lines.publish(m);
 }
 
 // Publish ray-mesh intersection points in world frame.
