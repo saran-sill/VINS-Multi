@@ -632,7 +632,14 @@ class Gloc
     // Stage 1b: cross-keyframe magnitude-consistency voting. For each candidate
     // (i,n), count how many other keyframes have a candidate whose world-distance
     // matches the local-pose distance. Sets best_train_idx per slot.
-    void runConsensusVoting(std::vector<KeyframeGlocState> &working_set);
+    //
+    // all_cands_out — when non-null, populated with (P_local, P_world) for
+    // every DBoW3 candidate across all keyframes and modules, before any
+    // distance-filter or RANSAC pruning. Used to visualise the full candidate
+    // fan on gloc/vote_lines while !snapped_.  Pass nullptr to skip.
+    void runConsensusVoting(
+        std::vector<KeyframeGlocState> &working_set,
+        std::vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>> *all_cands_out = nullptr);
 
     // Stage 1c: for each slot with a valid best_train_idx, match ORB descriptors
     // against the cached train features, run geometric verification, and store

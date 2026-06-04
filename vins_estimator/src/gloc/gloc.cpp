@@ -1147,7 +1147,22 @@ void Gloc::processLoop()
         // give onSnapshotChanged time to erase and re-insert entries.
         writeBackOrbDone(working_set);
         auto _t1 = std::chrono::steady_clock::now();
-        runConsensusVoting(working_set);
+
+        // Collect raw DBoW3 candidates for pre-snap visualization.
+        // We only pay the allocation cost when !snapped_ and a subscriber is
+        // listening — both conditions are cheap to check before voting.
+        std::vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>> raw_cand_pairs;
+        {
+            bool need_raw_cands = false;
+            {
+                std::lock_guard<std::mutex> lk(snap_mutex_);
+                need_raw_cands = !snapped_;
+            }
+            need_raw_cands = need_raw_cands &&
+                             (vins_multi::pub_gloc_vote_lines.getNumSubscribers() > 0);
+            runConsensusVoting(working_set,
+                               need_raw_cands ? &raw_cand_pairs : nullptr);
+        }
         auto _t2 = std::chrono::steady_clock::now();
 
         GLOC_DEBUG("[pipeline_time] orb_dbow=%.0fms voting=%.0fms ws=%d",
@@ -1315,35 +1330,46 @@ void Gloc::processLoop()
         }
 
         // ── DEBUG: visualize vote results ─────────────────────────────────────
-        // Draw lines between each keyframe's position and its voted train image
-        // camera centre. Before snapped: local frame. After snapped: world frame.
+        // Before snapped_: draw ALL raw DBoW3 candidates (the full fan from
+        //   every keyframe to every candidate train image) so the operator can
+        //   see what the voting pool looks like before consensus prunes it.
+        //   raw_cand_pairs was populated by runConsensusVoting above.
+        // After snapped_: draw only the surviving voted matches (voted_train_idxs)
+        //   in world frame — same behaviour as before.
         if (vins_multi::pub_gloc_vote_lines.getNumSubscribers() > 0)
         {
-            std::vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>> vote_pairs;
-            for (const auto &kf : working_set)
+            if (!vis_snapped)
             {
-                for (std::size_t g = 0; g < kf.per_gloc.size(); ++g)
+                // raw_cand_pairs already has (P_local, P_world); P_local is the
+                // query position in local frame (same as world when unsnapped).
+                if (!raw_cand_pairs.empty())
+                    vins_multi::pubGlocVoteLines(raw_cand_pairs);
+            }
+            else
+            {
+                std::vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>> vote_pairs;
+                for (const auto &kf : working_set)
                 {
-                    const auto &slot = kf.per_gloc[g];
-                    if (slot.voted_train_idxs.empty())
-                        continue;
-
-                    Eigen::Vector3d q_pos = kf.P_local;
-                    if (vis_snapped)
-                        q_pos = vis_R * q_pos + vis_t;
-
-                    // Draw one line per voted match
-                    for (int ti : slot.voted_train_idxs)
+                    for (std::size_t g = 0; g < kf.per_gloc.size(); ++g)
                     {
-                        const colmap::Image &train_img =
-                            map_.images[static_cast<std::size_t>(ti)];
-                        const Eigen::Matrix3d R_j = train_img.q_c_w.toRotationMatrix();
-                        const Eigen::Vector3d o_j = -(R_j.transpose() * train_img.t_c_w);
-                        vote_pairs.push_back({q_pos, o_j});
+                        const auto &slot = kf.per_gloc[g];
+                        if (slot.voted_train_idxs.empty())
+                            continue;
+
+                        Eigen::Vector3d q_pos = vis_R * kf.P_local + vis_t;
+
+                        for (int ti : slot.voted_train_idxs)
+                        {
+                            const colmap::Image &train_img =
+                                map_.images[static_cast<std::size_t>(ti)];
+                            const Eigen::Matrix3d R_j = train_img.q_c_w.toRotationMatrix();
+                            const Eigen::Vector3d o_j = -(R_j.transpose() * train_img.t_c_w);
+                            vote_pairs.push_back({q_pos, o_j});
+                        }
                     }
                 }
+                vins_multi::pubGlocVoteLines(vote_pairs);
             }
-            vins_multi::pubGlocVoteLines(vote_pairs);
         }
 
         // ── Correspondence line visualization (magenta, gloc/corr_lines) ─────
@@ -1792,7 +1818,9 @@ void Gloc::runOrbAndDbow(std::vector<KeyframeGlocState> &working_set)
 // rejected. Among survivors the one with the highest DBoW3 score is elected as
 // best_train_idx for that slot.
 // ─────────────────────────────────────────────────────────────────────────────
-void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
+void Gloc::runConsensusVoting(
+    std::vector<KeyframeGlocState> &working_set,
+    std::vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>> *all_cands_out)
 {
     // ── Overview ──────────────────────────────────────────────────────────────
     //
@@ -1812,9 +1840,6 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
     // ─────────────────────────────────────────────────────────────────────────
 
     const int X = static_cast<int>(working_set.size());
-    const int min_inliers = (GLOC_VOTE_MIN_VOTES < 0)
-                                ? static_cast<int>(std::ceil((X - 1) / 2.0))
-                                : GLOC_VOTE_MIN_VOTES;
 
     const std::size_t n_modules = working_set.empty() ? 0 : working_set[0].per_gloc.size();
 
@@ -1831,6 +1856,20 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
             t_ml = T_map_local_t_;
         }
     }
+
+    // Total voter count: window keyframes + history entries (pre-snap only).
+    // Used for the auto min_inliers threshold when the parameter is -1.
+    const int total_voters = snapped_local
+                                 ? X
+                                 : X + static_cast<int>(pre_snap_history_.size());
+
+    const int min_inliers = snapped_local
+                                ? ((GLOC_VOTE_MIN_VOTES < 0)
+                                       ? static_cast<int>(std::ceil((X - 1) / 2.0))
+                                       : GLOC_VOTE_MIN_VOTES)
+                                : ((GLOC_VOTE_MIN_VOTES_UNSNAPPED < 0)
+                                       ? static_cast<int>(std::ceil((total_voters - 1) / 2.0))
+                                       : GLOC_VOTE_MIN_VOTES_UNSNAPPED);
 
     auto train_world_pos = [&](std::size_t train_idx) -> Eigen::Vector3d {
         const colmap::Image &img = map_.images[train_idx];
@@ -1893,6 +1932,16 @@ void Gloc::runConsensusVoting(std::vector<KeyframeGlocState> &working_set)
             }
             GLOC_DEBUG("[vote] g=%zu all_cands=%zu (window=%d history=%zu)",
                        g, all_cands.size(), X, pre_snap_history_.size());
+        }
+
+        // ── 1b'. Snapshot full candidate pool for caller visualization ─────────
+        // Collected before any distance-filter or RANSAC pruning so the caller
+        // can draw every raw DBoW3 candidate on gloc/vote_lines while !snapped_.
+        // Only populated when the caller requests it (all_cands_out != nullptr).
+        if (all_cands_out != nullptr)
+        {
+            for (const auto &c : all_cands)
+                all_cands_out->emplace_back(c.P_local, c.P_world);
         }
 
         // ── 1b. Pre-filter by max distance ────────────────────────────────────

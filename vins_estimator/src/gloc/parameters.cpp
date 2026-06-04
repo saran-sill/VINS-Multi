@@ -23,6 +23,7 @@ double GLOC_DBOW3_MIN_SCORE = 0.01;
 // Consensus voting
 double GLOC_VOTE_RANSAC_EPS_M = 1.0;
 int GLOC_VOTE_MIN_VOTES = -1;
+int GLOC_VOTE_MIN_VOTES_UNSNAPPED = -1;
 double GLOC_VOTE_MAX_DIST_M = -1.0;
 int GLOC_VOTE_MAX_MATCHES = 1;
 double GLOC_STARTUP_DELAY_S = 0.0;
@@ -174,6 +175,7 @@ void readParameters(std::string config_file)
     read_if(fsSettings, "gloc_dbow3_min_score", gloc::GLOC_DBOW3_MIN_SCORE);
     read_if(fsSettings, "gloc_vote_eps_m", gloc::GLOC_VOTE_RANSAC_EPS_M);
     read_if(fsSettings, "gloc_vote_min_votes", gloc::GLOC_VOTE_MIN_VOTES);
+    read_if(fsSettings, "gloc_vote_min_votes_unsnapped", gloc::GLOC_VOTE_MIN_VOTES_UNSNAPPED);
     read_if(fsSettings, "gloc_vote_max_dist_m", gloc::GLOC_VOTE_MAX_DIST_M);
     read_if(fsSettings, "gloc_vote_max_matches", gloc::GLOC_VOTE_MAX_MATCHES);
     read_if(fsSettings, "gloc_startup_delay_s", gloc::GLOC_STARTUP_DELAY_S);
@@ -277,6 +279,7 @@ void readParameters(std::string config_file)
     printf("GLOC_DBOW3_MIN_SCORE      : %.4f\n", gloc::GLOC_DBOW3_MIN_SCORE);
     printf("GLOC_VOTE_RANSAC_EPS_M           : %.2f\n", gloc::GLOC_VOTE_RANSAC_EPS_M);
     printf("GLOC_VOTE_MIN_VOTES       : %d\n", gloc::GLOC_VOTE_MIN_VOTES);
+    printf("GLOC_VOTE_MIN_VOTES_UNSNAPPED       : %d\n", gloc::GLOC_VOTE_MIN_VOTES_UNSNAPPED);
     printf("GLOC_VOTE_MAX_DIST_M      : %.2f\n", gloc::GLOC_VOTE_MAX_DIST_M);
     printf("GLOC_VOTE_MAX_MATCHES     : %d\n", gloc::GLOC_VOTE_MAX_MATCHES);
     printf("GLOC_STARTUP_DELAY_S      : %.1f\n", gloc::GLOC_STARTUP_DELAY_S);

@@ -44,6 +44,12 @@ extern double GLOC_VOTE_RANSAC_EPS_M;
 // X is the current working-set size (majority rule).
 extern int GLOC_VOTE_MIN_VOTES;
 
+// Minimum votes when snapped_ = false (window + pre-snap history voters).
+// When set to -1, uses ceil((total_voters - 1) / 2) where total_voters
+// includes both window keyframes and history entries.
+// Default: -1 (majority of total pool).
+extern int GLOC_VOTE_MIN_VOTES_UNSNAPPED;
+
 // Maximum distance (metres) between a keyframe's VINS local position and a
 // candidate train image's world position. Candidates farther than this are
 // rejected before RANSAC. Set to <=0 to disable. Default: -1 (disabled).
