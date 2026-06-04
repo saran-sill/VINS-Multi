@@ -789,10 +789,48 @@ void Gloc::onSnapshotChanged(const Snapshot &snapshot)
             snapshot_keys.insert(kf.t_image); // stable raw timestamp
 
         // Drop entries whose frame is no longer in the window.
+        // When a keyframe expires before snapping and has DBoW3 candidates,
+        // save it to pre_snap_history_ so it can vote in future RANSAC rounds.
+        // This is the correct moment: the keyframe has a fully-processed
+        // dbow_candidates list and is at a distinct past position, giving the
+        // RANSAC spatial diversity beyond the current tight window cluster.
         for (auto it = state_map_.begin(); it != state_map_.end();)
         {
             if (snapshot_keys.find(it->first) == snapshot_keys.end())
+            {
+                // Keyframe is leaving the window.
+                if (!snapped_ && GLOC_PRE_SNAP_HISTORY_SIZE > 0)
+                {
+                    const KeyframeGlocState &s = it->second;
+                    bool any_candidates = false;
+                    for (const auto &slot : s.per_gloc)
+                        if (!slot.dbow_candidates.empty())
+                        {
+                            any_candidates = true;
+                            break;
+                        }
+
+                    if (any_candidates)
+                    {
+                        PreSnapHistoryEntry entry;
+                        entry.t_kf = s.t_kf;
+                        entry.P_local = s.P_local;
+                        entry.dbow_candidates.resize(s.per_gloc.size());
+                        for (std::size_t g = 0; g < s.per_gloc.size(); ++g)
+                            entry.dbow_candidates[g] = s.per_gloc[g].dbow_candidates;
+
+                        pre_snap_history_.push_back(std::move(entry));
+
+                        while (static_cast<int>(pre_snap_history_.size()) > GLOC_PRE_SNAP_HISTORY_SIZE)
+                            pre_snap_history_.pop_front();
+
+                        GLOC_DEBUG("[preSnapHistory] kf expired t_kf=%.4f history_size=%zu",
+                                   s.t_kf, pre_snap_history_.size());
+                    }
+                }
+
                 it = state_map_.erase(it);
+            }
             else
                 ++it;
         }
@@ -1148,9 +1186,8 @@ void Gloc::processLoop()
         writeBackOrbDone(working_set);
         auto _t1 = std::chrono::steady_clock::now();
 
-        // Collect raw DBoW3 candidates for pre-snap visualization.
-        // We only pay the allocation cost when !snapped_ and a subscriber is
-        // listening — both conditions are cheap to check before voting.
+        // Collect the full raw DBoW3 candidate pool for pre-snap visualization.
+        // Only pay the allocation cost when !snapped_ and a subscriber is listening.
         std::vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>> raw_cand_pairs;
         {
             bool need_raw_cands = false;
@@ -1330,18 +1367,18 @@ void Gloc::processLoop()
         }
 
         // ── DEBUG: visualize vote results ─────────────────────────────────────
-        // Before snapped_: draw ALL raw DBoW3 candidates (the full fan from
-        //   every keyframe to every candidate train image) so the operator can
-        //   see what the voting pool looks like before consensus prunes it.
-        //   raw_cand_pairs was populated by runConsensusVoting above.
+        // Before snapped_: draw ALL raw DBoW3 candidates — the complete fan
+        //   from every keyframe (window + history) to every candidate train
+        //   image. raw_cand_pairs was populated by runConsensusVoting above,
+        //   covering window + pre_snap_history_ before any RANSAC pruning.
         // After snapped_: draw only the surviving voted matches (voted_train_idxs)
-        //   in world frame — same behaviour as before.
+        //   transformed into world frame.
         if (vins_multi::pub_gloc_vote_lines.getNumSubscribers() > 0)
         {
             if (!vis_snapped)
             {
-                // raw_cand_pairs already has (P_local, P_world); P_local is the
-                // query position in local frame (same as world when unsnapped).
+                // P_local is the query position; in the unsnapped state this is
+                // also the display frame (no T_map_local available yet).
                 if (!raw_cand_pairs.empty())
                     vins_multi::pubGlocVoteLines(raw_cand_pairs);
             }
@@ -1356,7 +1393,7 @@ void Gloc::processLoop()
                         if (slot.voted_train_idxs.empty())
                             continue;
 
-                        Eigen::Vector3d q_pos = vis_R * kf.P_local + vis_t;
+                        const Eigen::Vector3d q_pos = vis_R * kf.P_local + vis_t;
 
                         for (int ti : slot.voted_train_idxs)
                         {
@@ -1541,11 +1578,6 @@ static void saveDebugImages(const std::string &base_dir,
 //
 //   snap_mutex_ / snapped_
 //       Locked briefly per keyframe to read snapped_.  Standard mutex — safe.
-//
-//   pre_snap_history_
-//       Written after per-slot work completes for a keyframe.  Protected by
-//       the dedicated history_mutex (local to this call) so concurrent tasks
-//       do not race on the deque.
 // ─────────────────────────────────────────────────────────────────────────────
 
 void Gloc::runOrbAndDbow(std::vector<KeyframeGlocState> &working_set)
@@ -1579,14 +1611,10 @@ void Gloc::runOrbAndDbow(std::vector<KeyframeGlocState> &working_set)
         return cv::xfeatures2d::BEBLID::create(GLOC_BEBLID_SCALE_FACTOR, n_bits);
     };
 
-    // Serialises writes to pre_snap_history_ from concurrent keyframe tasks.
-    std::mutex history_mutex;
-
     // Per-keyframe work — fully independent across keyframes.
     // Reads map_ (const after init()), GLOC_* globals (const after readParameters()),
     // undist_map_x_/y_ (const after init()), and snap_mutex_/snapped_ (via lock).
-    // Writes only kf_state (exclusively owned by this task) and pre_snap_history_
-    // (serialised through history_mutex).
+    // Writes only kf_state (exclusively owned by this task).
     auto process_kf = [&](KeyframeGlocState &kf_state) {
         // One ORB extractor per OS thread — constructed lazily on first use.
         thread_local std::unique_ptr<PointFeatureExtractor> tl_orb = make_orb_extractor();
@@ -1707,73 +1735,11 @@ void Gloc::runOrbAndDbow(std::vector<KeyframeGlocState> &working_set)
             if (GLOC_DEBUG_FOLDER.empty())
                 slot.preprocessed_image.release();
         }
-
-        // ── Pre-snap history accumulation ─────────────────────────────────────
-        // After all g slots have been DBoW-queried for this keyframe, push it
-        // into the history so future rounds have more voters for the pre-snap
-        // RANSAC. Only accumulate before snapping; cleared on snap.
-        // Disabled when GLOC_PRE_SNAP_HISTORY_SIZE == 0 (default).
-        //
-        // Serialised through history_mutex so concurrent keyframe tasks do not
-        // race on pre_snap_history_ (a std::deque owned by this Gloc instance).
-        if (GLOC_PRE_SNAP_HISTORY_SIZE > 0)
-        {
-            bool already_snapped;
-            {
-                std::lock_guard<std::mutex> lk(snap_mutex_);
-                already_snapped = snapped_;
-            }
-            if (!already_snapped)
-            {
-                std::lock_guard<std::mutex> hist_lk(history_mutex);
-
-                // Skip if this keyframe is already in the history (re-entrant rounds).
-                bool already_present = false;
-                for (const auto &h : pre_snap_history_)
-                    if (h.t_kf == kf_state.t_kf)
-                    {
-                        already_present = true;
-                        break;
-                    }
-
-                if (!already_present)
-                {
-                    // Only push if at least one module produced candidates.
-                    bool any_candidates = false;
-                    for (const auto &slot : kf_state.per_gloc)
-                        if (!slot.dbow_candidates.empty())
-                        {
-                            any_candidates = true;
-                            break;
-                        }
-
-                    if (any_candidates)
-                    {
-                        PreSnapHistoryEntry entry;
-                        entry.t_kf = kf_state.t_kf;
-                        entry.P_local = kf_state.P_local;
-                        entry.dbow_candidates.resize(kf_state.per_gloc.size());
-                        for (std::size_t g = 0; g < kf_state.per_gloc.size(); ++g)
-                            entry.dbow_candidates[g] = kf_state.per_gloc[g].dbow_candidates;
-
-                        pre_snap_history_.push_back(std::move(entry));
-
-                        // Drop oldest when over capacity.
-                        while (static_cast<int>(pre_snap_history_.size()) > GLOC_PRE_SNAP_HISTORY_SIZE)
-                            pre_snap_history_.pop_front();
-
-                        GLOC_DEBUG("[preSnapHistory] added t_kf=%.4f history_size=%zu",
-                                   kf_state.t_kf, pre_snap_history_.size());
-                    }
-                }
-            }
-        }
     }; // end process_kf lambda
 
     // ── Dispatch one task per keyframe, bounded by GLOC_NUM_THREADS ──────────
     // Each task owns its kf_state slots exclusively; map_ is read-only after
-    // init(); GLOC_* params are const globals — no shared mutable state except
-    // pre_snap_history_ (serialised through history_mutex above).
+    // init(); GLOC_* params are const globals — no shared mutable state.
     //
     // std::async(launch::async) spawns one OS thread per task regardless of
     // how many are already running.  We cap concurrency at GLOC_NUM_THREADS
@@ -1832,6 +1798,18 @@ void Gloc::runConsensusVoting(
     // For each new keyframe, find the best-scoring candidate whose implied
     // T_map_local is consistent with the majority of other keyframes via RANSAC.
     //
+    // Voter pool (per module g):
+    //   - All window keyframes (working_set), including pipeline_done ones.
+    //   - Pre-snap history entries (kf_idx=-1): keyframes that already left
+    //     the VINS window before snapping. They seed and vote in RANSAC but
+    //     are never assigned a best_train_idx. Their spatial diversity (distinct
+    //     past positions) makes the inlier count more discriminating.
+    //
+    // RANSAC inlier counting is bounded by new_kf_idxs.size() — only new
+    // keyframes count toward the threshold. pipeline_done kfs validate the
+    // hypothesis but must not inflate the count and mask a miss on new kfs.
+    // min_inliers is therefore capped at new_kf_idxs.size().
+    //
     // Pair distribution: each train image may be matched by at most one
     // keyframe. During RANSAC inlier counting, conflicts are resolved by
     // score (highest-scoring keyframe keeps the train image). During final
@@ -1840,7 +1818,6 @@ void Gloc::runConsensusVoting(
     // ─────────────────────────────────────────────────────────────────────────
 
     const int X = static_cast<int>(working_set.size());
-
     const std::size_t n_modules = working_set.empty() ? 0 : working_set[0].per_gloc.size();
 
     // ── Read T_map_local once ─────────────────────────────────────────────────
@@ -1857,19 +1834,12 @@ void Gloc::runConsensusVoting(
         }
     }
 
-    // Total voter count: window keyframes + history entries (pre-snap only).
-    // Used for the auto min_inliers threshold when the parameter is -1.
+    // ── Compute min_inliers threshold ─────────────────────────────────────────
+    // total_voters is for logging only. min_inliers is computed per-module
+    // below (after new_kf_idxs is known) and capped at new_kf_idxs.size().
     const int total_voters = snapped_local
                                  ? X
                                  : X + static_cast<int>(pre_snap_history_.size());
-
-    const int min_inliers = snapped_local
-                                ? ((GLOC_VOTE_MIN_VOTES < 0)
-                                       ? static_cast<int>(std::ceil((X - 1) / 2.0))
-                                       : GLOC_VOTE_MIN_VOTES)
-                                : ((GLOC_VOTE_MIN_VOTES_UNSNAPPED < 0)
-                                       ? static_cast<int>(std::ceil((total_voters - 1) / 2.0))
-                                       : GLOC_VOTE_MIN_VOTES_UNSNAPPED);
 
     auto train_world_pos = [&](std::size_t train_idx) -> Eigen::Vector3d {
         const colmap::Image &img = map_.images[train_idx];
@@ -1892,16 +1862,31 @@ void Gloc::runConsensusVoting(
         if (new_kf_idxs.empty())
             continue;
 
+        // min_inliers is computed per-module after new_kf_idxs is known.
+        // Inlier count is bounded by new_kf_idxs.size() (only new kfs count),
+        // so cap the threshold there to keep it always reachable.
+        const int N_new = static_cast<int>(new_kf_idxs.size());
+
+        const int min_inliers = snapped_local
+                                    ? ((GLOC_VOTE_MIN_VOTES < 0)
+                                           ? std::max(1, static_cast<int>(std::ceil((N_new - 1) / 2.0)))
+                                           : std::min(GLOC_VOTE_MIN_VOTES, N_new))
+                                    : ((GLOC_VOTE_MIN_VOTES_UNSNAPPED < 0)
+                                           ? std::max(1, static_cast<int>(std::ceil((N_new - 1) / 2.0)))
+                                           : std::min(GLOC_VOTE_MIN_VOTES_UNSNAPPED, N_new));
+
         // ── 1. Build voter pool ───────────────────────────────────────────────
         struct Cand
         {
-            int kf_idx;
-            int cand_idx;
+            int kf_idx;   // index into working_set; -1 for history entries
+            int cand_idx; // index into dbow_candidates; -1 for history entries
             Eigen::Vector3d P_local;
             Eigen::Vector3d P_world;
             double score;
         };
         std::vector<Cand> all_cands;
+
+        // Window keyframes (including pipeline_done — they vote but aren't re-assigned)
         for (int i = 0; i < X; ++i)
         {
             const auto &slot = working_set[i].per_gloc[g];
@@ -1915,9 +1900,9 @@ void Gloc::runConsensusVoting(
         }
 
         // ── 1a. Append pre-snap history voters ────────────────────────────────
-        // History entries use sentinel kf_idx=-1 so they are never touched by
-        // the assignment step — they vote in RANSAC only.
-        // cand_idx is also set to -1 (unused for history entries).
+        // History entries were pushed when keyframes left the VINS window, so
+        // they are at distinct past positions — spatially diverse from the
+        // current window cluster. kf_idx=-1 keeps them out of the assignment step.
         if (!snapped_local && GLOC_PRE_SNAP_HISTORY_SIZE > 0)
         {
             for (const auto &h : pre_snap_history_)
@@ -1930,14 +1915,15 @@ void Gloc::runConsensusVoting(
                                          train_world_pos(ti),
                                          sc});
             }
-            GLOC_DEBUG("[vote] g=%zu all_cands=%zu (window=%d history=%zu)",
-                       g, all_cands.size(), X, pre_snap_history_.size());
         }
 
-        // ── 1b'. Snapshot full candidate pool for caller visualization ─────────
-        // Collected before any distance-filter or RANSAC pruning so the caller
-        // can draw every raw DBoW3 candidate on gloc/vote_lines while !snapped_.
-        // Only populated when the caller requests it (all_cands_out != nullptr).
+        GLOC_DEBUG("[vote] g=%zu pool=%zu window=%d new=%d history=%zu total_voters=%d min_inliers=%d",
+                   g, all_cands.size(), X, N_new,
+                   pre_snap_history_.size(), total_voters, min_inliers);
+
+        // ── 1b'. Export full candidate pool for caller visualization ──────────
+        // Collected before any filtering so the caller can draw the complete
+        // DBoW3 fan (window + history) on gloc/vote_lines while !snapped_.
         if (all_cands_out != nullptr)
         {
             for (const auto &c : all_cands)
@@ -2040,9 +2026,12 @@ void Gloc::runConsensusVoting(
                 }
             }
 
+            // Count inliers among new keyframes only — pipeline_done kfs help
+            // validate the hypothesis but their stale matches must not inflate
+            // the count past min_inliers and mask a miss on the new keyframe.
             const int inlier_count = static_cast<int>(
-                std::count_if(assignment.begin(), assignment.end(),
-                              [](int v) { return v >= 0; }));
+                std::count_if(new_kf_idxs.begin(), new_kf_idxs.end(),
+                              [&](int i) { return assignment[i] >= 0; }));
 
             if (inlier_count > best_inlier_count)
             {
@@ -2054,8 +2043,8 @@ void Gloc::runConsensusVoting(
         // ── 3. Apply assignment to NEW keyframes only ─────────────────────────
         if (best_inlier_count < min_inliers)
         {
-            GLOC_DEBUG("[vote] g=%zu rejected: best inliers %d < %d",
-                       g, best_inlier_count, min_inliers);
+            GLOC_DEBUG("[vote] g=%zu rejected: best inliers %d/%d < min %d (window=%d total_voters=%d)",
+                       g, best_inlier_count, N_new, min_inliers, X, total_voters);
             for (int i : new_kf_idxs)
             {
                 working_set[i].per_gloc[g].best_train_idx = -1;
@@ -2064,12 +2053,19 @@ void Gloc::runConsensusVoting(
             continue;
         }
 
-        GLOC_DEBUG("[vote] g=%zu hypothesis: %d/%d inliers, assigning %zu new kfs",
-                   g, best_inlier_count, X, new_kf_idxs.size());
+        GLOC_DEBUG("[vote] g=%zu accepted: %d/%d new-kf inliers (window=%d total_voters=%d), assigning %d new kfs",
+                   g, best_inlier_count, N_new, X, total_voters, N_new);
 
-        // Winning translation
+        // Winning translation — prefer a new keyframe's inlier so t_win is
+        // anchored to the current query position, not a stale pipeline_done match.
+        // If no new keyframe is an inlier (shouldn't happen after the threshold
+        // check above), fall back to any window inlier.
         Eigen::Vector3d t_win = Eigen::Vector3d::Zero();
-        for (int i = 0; i < X; ++i)
+        bool t_win_found = false;
+
+        // First pass: new keyframes only
+        for (int i : new_kf_idxs)
+        {
             if (best_assignment[i] >= 0)
             {
                 const Eigen::Vector3d P_w =
@@ -2077,8 +2073,24 @@ void Gloc::runConsensusVoting(
                 t_win = snapped_local
                             ? (P_w - R_ml * working_set[i].P_local).eval()
                             : (P_w - working_set[i].P_local).eval();
+                t_win_found = true;
                 break;
             }
+        }
+        // Fallback: any window inlier
+        if (!t_win_found)
+        {
+            for (int i = 0; i < X; ++i)
+                if (best_assignment[i] >= 0)
+                {
+                    const Eigen::Vector3d P_w =
+                        train_world_pos(working_set[i].per_gloc[g].dbow_candidates[best_assignment[i]].second);
+                    t_win = snapped_local
+                                ? (P_w - R_ml * working_set[i].P_local).eval()
+                                : (P_w - working_set[i].P_local).eval();
+                    break;
+                }
+        }
 
         // ── 3a. Build claimed set for best_train_idx only ────────────────────
         // Only best_train_idx is exclusive — one keyframe per train image for
