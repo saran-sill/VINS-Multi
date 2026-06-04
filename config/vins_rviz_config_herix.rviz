@@ -457,13 +457,13 @@ Visualization Manager:
     - Class: rviz/Group
       Displays:
         - Class: rviz/MarkerArray
-          Enabled: true
+          Enabled: false
           Marker Topic: /herix/gloc/map_frustums
           Name: MapCamFrustums
           Namespaces:
-            gloc_map_frustums: true
+            {}
           Queue Size: 100
-          Value: true
+          Value: false
         - Alpha: 1
           Buffer Length: 1
           Class: rviz/Path
@@ -500,7 +500,7 @@ Visualization Manager:
           Color: 255; 255; 255
           Color Transformer: FlatColor
           Decay Time: 0
-          Enabled: true
+          Enabled: false
           Invert Rainbow: false
           Max Color: 255; 255; 255
           Min Color: 0; 0; 0
@@ -515,7 +515,7 @@ Visualization Manager:
           Unreliable: false
           Use Fixed Frame: true
           Use rainbow: false
-          Value: true
+          Value: false
         - Alpha: 1
           Arrow Length: 0.30000001192092896
           Axes Length: 0.30000001192092896
@@ -562,7 +562,7 @@ Visualization Manager:
           Marker Topic: /herix/gloc/opt_kf_status
           Name: OptKfStatus
           Namespaces:
-            {}
+            gloc_kf_status: true
           Queue Size: 100
           Value: true
         - Class: rviz/Marker
@@ -570,7 +570,7 @@ Visualization Manager:
           Marker Topic: /herix/gloc/opt_corr_lines
           Name: OptCorrLines
           Namespaces:
-            {}
+            gloc_opt_corr_lines: true
           Queue Size: 100
           Value: true
         - Angle Tolerance: 0.05000000074505806
@@ -696,7 +696,7 @@ Visualization Manager:
           Marker Topic: /herix/gloc/vote_lines
           Name: VoteLines
           Namespaces:
-            {}
+            gloc_vote_lines: true
           Queue Size: 100
           Value: true
         - Class: rviz/Marker
@@ -704,10 +704,10 @@ Visualization Manager:
           Marker Topic: /herix/gloc/corr_lines
           Name: CorrLines
           Namespaces:
-            {}
+            gloc_corr_lines: true
           Queue Size: 100
           Value: true
-        - Alpha: 0.75
+        - Alpha: 0.5
           Autocompute Intensity Bounds: true
           Autocompute Value Bounds:
             Max Value: 10
@@ -728,7 +728,7 @@ Visualization Manager:
           Queue Size: 10
           Selectable: true
           Size (Pixels): 3
-          Size (m): 0.10000000149011612
+          Size (m): 0.07500000298023224
           Style: Flat Squares
           Topic: /herix/gloc/mesh_intersect_pts
           Unreliable: false
@@ -763,7 +763,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz/Orbit
-      Distance: 67.48090362548828
+      Distance: 88.9022445678711
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
@@ -771,17 +771,17 @@ Visualization Manager:
         Value: false
       Field of View: 0.7853981852531433
       Focal Point:
-        X: 5.456567764282227
-        Y: 20.246780395507812
-        Z: -1.1938116550445557
+        X: 5.718661308288574
+        Y: 13.303624153137207
+        Z: -6.491030693054199
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.7347965240478516
+      Pitch: 1.5697963237762451
       Target Frame: <Fixed Frame>
-      Yaw: 3.5481836795806885
+      Yaw: 3.1349992752075195
     Saved: ~
 Window Geometry:
   Displays:
