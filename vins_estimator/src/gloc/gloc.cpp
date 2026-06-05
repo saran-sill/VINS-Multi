@@ -293,6 +293,124 @@ static Eigen::Matrix3d yawOnlyR(const Eigen::Matrix3d &R)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Gloc::applyKalmanUpdate
+//
+// 4-DOF scalar Kalman filter update step for T_map_local.
+//
+// Called from all three runOptimization variants after a successful solve,
+// but only when GLOC_KF_ENABLED is true and the filter is already initialised
+// (i.e. not the first snap — the first snap bypasses this and sets the state
+// directly with full trust).
+//
+// State:   [yaw, x, y, z]  treated as four independent scalar filters.
+// Process: static — no process noise, covariance unchanged between updates.
+// Measurement: optimizer output (z_R, z_t), observation matrix H = I.
+//
+// Per-DOF update (identical for each):
+//   K   = P / (P + R)          Kalman gain
+//   x  += K * (z - x)          state update
+//   P   = (1 - K) * P          covariance update
+//   P   = max(P, P_min)        floor — prevents gain from collapsing to zero
+//
+// Yaw wrapping: the innovation (z_yaw - x_yaw) is wrapped to (−π, π] before
+// applying the gain so the filter handles the ±π discontinuity correctly.
+//
+// Caller must hold snap_mutex_.
+// ─────────────────────────────────────────────────────────────────────────────
+void Gloc::applyKalmanUpdate(const Eigen::Matrix3d &z_R, const Eigen::Vector3d &z_t)
+{
+    using Vec3d = Eigen::Vector3d;
+
+    // ── Extract yaw from current state and measurement ────────────────────────
+    const double x_yaw = std::atan2(T_map_local_R_(1, 0), T_map_local_R_(0, 0));
+    const double z_yaw = std::atan2(z_R(1, 0), z_R(0, 0));
+
+    // ── Yaw update ────────────────────────────────────────────────────────────
+    {
+        const double R_yaw = GLOC_KF_MEAS_NOISE_YAW;
+        const double K_yaw = kf_P_yaw_ / (kf_P_yaw_ + R_yaw);
+
+        // Wrap innovation to (−π, π]
+        double innov = z_yaw - x_yaw;
+        while (innov > M_PI)
+            innov -= 2.0 * M_PI;
+        while (innov <= -M_PI)
+            innov += 2.0 * M_PI;
+
+        const double new_yaw = x_yaw + K_yaw * innov;
+        kf_P_yaw_ = std::max((1.0 - K_yaw) * kf_P_yaw_, GLOC_KF_MIN_COV_YAW);
+
+        T_map_local_R_ = Eigen::AngleAxisd(new_yaw, Vec3d::UnitZ()).toRotationMatrix();
+    }
+
+    // ── Translation update (x, y, z independently, same R and P) ────────────
+    {
+        const double R_t = GLOC_KF_MEAS_NOISE_T;
+        const double K_t = kf_P_t_ / (kf_P_t_ + R_t);
+
+        T_map_local_t_ = T_map_local_t_ + K_t * (z_t - T_map_local_t_);
+        kf_P_t_ = std::max((1.0 - K_t) * kf_P_t_, GLOC_KF_MIN_COV_T);
+    }
+
+    // Record the time of this optimizer update for the predict step.
+    t_last_opt_update_ = ros::Time::now();
+    t_last_predict_ = t_last_opt_update_; // reset predict anchor
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Gloc::predictKalmanCovariance
+//
+// Grow KF covariance by Q * dt to account for time elapsed since the last
+// optimizer update.  Called from Phase 1b (VINS delta) so the filter becomes
+// more receptive to the next gloc measurement after a long gap, preventing
+// VINS drift from locking out legitimate corrections.
+//
+// P_new = min(P + Q * dt, R)
+//   — capped at R so that K ≤ 0.5 on the next update (never blind trust).
+//   — floor still applied via max(P, P_min) in applyKalmanUpdate.
+//
+// No-op when:
+//   • t_last_opt_update_ is zero (no optimizer update has ever fired)
+//   • process noise is zero (user opted out)
+//   • dt ≤ 0 (clock glitch / first call)
+//
+// Caller must hold snap_mutex_.
+// ─────────────────────────────────────────────────────────────────────────────
+void Gloc::predictKalmanCovariance()
+{
+    if (t_last_opt_update_.isZero())
+        return; // optimizer has never fired — nothing to predict from
+
+    const ros::Time now = ros::Time::now();
+
+    // Use t_last_predict_ as the dt anchor so that each call advances by only
+    // the time elapsed since the previous call, not since the last optimizer
+    // update.  This makes covariance growth time-continuous and independent of
+    // how frequently Phase 1b fires.
+    if (t_last_predict_.isZero())
+    {
+        // First predict call after the initial snap — anchor from now,
+        // no growth on this call (dt = 0).
+        t_last_predict_ = now;
+        return;
+    }
+
+    const double dt = (now - t_last_predict_).toSec();
+    if (dt <= 0.0)
+        return;
+
+    t_last_predict_ = now; // advance anchor for next call
+
+    if (GLOC_KF_PROCESS_NOISE_T > 0.0)
+        kf_P_t_ = std::min(kf_P_t_ + GLOC_KF_PROCESS_NOISE_T * dt,
+                           GLOC_KF_MEAS_NOISE_T);
+
+    if (GLOC_KF_PROCESS_NOISE_YAW > 0.0)
+        kf_P_yaw_ = std::min(kf_P_yaw_ + GLOC_KF_PROCESS_NOISE_YAW * dt,
+                             GLOC_KF_MEAS_NOISE_YAW);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // CameraRingBuffer
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -936,7 +1054,16 @@ void Gloc::onSnapshotChanged(const Snapshot &snapshot)
                     // X_world = R_map * X_local + t_map
                     // After delta: X_world = R_map * (dR * X_local_old + dt) + t_map
                     //            = R_map * dR * X_local_new_approx
-                    // Simplified: just right-compose the delta
+                    // Simplified: just right-compose the delta.
+                    //
+                    // KF note: T_map_local_R_/t_ ARE the KF mean when
+                    // GLOC_KF_ENABLED is true.  The delta is deterministic
+                    // bookkeeping so it is applied identically regardless of
+                    // KF state.  Covariance is grown by Q*dt here so the
+                    // filter becomes more receptive after a long optimizer gap.
+                    if (GLOC_KF_ENABLED && kf_initialised_)
+                        predictKalmanCovariance();
+
                     T_map_local_t_ = T_map_local_t_ + T_map_local_R_ * dt_mean;
                     T_map_local_R_ = GLOC_USE_4DOF ? yawOnlyR(T_map_local_R_ * dR_mean)
                                                    : T_map_local_R_ * dR_mean;
@@ -3350,8 +3477,35 @@ bool Gloc::runOptimization_6DOF(std::vector<KeyframeGlocState> &working_set)
     {
         std::lock_guard<std::mutex> lk(snap_mutex_);
 
-        T_map_local_R_ = q_mean.toRotationMatrix();
-        T_map_local_t_ = t_acc / w_total;
+        const Mat3d opt_R = q_mean.toRotationMatrix();
+        const Vec3d opt_t = t_acc / w_total;
+
+        if (GLOC_KF_ENABLED)
+        {
+            if (!kf_initialised_)
+            {
+                // First snap: full trust — initialise filter mean directly.
+                T_map_local_R_ = opt_R;
+                T_map_local_t_ = opt_t;
+                kf_P_t_ = GLOC_KF_INIT_COV_T;
+                kf_P_yaw_ = GLOC_KF_INIT_COV_YAW;
+                kf_initialised_ = true;
+                t_last_opt_update_ = ros::Time::now();
+                t_last_predict_ = t_last_opt_update_;
+            }
+            else
+            {
+                // Subsequent snaps: KF measurement update.
+                applyKalmanUpdate(opt_R, opt_t);
+            }
+        }
+        else
+        {
+            // KF disabled: original behaviour — hard assignment.
+            T_map_local_R_ = opt_R;
+            T_map_local_t_ = opt_t;
+        }
+
         snapped_ = true;
         just_snapped_ = true;
 
@@ -4093,9 +4247,37 @@ bool Gloc::runOptimization_4DOF(std::vector<KeyframeGlocState> &working_set)
 
     {
         std::lock_guard<std::mutex> lk(snap_mutex_);
-        T_map_local_R_ = GLOC_USE_4DOF ? yawOnlyR(q_mean.toRotationMatrix())
-                                       : q_mean.toRotationMatrix();
-        T_map_local_t_ = t_acc / w_total;
+
+        const Mat3d opt_R = GLOC_USE_4DOF ? yawOnlyR(q_mean.toRotationMatrix())
+                                          : q_mean.toRotationMatrix();
+        const Vec3d opt_t = t_acc / w_total;
+
+        if (GLOC_KF_ENABLED)
+        {
+            if (!kf_initialised_)
+            {
+                // First snap: full trust — initialise filter mean directly.
+                T_map_local_R_ = opt_R;
+                T_map_local_t_ = opt_t;
+                kf_P_t_ = GLOC_KF_INIT_COV_T;
+                kf_P_yaw_ = GLOC_KF_INIT_COV_YAW;
+                kf_initialised_ = true;
+                t_last_opt_update_ = ros::Time::now();
+                t_last_predict_ = t_last_opt_update_;
+            }
+            else
+            {
+                // Subsequent snaps: KF measurement update.
+                applyKalmanUpdate(opt_R, opt_t);
+            }
+        }
+        else
+        {
+            // KF disabled: original behaviour — hard assignment.
+            T_map_local_R_ = opt_R;
+            T_map_local_t_ = opt_t;
+        }
+
         snapped_ = true;
         just_snapped_ = true;
         pre_snap_history_.clear();
@@ -5073,11 +5255,38 @@ bool Gloc::runOptimization_FixedRel(std::vector<KeyframeGlocState> &working_set,
     // ── 8. Update snapped state ───────────────────────────────────────────────
     {
         std::lock_guard<std::mutex> lk(snap_mutex_);
-        T_map_local_R_ = use_4dof ? yawOnlyR(R_ml) : R_ml;
 
-        // Z is free — use t_ml directly from the optimizer.
-        // Pitch and roll are stripped from R via yawOnlyR when use_4dof.
-        T_map_local_t_ = t_ml;
+        const Mat3d opt_R = use_4dof ? yawOnlyR(R_ml) : R_ml;
+        const Vec3d opt_t = t_ml;
+
+        if (GLOC_KF_ENABLED)
+        {
+            if (!kf_initialised_)
+            {
+                // First snap: full trust — initialise filter mean directly.
+                T_map_local_R_ = opt_R;
+                T_map_local_t_ = opt_t;
+                kf_P_t_ = GLOC_KF_INIT_COV_T;
+                kf_P_yaw_ = GLOC_KF_INIT_COV_YAW;
+                kf_initialised_ = true;
+                t_last_opt_update_ = ros::Time::now();
+                t_last_predict_ = t_last_opt_update_;
+            }
+            else
+            {
+                // Subsequent snaps: KF measurement update.
+                applyKalmanUpdate(opt_R, opt_t);
+            }
+        }
+        else
+        {
+            // KF disabled: original behaviour — hard assignment.
+            // Z is free — use t_ml directly from the optimizer.
+            // Pitch and roll are stripped from R via yawOnlyR when use_4dof.
+            T_map_local_R_ = opt_R;
+            T_map_local_t_ = opt_t;
+        }
+
         snapped_ = true;
         just_snapped_ = true;
         pre_snap_history_.clear();

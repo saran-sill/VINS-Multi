@@ -109,6 +109,17 @@ bool GLOC_PREPROCESS_SHARPEN = false;
 double GLOC_PREPROCESS_SHARPEN_SIGMA = 1.0;
 double GLOC_PREPROCESS_SHARPEN_AMOUNT = 1.5;
 
+// Kalman filter for T_map_local
+bool GLOC_KF_ENABLED = false;
+double GLOC_KF_MEAS_NOISE_T = 0.05;
+double GLOC_KF_MEAS_NOISE_YAW = 0.01;
+double GLOC_KF_INIT_COV_T = 1.0;
+double GLOC_KF_INIT_COV_YAW = 0.1;
+double GLOC_KF_MIN_COV_T = 0.005;
+double GLOC_KF_MIN_COV_YAW = 0.001;
+double GLOC_KF_PROCESS_NOISE_T = 0.001;
+double GLOC_KF_PROCESS_NOISE_YAW = 0.0002;
+
 // Helper: read a value only when the node is non-empty/non-null.
 template <typename T>
 static void read_if(const cv::FileStorage &fs,
@@ -252,6 +263,17 @@ void readParameters(std::string config_file)
     read_if(fsSettings, "gloc_preprocess_sharpen_sigma", gloc::GLOC_PREPROCESS_SHARPEN_SIGMA);
     read_if(fsSettings, "gloc_preprocess_sharpen_amount", gloc::GLOC_PREPROCESS_SHARPEN_AMOUNT);
 
+    // Kalman filter for T_map_local
+    read_if(fsSettings, "gloc_kf_enabled", gloc::GLOC_KF_ENABLED);
+    read_if(fsSettings, "gloc_kf_meas_noise_t", gloc::GLOC_KF_MEAS_NOISE_T);
+    read_if(fsSettings, "gloc_kf_meas_noise_yaw", gloc::GLOC_KF_MEAS_NOISE_YAW);
+    read_if(fsSettings, "gloc_kf_init_cov_t", gloc::GLOC_KF_INIT_COV_T);
+    read_if(fsSettings, "gloc_kf_init_cov_yaw", gloc::GLOC_KF_INIT_COV_YAW);
+    read_if(fsSettings, "gloc_kf_min_cov_t", gloc::GLOC_KF_MIN_COV_T);
+    read_if(fsSettings, "gloc_kf_min_cov_yaw", gloc::GLOC_KF_MIN_COV_YAW);
+    read_if(fsSettings, "gloc_kf_process_noise_t", gloc::GLOC_KF_PROCESS_NOISE_T);
+    read_if(fsSettings, "gloc_kf_process_noise_yaw", gloc::GLOC_KF_PROCESS_NOISE_YAW);
+
     // Validate debug folder — clear if it doesn't exist on disk so the
     // empty-string guard in saveDebugImages disables saving automatically.
     if (!gloc::GLOC_DEBUG_FOLDER.empty() &&
@@ -326,6 +348,15 @@ void readParameters(std::string config_file)
            gloc::GLOC_PREPROCESS_CLAHE_GRID_SIZE);
     printf("GLOC_PREPROCESS_CLARITY   : %d\n", gloc::GLOC_PREPROCESS_CLARITY);
     printf("GLOC_PREPROCESS_SHARPEN   : %d\n", gloc::GLOC_PREPROCESS_SHARPEN);
+    printf("GLOC_KF_ENABLED           : %d\n", gloc::GLOC_KF_ENABLED);
+    printf("GLOC_KF_MEAS_NOISE_T      : %.4f\n", gloc::GLOC_KF_MEAS_NOISE_T);
+    printf("GLOC_KF_MEAS_NOISE_YAW    : %.4f\n", gloc::GLOC_KF_MEAS_NOISE_YAW);
+    printf("GLOC_KF_INIT_COV_T        : %.4f\n", gloc::GLOC_KF_INIT_COV_T);
+    printf("GLOC_KF_INIT_COV_YAW      : %.4f\n", gloc::GLOC_KF_INIT_COV_YAW);
+    printf("GLOC_KF_MIN_COV_T         : %.4f\n", gloc::GLOC_KF_MIN_COV_T);
+    printf("GLOC_KF_MIN_COV_YAW       : %.4f\n", gloc::GLOC_KF_MIN_COV_YAW);
+    printf("GLOC_KF_PROCESS_NOISE_T   : %.6f\n", gloc::GLOC_KF_PROCESS_NOISE_T);
+    printf("GLOC_KF_PROCESS_NOISE_YAW : %.6f\n", gloc::GLOC_KF_PROCESS_NOISE_YAW);
 }
 
 }; // namespace gloc

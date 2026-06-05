@@ -348,3 +348,28 @@ gloc_min_train_inlier_ratio: -1.0   # reject train images with <30% pre-check in
 gloc_min_inlier_ratio: 0.3      # min inlier fraction to accept solution
 gloc_max_depth_m: 30.0          # inverse-depth lower bound: rho >= 1/max_depth
 gloc_min_mesh_prior_points: 30
+
+#----------------------------------------------------------------------
+# Kalman filter for T_map_local
+#----------------------------------------------------------------------
+gloc_kf_enabled: true
+
+# Measurement noise — how much to distrust a single optimizer result.
+# Larger = more smoothing, slower response to real corrections.
+gloc_kf_meas_noise_t: 0.05      # m²   — translation
+gloc_kf_meas_noise_yaw: 0.01      # rad² — yaw
+
+# Initial covariance on first snap (large = full trust of first measurement).
+gloc_kf_init_cov_t: 1.0
+gloc_kf_init_cov_yaw: 0.1
+
+# Minimum covariance floor — prevents filter going deaf during frequent updates.
+# Recommended ~10% of meas_noise.
+gloc_kf_min_cov_t: 0.005
+gloc_kf_min_cov_yaw: 0.001
+
+# Process noise rate — how fast P grows per second when optimizer is silent.
+# P is capped at meas_noise_* so K never exceeds 0.5 from a gap alone.
+# Set to 0 to disable growth (frozen covariance between optimizer updates).
+gloc_kf_process_noise_t: 0.001     # m²/s
+gloc_kf_process_noise_yaw: 0.0002    # rad²/s

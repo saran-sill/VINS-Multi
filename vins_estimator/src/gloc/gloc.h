@@ -576,10 +576,47 @@ class Gloc
     Eigen::Matrix3d T_map_local_R_{Eigen::Matrix3d::Identity()};
     Eigen::Vector3d T_map_local_t_{Eigen::Vector3d::Zero()};
 
+    // ── Kalman filter state for T_map_local ───────────────────────────────────
+    //
+    // 4-DOF independent scalar filters: one per translation axis (x, y, z)
+    // and one for yaw.  Protected by snap_mutex_ (same as T_map_local_R/t_).
+    //
+    // kf_P_t_   — diagonal covariance for x, y, z (isotropic scalar replicated)
+    // kf_P_yaw_ — scalar covariance for yaw
+    //
+    // Lifecycle:
+    //   First snap  → mean set directly; P set to GLOC_KF_INIT_COV_*
+    //   Predict     → mean += VINS delta (same as T_map_local)
+    //                 P = min(P + Q * dt, R)  — grows toward R over time,
+    //                 where dt = ros::Time::now() - t_last_opt_update_
+    //   Update      → standard scalar KF: K=P/(P+R); mean+=K*(z-mean); P=(1-K)*P
+    //   Floor       → P = max(P, GLOC_KF_MIN_COV_*)
+    //
+    // When GLOC_KF_ENABLED is false these members are never written or read.
+    double kf_P_t_{1.0};          // translation covariance (scalar, isotropic x/y/z)
+    double kf_P_yaw_{0.1};        // yaw covariance (scalar)
+    bool kf_initialised_{false};  // true after first snap initialises the filter
+    ros::Time t_last_opt_update_; // stamp of last optimizer write; zero = never
+    ros::Time t_last_predict_;    // stamp of last predictKalmanCovariance() call; zero = never
+
     // Set to true on the round that first sets snapped_. Consumed by
     // processLoop to reset pipeline_done on all carried-over keyframes so
     // their correspondences are recomputed against the fresh T_map_local.
     bool just_snapped_{false};
+
+    // Apply a single KF measurement update for the optimizer output.
+    // z_R: optimizer rotation result  (measurement, yaw extracted internally)
+    // z_t: optimizer translation result  (measurement)
+    // Writes T_map_local_R_ and T_map_local_t_ with the filtered result.
+    // Caller must hold snap_mutex_.
+    void applyKalmanUpdate(const Eigen::Matrix3d &z_R, const Eigen::Vector3d &z_t);
+
+    // Grow KF covariance by Q*dt (capped at R) to account for elapsed time
+    // since the last optimizer update.  Called from Phase 1b (VINS delta).
+    // Caller must hold snap_mutex_.
+    void predictKalmanCovariance();
+
+    // Set to true on the round that first sets snapped_. Consumed by
 
     // Set to true after the first successful snap has been processed.
     // Prevents the state_map_ reset from firing on subsequent re-snaps,

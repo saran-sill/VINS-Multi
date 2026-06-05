@@ -210,4 +210,63 @@ extern bool GLOC_PREPROCESS_SHARPEN;
 extern double GLOC_PREPROCESS_SHARPEN_SIGMA;
 extern double GLOC_PREPROCESS_SHARPEN_AMOUNT;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Kalman filter for T_map_local  (post-snap optimizer output only)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// A 4-DOF (yaw, x, y, z) scalar Kalman filter applied to the result of each
+// runOptimization call after the first snap.
+//
+// State model:
+//   Predict:    mean ← mean + VINS delta  (deterministic bookkeeping)
+//               cov  ← min(cov + Q * dt, R)
+//                       Q = process noise rate (m²/s or rad²/s)
+//                       dt = seconds since last optimizer update
+//                       Capped at R so K ≤ 0.5 on the next update (never
+//                       blind trust of a single new measurement).
+//   Update:     standard KF scalar update per DOF with measurement noise R_*
+//
+// The first snap always initialises the filter mean directly (full trust)
+// and sets P = GLOC_KF_INIT_COV_*.
+// Subsequent optimizer results are fused via the KF update step.
+//
+// VINS-delta corrections (Phase 1b) are applied to the KF mean identically
+// to how they update T_map_local today.  Covariance grows by Q*dt so that a
+// long gap without optimizer updates causes the filter to become more
+// receptive to the next measurement, guarding against VINS drift locking out
+// legitimate gloc corrections.
+//
+// When GLOC_KF_ENABLED is false the code path is byte-for-byte identical to
+// the original: T_map_local is set directly from the optimizer result.
+
+// Master switch.  Default: false (preserves existing behaviour).
+extern bool GLOC_KF_ENABLED;
+
+// Measurement noise (variance) for the optimizer output.
+// Translation components x, y, z are treated isotropically.
+// Units: m^2 for translation, rad^2 for yaw.
+extern double GLOC_KF_MEAS_NOISE_T;   // R_t   — distrust of each optimizer t result
+extern double GLOC_KF_MEAS_NOISE_YAW; // R_yaw — distrust of each optimizer yaw result
+
+// Initial covariance assigned on the first snap.
+// Large values → filter fully trusts the first measurement then converges.
+extern double GLOC_KF_INIT_COV_T;
+extern double GLOC_KF_INIT_COV_YAW;
+
+// Minimum covariance floor — prevents K collapsing to zero so legitimate
+// future corrections always have some influence.
+// Recommended: ~10–20 % of the corresponding measurement noise.
+extern double GLOC_KF_MIN_COV_T;
+extern double GLOC_KF_MIN_COV_YAW;
+
+// Process noise rate — covariance growth per second when the optimizer has
+// not fired.  Applied during each VINS-delta (Phase 1b) step, capped at the
+// measurement noise R so the filter never becomes more uncertain than a
+// single fresh measurement would resolve.
+// Set to 0 to disable growth (frozen covariance between optimizer updates).
+// Units: m²/s for translation, rad²/s for yaw.
+// Defaults: small values — meaningful growth only after many seconds of gap.
+extern double GLOC_KF_PROCESS_NOISE_T;   // Q_t
+extern double GLOC_KF_PROCESS_NOISE_YAW; // Q_yaw
+
 }; // namespace gloc
