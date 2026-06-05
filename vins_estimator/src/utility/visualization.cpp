@@ -91,11 +91,11 @@ void registerPub(ros::NodeHandle &n)
         "gloc/mesh_intersect_pts", 10);
 
     // Paths for odomimu_world and odomimu_raw
-    pub_path_odom_world = n.advertise<nav_msgs::Path>("odomimu_world_path", 1000);
-    pub_path_odom_raw = n.advertise<nav_msgs::Path>("odomimu_raw_path", 1000);
+    pub_path_odom_world = n.advertise<nav_msgs::Path>("odomimu_world_path", 1);
+    pub_path_odom_raw = n.advertise<nav_msgs::Path>("odomimu_raw_path", 1);
     path_odom_world.header.frame_id = "world";
     path_odom_raw.header.frame_id = "world";
-    pub_path = n.advertise<nav_msgs::Path>("path", 1000);
+    pub_path = n.advertise<nav_msgs::Path>("path", 1);
     pub_odometry = n.advertise<nav_msgs::Odometry>("odomimu_lowhz", 1000);
     // pub_key_poses = n.advertise<visualization_msgs::Marker>("key_poses", 1000);
     // pub_keyframe_pose = n.advertise<nav_msgs::Odometry>("keyframe_pose", 1000);
