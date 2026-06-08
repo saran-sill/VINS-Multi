@@ -340,6 +340,20 @@ static std::string config_fingerprint(const OrbConfig &c)
        << ",bsf=" << c.beblid_scale
        << ",bnb=" << c.beblid_n_bits;
 
+    // Fold folder filter into fingerprint (sorted so order in YAML doesn't matter).
+    if (!c.folder_filter.empty())
+    {
+        std::vector<std::string> sorted_filter = c.folder_filter;
+        std::sort(sorted_filter.begin(), sorted_filter.end());
+        ss << ",ff=";
+        for (std::size_t i = 0; i < sorted_filter.size(); ++i)
+        {
+            if (i > 0)
+                ss << ':';
+            ss << sorted_filter[i];
+        }
+    }
+
     const std::string s = ss.str();
     uint64_t h = 5381;
     for (unsigned char ch : s)
@@ -374,7 +388,23 @@ static void save_orb_config(const OrbConfig &c, const std::string &dir)
       << "fast_threshold=" << c.fast_threshold << "\n"
       << "use_beblid=" << (c.use_beblid ? 1 : 0) << "\n"
       << "beblid_scale=" << c.beblid_scale << "\n"
-      << "beblid_n_bits=" << c.beblid_n_bits << "\n";
+      << "beblid_n_bits=" << c.beblid_n_bits << "\n"
+      << "beblid_n_bits=" << c.beblid_n_bits << "\n"
+      << "folder_filter=";
+    if (c.folder_filter.empty())
+    {
+        f << "(all)\n";
+    }
+    else
+    {
+        for (std::size_t i = 0; i < c.folder_filter.size(); ++i)
+        {
+            if (i > 0)
+                f << ':';
+            f << c.folder_filter[i];
+        }
+        f << "\n";
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -448,8 +478,36 @@ void create_dbow3_database(const std::vector<colmap::Image> &map_images,
     if (beblid_extractor)
         printf("  [INFO] [createDB] BEBLID extractor provided — will extract BEBLID descriptors.\n");
 
+    // ── Build filtered view of map images ────────────────────────────────────
+    // If cfg.folder_filter is non-empty, only include images whose name starts
+    // with one of the listed prefixes (i.e. lives in that sub-folder).
+    std::vector<const colmap::Image *> filtered_images;
+    filtered_images.reserve(map_images.size());
+    for (const auto &img : map_images)
+    {
+        if (cfg.folder_filter.empty())
+        {
+            filtered_images.push_back(&img);
+        }
+        else
+        {
+            for (const auto &prefix : cfg.folder_filter)
+            {
+                if (img.name.compare(0, prefix.size(), prefix) == 0)
+                {
+                    filtered_images.push_back(&img);
+                    break;
+                }
+            }
+        }
+    }
+
+    if (!cfg.folder_filter.empty())
+        printf("  [INFO] [createDB] Folder filter active: %zu/%zu images retained.\n",
+               filtered_images.size(), map_images.size());
+
     // ── Extract features using the caller's extractor instances ──────────────
-    const std::size_t N = map_images.size();
+    const std::size_t N = filtered_images.size();
     train_feats_out.resize(N);
     std::vector<std::string> names(N);
     std::size_t n_ok = 0, n_fail = 0;
@@ -458,8 +516,8 @@ void create_dbow3_database(const std::vector<colmap::Image> &map_images,
 
     for (std::size_t ti = 0; ti < N; ++ti)
     {
-        names[ti] = map_images[ti].name;
-        const std::string img_path = img_folder + "/" + map_images[ti].name;
+        names[ti] = filtered_images[ti]->name;
+        const std::string img_path = img_folder + "/" + filtered_images[ti]->name;
 
         cv::Mat gray = cv::imread(img_path, cv::IMREAD_GRAYSCALE);
         if (gray.empty())

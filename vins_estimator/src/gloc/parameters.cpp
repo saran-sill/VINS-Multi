@@ -13,6 +13,7 @@ std::string GLOC_DBOW3_VOCAB;
 std::string GLOC_WORLD_TMAT_FILE;
 std::string GLOC_COLMAP_MESH_FILE;
 std::string GLOC_DBOW3_AUTO_CREATED_DB_FOLDER;
+std::vector<std::string> GLOC_COLMAP_IMG_FOLDER_FILTER;
 
 int GLOC_NUM_THREADS = 1;
 
@@ -173,6 +174,16 @@ void readParameters(std::string config_file)
 
     fsSettings["gloc_colmap_sparse_folder"] >> gloc::GLOC_COLMAP_SPARSE_FOLDER;
     fsSettings["gloc_colmap_img_folder"] >> gloc::GLOC_COLMAP_IMG_FOLDER;
+    {
+        const cv::FileNode fn = fsSettings["gloc_colmap_img_folder_filter"];
+        if (!fn.empty() && fn.isSeq())
+        {
+            gloc::GLOC_COLMAP_IMG_FOLDER_FILTER.clear();
+            for (const cv::FileNode &item : fn)
+                gloc::GLOC_COLMAP_IMG_FOLDER_FILTER.push_back(
+                    static_cast<std::string>(item));
+        }
+    }
     // fsSettings["gloc_dbow3_database"] >> gloc::GLOC_DBOW3_DATABASE;
     gloc::GLOC_DBOW3_DATABASE = "";
     fsSettings["gloc_dbow3_vocab"] >> gloc::GLOC_DBOW3_VOCAB;
@@ -293,6 +304,15 @@ void readParameters(std::string config_file)
     printf("GLOC_NUM_THREADS              : %d\n", gloc::GLOC_NUM_THREADS);
     printf("GLOC_COLMAP_SPARSE_FOLDER : %s\n", gloc::GLOC_COLMAP_SPARSE_FOLDER.c_str());
     printf("GLOC_COLMAP_IMG_FOLDER    : %s\n", gloc::GLOC_COLMAP_IMG_FOLDER.c_str());
+    if (gloc::GLOC_COLMAP_IMG_FOLDER_FILTER.empty())
+        printf("GLOC_IMG_FOLDER_FILTER    : (all folders)\n");
+    else
+    {
+        printf("GLOC_IMG_FOLDER_FILTER    :");
+        for (const auto &f : gloc::GLOC_COLMAP_IMG_FOLDER_FILTER)
+            printf(" %s", f.c_str());
+        printf("\n");
+    }
     printf("GLOC_DBOW3_DATABASE       : %s\n", gloc::GLOC_DBOW3_DATABASE.c_str());
     printf("GLOC_DBOW3_AUTO_CREATED_DB_FOLDER       : %s\n", gloc::GLOC_DBOW3_AUTO_CREATED_DB_FOLDER.c_str());
     printf("GLOC_DBOW3_VOCAB          : %s\n", gloc::GLOC_DBOW3_VOCAB.c_str());

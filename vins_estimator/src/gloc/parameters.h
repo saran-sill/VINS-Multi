@@ -18,6 +18,14 @@ extern std::string GLOC_DBOW3_DATABASE;
 extern std::string GLOC_DBOW3_VOCAB;
 extern std::string GLOC_DBOW3_AUTO_CREATED_DB_FOLDER;
 
+// Optional whitelist of image sub-folder names.
+// When non-empty, only images whose name begins with one of these prefixes
+// (i.e. lives in one of these sub-folders) are included in the map and the
+// DBoW3 database.  An empty vector means "use all images" (default).
+// Set via gloc_colmap_img_folder_filter in yaml, e.g.:
+//   gloc_colmap_img_folder_filter: [bottom_cam_left, bottom_cam_right]
+extern std::vector<std::string> GLOC_COLMAP_IMG_FOLDER_FILTER;
+
 // Optional: explicit path to world_transform.txt.
 // When empty, gloc falls back to looking for the file inside
 // GLOC_COLMAP_SPARSE_FOLDER. Set via gloc_world_tmat_file in yaml.

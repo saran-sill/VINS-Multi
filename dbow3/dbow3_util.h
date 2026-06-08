@@ -41,6 +41,10 @@ struct OrbConfig
     bool use_beblid = false;
     float beblid_scale = 1.0f;
     int beblid_n_bits = 256;
+
+    // Sorted list of sub-folder prefixes to include.  Empty = all.
+    // Included in the cache fingerprint so different filters get distinct DBs.
+    std::vector<std::string> folder_filter;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

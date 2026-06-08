@@ -5454,6 +5454,26 @@ bool Gloc::loadColmapData()
                       return a.image_id < b.image_id;
                   });
 
+        // ── Apply folder filter ───────────────────────────────────────────────
+        // Drop images that are not in the whitelist.  This must happen before
+        // apply_world_transform and before loadDatabase so that map_.images
+        // and the DBoW3 DB share the same index space.
+        if (!GLOC_COLMAP_IMG_FOLDER_FILTER.empty())
+        {
+            const std::size_t before = map_.images.size();
+            map_.images.erase(
+                std::remove_if(map_.images.begin(), map_.images.end(),
+                               [](const colmap::Image &img) {
+                                   for (const auto &prefix : GLOC_COLMAP_IMG_FOLDER_FILTER)
+                                       if (img.name.compare(0, prefix.size(), prefix) == 0)
+                                           return false; // keep
+                                   return true;          // drop
+                               }),
+                map_.images.end());
+            GLOC_INFO("[loadColmap] folder filter: kept %zu / %zu images",
+                      map_.images.size(), before);
+        }
+
         colmap::apply_world_transform(map_.images, world_transform);
 
         const auto rigs = colmap::read_rigs(colmap_dir + "/rigs.bin");
@@ -5535,6 +5555,7 @@ bool Gloc::loadDatabase()
     cfg.use_beblid = GLOC_USE_BEBLID;
     cfg.beblid_scale = static_cast<float>(GLOC_BEBLID_SCALE_FACTOR);
     cfg.beblid_n_bits = GLOC_BEBLID_N_BITS;
+    cfg.folder_filter = GLOC_COLMAP_IMG_FOLDER_FILTER;  // may be empty = all images
 
     try
     {

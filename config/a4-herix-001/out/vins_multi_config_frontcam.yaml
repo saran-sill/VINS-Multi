@@ -250,6 +250,15 @@ gloc_dbow3_auto_created_db_folder: "/mnt/EXDISK/tmp/vins-multi-auto-created-db"
 
 #======================================================
 
+# Optional: restrict DBoW3 database to a subset of image sub-folders.
+# Useful to reduce query time when only a specific camera direction is needed.
+# The filter is included in the cache fingerprint — different filter lists
+# produce distinct cached databases under gloc_dbow3_auto_created_db_folder.
+# Omit or leave empty to use all image folders (default).
+#
+# gloc_colmap_img_folder_filter: []
+gloc_colmap_img_folder_filter: [bottom_cam_left, bottom_cam_right]
+
 # gloc_debug_folder: "/mnt/EXDISK/tmp/dbg_"
 # gloc_debug_folder: "/home/a4/workspace/Arm/vins-multi-debug"
 gloc_debug_folder: ""
